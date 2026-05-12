@@ -194,7 +194,7 @@ internal sealed class GraphPimClient : IGraphPimClient
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         using var response = await SendAsync(tenantId, request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken);
     }
 
@@ -205,7 +205,7 @@ internal sealed class GraphPimClient : IGraphPimClient
             Content = JsonContent.Create(body, options: JsonOptions),
         };
         using var response = await SendAsync(tenantId, request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken);
     }
 
@@ -216,7 +216,7 @@ internal sealed class GraphPimClient : IGraphPimClient
             Content = JsonContent.Create(body, options: JsonOptions),
         };
         using var response = await SendAsync(tenantId, request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<List<T>> GetAllPagesAsync<T>(string tenantId, string firstUrl, CancellationToken cancellationToken)
@@ -228,7 +228,7 @@ internal sealed class GraphPimClient : IGraphPimClient
             cancellationToken.ThrowIfCancellationRequested();
             using var request = new HttpRequestMessage(HttpMethod.Get, next);
             using var response = await SendAsync(tenantId, request, cancellationToken);
-            response.EnsureSuccessStatusCode();
+            await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
             var page = await response.Content.ReadFromJsonAsync<ODataPage<T>>(JsonOptions, cancellationToken);
             if (page?.Value is not null)
             {
@@ -237,6 +237,35 @@ internal sealed class GraphPimClient : IGraphPimClient
             next = NormalizeNextLink(page?.NextLink);
         }
         return results;
+    }
+
+    // Microsoft Graph returns rich error JSON on 4xx/5xx — code, message,
+    // and an inner-error block. HttpResponseMessage.EnsureSuccessStatusCode
+    // throws but discards the body, so we lose the only diagnostic the
+    // service gives us. This helper preserves the body in the exception
+    // Message so the catch site can surface it to the user / log.
+    private static async Task EnsureSuccessOrThrowWithBodyAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        if (response.IsSuccessStatusCode) return;
+
+        string body;
+        try
+        {
+            body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            body = "(body unreadable)";
+        }
+
+        // Trim body to a sane length so a misbehaving service can't blow
+        // up a log line. Graph error JSON is small in practice.
+        if (body.Length > 1500) body = body[..1500] + "…(truncated)";
+
+        throw new HttpRequestException(
+            $"Graph {response.RequestMessage?.Method} {response.RequestMessage?.RequestUri} returned {(int)response.StatusCode} {response.ReasonPhrase}. Body: {body}",
+            inner: null,
+            statusCode: response.StatusCode);
     }
 
     private Task<HttpResponseMessage> SendAsync(string tenantId, HttpRequestMessage request, CancellationToken cancellationToken)

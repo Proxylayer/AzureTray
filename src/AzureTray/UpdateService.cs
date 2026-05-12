@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -32,6 +32,10 @@ public sealed class UpdateService : IUpdateService
     public string CurrentVersionDisplay =>
         _manager is { IsInstalled: true, CurrentVersion: { } v } ? v.ToString() : "dev";
 
+    public string? PendingUpdateVersion { get; private set; }
+
+    public event Action<string>? UpdateAvailable;
+
     public async Task CheckOnStartupAsync()
     {
         if (_manager is null || !_manager.IsInstalled) return;
@@ -42,7 +46,13 @@ public sealed class UpdateService : IUpdateService
             if (info is null) return;
 
             await _manager.DownloadUpdatesAsync(info);
-            _logger.LogInformation("Update {Version} downloaded; will apply on next exit.", info.TargetFullRelease.Version);
+            var version = info.TargetFullRelease.Version.ToString();
+            _logger.LogInformation("Update {Version} downloaded; will apply when the user accepts.", version);
+
+            PendingUpdateVersion = version;
+            // Fire after assignment so subscribers can read PendingUpdateVersion
+            // synchronously inside the handler.
+            UpdateAvailable?.Invoke(version);
         }
         catch (Exception ex)
         {
@@ -58,7 +68,13 @@ public sealed class UpdateService : IUpdateService
         try
         {
             var info = await _manager.CheckForUpdatesAsync();
-            if (info is null) return "Up to date.";
+            if (info is null)
+            {
+                // No new update — clear any stale pending state so the
+                // banner / notification stops surfacing.
+                PendingUpdateVersion = null;
+                return "Up to date.";
+            }
 
             await _manager.DownloadUpdatesAsync(info);
             _logger.LogInformation("Applying update {Version} and restarting.", info.TargetFullRelease.Version);

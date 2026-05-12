@@ -46,6 +46,17 @@ internal static class Program
                 .OnRestarted(v => Log.Information("Velopack: restarted into v{Version}", v))
                 .Run();
 
+            // Velopack already exits early when this invocation is a
+            // setup / update / uninstall step. Past this point we're a
+            // normal app launch — refuse to start if another instance
+            // is already running for this user.
+            using var singleInstance = new SingleInstanceLock();
+            if (!singleInstance.Acquired)
+            {
+                Log.Information("AzureTray is already running for this user; exiting without starting a second tray.");
+                return 0;
+            }
+
             using var host = BuildHost(args);
             host.Start();
 
@@ -237,6 +248,9 @@ internal static class Program
         builder.Services.AddSingleton<App>();
         builder.Services.AddSingleton<TrayIcon>();
         builder.Services.AddSingleton<IUpdateService, UpdateService>();
+        // Surfaces an ActionRequest notification with a blue "Update now"
+        // button as soon as UpdateService detects + downloads a release.
+        builder.Services.AddHostedService<Notifications.UpdateAvailableNotifier>();
         builder.Services.AddSingleton<IGraphMeClient, GraphMeClient>();
         builder.Services.AddSingleton<IGraphOrganizationClient, GraphOrganizationClient>();
         builder.Services.AddTransient<SettingsViewModel>();

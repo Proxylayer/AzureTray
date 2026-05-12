@@ -1,0 +1,117 @@
+name: Publish plugins
+
+# Plugin packages are released independently from the host:
+#   * The host's release workflow (release.yml) handles the Velopack
+#     installer + draft GitHub Release; it does NOT touch nuget.org.
+#   * This workflow handles plugin .nupkg publish. Run it manually
+#     whenever a plugin's <Version> in its csproj changes.
+#
+# Each plugin tracks its own version in its csproj. nuget.org's
+# `--skip-duplicate` makes pushing an unchanged version a no-op, so
+# selecting "all" never republishes versions that already exist.
+
+on:
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: Which package to publish
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - Contracts
+          - PIM
+          - LAPS
+
+permissions:
+  contents: read
+  id-token: write       # for attest-build-provenance
+  attestations: write   # for attest-build-provenance
+
+concurrency:
+  group: publish-plugins
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # SourceLink needs commit history
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore AzureTray.sln
+
+      - name: Build (Release)
+        run: dotnet build AzureTray.sln --configuration Release --no-restore
+
+      # Pack only the selected projects. Each csproj declares its own
+      # <Version> so no /p:Version override is passed — the package
+      # version is whatever the csproj says.
+      - name: Pack
+        shell: pwsh
+        run: |
+          $plugin = '${{ github.event.inputs.plugin }}'
+          $projects = @{
+            'Contracts' = 'src/AzureTray.Plugin.Contracts/AzureTray.Plugin.Contracts.csproj'
+            'PIM'       = 'src/AzureTray.Plugin.PIM/AzureTray.Plugin.PIM.csproj'
+            'LAPS'      = 'src/AzureTray.Plugin.LAPS/AzureTray.Plugin.LAPS.csproj'
+          }
+          $selected = if ($plugin -eq 'all') { $projects.Values } else { @($projects[$plugin]) }
+
+          if (-not (Test-Path NuGet)) { New-Item -ItemType Directory -Path NuGet | Out-Null }
+          foreach ($csproj in $selected) {
+            Write-Host "Packing $csproj …" -ForegroundColor Cyan
+            dotnet pack $csproj --configuration Release --no-build --output NuGet
+            if ($LASTEXITCODE -ne 0) { throw "dotnet pack failed for $csproj" }
+          }
+
+      - name: Upload nupkgs as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-packages
+          path: NuGet/*.nupkg
+          if-no-files-found: error
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: NuGet/*.nupkg
+
+      - name: Check NuGet config
+        id: nugetcfg
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          $enabled = -not [string]::IsNullOrWhiteSpace($env:NUGET_API_KEY)
+          "enabled=$($enabled.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          Write-Host "Push to nuget.org enabled: $enabled"
+
+      - name: Push to nuget.org
+        if: steps.nugetcfg.outputs.enabled == 'true'
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          # --skip-duplicate keeps re-runs idempotent: a plugin whose
+          # csproj version hasn't been bumped since its last publish
+          # is a no-op rather than a failure.
+          $packages = Get-ChildItem NuGet\*.nupkg | Where-Object { $_.Name -notlike '*.symbols.nupkg' }
+          foreach ($pkg in $packages) {
+            Write-Host "Pushing $($pkg.Name)…"
+            dotnet nuget push $pkg.FullName `
+              --api-key $env:NUGET_API_KEY `
+              --source https://api.nuget.org/v3/index.json `
+              --skip-duplicate
+            if ($LASTEXITCODE -ne 0) { throw "nuget push failed for $($pkg.Name)" }
+          }

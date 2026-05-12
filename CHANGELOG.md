@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-12
+
+### Added
+
+- **Single-instance enforcement.** The host now holds a per-user named mutex (`Local\Proxylayer.AzureTray.SingleInstance`); launching `AzureTray.exe` while it's already running for the same user logs and exits cleanly instead of starting a second tray icon. Crash-safe via `AbandonedMutexException` — a kill-3 leaves the next launch able to acquire.
+- **Update-available notification.** When `IUpdateService.CheckOnStartupAsync` detects a new release and finishes downloading it, the host surfaces a non-timing-out `ActionRequest` toast with a blue accent stripe and an "Update now" button. Dismissing keeps the option available via the Settings banner; clicking "Update now" applies via Velopack and restarts.
+- **Update banner in Settings.** A clickable blue banner above the cards shows when an update is pending; click to apply.
+- **Default Velopack feed URL** set to `https://github.com/Proxylayer/AzureTray/releases/latest/download` so installs pick up the latest published release automatically. Override to `""` to disable update checks.
+
+### Changed
+
+- **Plugin versions decoupled from the host.** `AzureTray.Plugin.Contracts`, `AzureTray.Plugin.PIM`, and `AzureTray.Plugin.LAPS` each declare their own `<Version>` in their csproj. Host tag-driven releases no longer republish plugin packages; a separate manual workflow ([`publish-plugins.yml`](.github/workflows/publish-plugins.yml)) handles plugin publishes. `--skip-duplicate` keeps re-runs idempotent.
+- `AzureTray.Plugin.Contracts` bumped to `0.2.1` (new types added — see below). `AzureTray.Plugin.PIM` and `AzureTray.Plugin.LAPS` remain at `0.2.0`.
+
+### Plugin contract surface (additive, no PluginApiVersion bump)
+
+- New `NotificationSeverity` enum (`Info` / `Update` / `Warning` / `Error`) on `NotificationRequest` base record. Drives the notification's accent stripe color.
+- New `ActionRequest(Title, Message, ActionLabel)` notification type for single-call-to-action prompts. Never auto-dismisses.
+- New `ActionResult(bool ActionInvoked)` distinguishes "user clicked the action" from `DismissedResult`.
+
+### Fixed
+
+- **Log Viewer wouldn't open**: `LogViewerViewModel` ctor assigned `SelectedClassOption` *before* `EntriesView` was initialised, so the partial `OnSelectedClassOptionChanged` threw NRE inside the ctor and the window never appeared. Reordered the ctor to initialise the CollectionViewSource first.
+- **PIM activation failures had no user feedback**: a failed `Activate role` click logged the error but said nothing to the user. The watcher now surfaces a red error toast with the underlying Graph/ARM error code + message, and an info toast on the happy path. Powered by a new `EnsureSuccessOrThrowWithBodyAsync` helper in both PIM HTTP clients that preserves the service's response body in the exception (the standard `EnsureSuccessStatusCode` discards it).
+- **Clipboard writes from background threads**: `HostClipboard.SetText` was failing with `ThreadStateException: Current thread must be set to single thread apartment (STA)` when invoked from a thread-pool thread (e.g. LAPS copy-password from a watcher continuation). Now marshals to the WPF dispatcher's UI thread before touching `System.Windows.Clipboard`.
+
 ## [0.2.0] — 2026-05-11
 
 ### Changed
@@ -107,6 +133,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - This release is foundation only; no features from `Azure.PIM.Tray` have been ported yet.
 
-[Unreleased]: https://github.com/Proxylayer/AzureTray/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Proxylayer/AzureTray/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Proxylayer/AzureTray/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Proxylayer/AzureTray/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Proxylayer/AzureTray/releases/tag/v0.1.0

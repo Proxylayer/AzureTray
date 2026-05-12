@@ -17,4 +17,8 @@ public sealed record ChoiceResult(string? SelectedChoice, string? OtherText) : N
 
 public sealed record TextInputResult(string Text) : NotificationResult;
 
+// Result from an ActionRequest. ActionInvoked is true when the user clicked
+// the primary action button; false when they dismissed.
+public sealed record ActionResult(bool ActionInvoked) : NotificationResult;
+
 public sealed record DismissedResult : NotificationResult;

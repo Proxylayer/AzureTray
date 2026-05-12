@@ -25,6 +25,7 @@
     <Grid Margin="{StaticResource Padding.Window}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -35,10 +36,57 @@
                    Style="{StaticResource Text.Display}"
                    Margin="0,0,0,12"/>
 
+        <!-- Update-available banner. Click anywhere on the banner to
+             apply the pending update and restart. Hidden when no update
+             is pending. Accent-blue matches the notification's accent
+             stripe so the two surfaces feel like the same affordance. -->
+        <Button Grid.Row="1"
+                Command="{Binding ApplyPendingUpdateCommand}"
+                Visibility="{Binding IsUpdateAvailable, Converter={StaticResource BoolToVisibility}}"
+                Margin="0,0,0,12"
+                Padding="0"
+                Cursor="Hand"
+                HorizontalContentAlignment="Stretch"
+                ToolTip="Click to install the update and restart.">
+            <Button.Template>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd"
+                            Background="#1F6FEB"
+                            BorderBrush="#2F7DF0"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="14,10">
+                        <ContentPresenter HorizontalAlignment="Stretch"
+                                          VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="#2F7DF0"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="#1856B8"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Button.Template>
+            <DockPanel LastChildFill="True">
+                <TextBlock DockPanel.Dock="Right"
+                           Text="Install now ›"
+                           FontWeight="SemiBold"
+                           Foreground="White"
+                           VerticalAlignment="Center"
+                           Margin="12,0,0,0"/>
+                <TextBlock Text="{Binding UpdateBannerText}"
+                           Foreground="White"
+                           VerticalAlignment="Center"
+                           TextWrapping="Wrap"/>
+            </DockPanel>
+        </Button>
+
         <!-- All configuration cards live inside a single ScrollViewer so the
              plugin section can grow with the number of installed plugins
              without pushing the version/close row off-screen. -->
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel>
 
         <!-- Combined Tenants card: existing tenants list + add-tenant action.
@@ -633,7 +681,7 @@
         </StackPanel>
         </ScrollViewer>
 
-        <StackPanel Grid.Row="2"
+        <StackPanel Grid.Row="3"
                     Orientation="Horizontal"
                     Margin="0,12,0,0">
             <TextBlock Text="{Binding VersionDisplay}"
@@ -648,7 +696,7 @@
                        Margin="12,0,0,0"/>
         </StackPanel>
 
-        <StackPanel Grid.Row="3"
+        <StackPanel Grid.Row="4"
                     Orientation="Horizontal"
                     HorizontalAlignment="Right"
                     Margin="0,12,0,0">

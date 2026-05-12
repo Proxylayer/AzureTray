@@ -24,7 +24,16 @@ public sealed partial class NotificationViewModel : ObservableObject
     public bool IsChoice => Request is ChoiceRequest;
     public bool IsTextInput => Request is TextInputRequest;
     public bool IsInformation => Request is InformationRequest;
+    public bool IsAction => Request is ActionRequest;
     public bool IsSubmittable => IsChoice || IsTextInput;
+
+    // Resolved label for the ActionRequest primary button. Null for any
+    // other request type so the XAML binding stays well-defined.
+    public string? ActionLabel => (Request as ActionRequest)?.ActionLabel;
+
+    // Drives the severity-tinted accent stripe at the top of the
+    // notification card. Mapped to brushes in NotificationWindow.xaml.
+    public NotificationSeverity Severity => Request.Severity;
 
     public IReadOnlyList<string>? Choices { get; }
     public bool AllowOther { get; }
@@ -94,6 +103,9 @@ public sealed partial class NotificationViewModel : ObservableObject
                 break;
         }
     }
+
+    [RelayCommand]
+    private void InvokeAction() => Complete(new ActionResult(ActionInvoked: true));
 
     [RelayCommand]
     private void Dismiss() => Complete(new DismissedResult());

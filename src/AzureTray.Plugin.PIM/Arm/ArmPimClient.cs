@@ -159,7 +159,7 @@ internal sealed class ArmPimClient : IArmPimClient
             Content = JsonContent.Create(body, options: JsonOptions),
         };
         using var response = await SendAsync(tenantId, request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
 
         var created = await response.Content.ReadFromJsonAsync<ArmRoleAssignmentScheduleRequest>(JsonOptions, cancellationToken);
         if (created is null)
@@ -221,7 +221,7 @@ internal sealed class ArmPimClient : IArmPimClient
             Content = JsonContent.Create(body, options: JsonOptions),
         };
         using var response = await SendAsync(tenantId, request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
             "{Decision} ARM approval {ApprovalId} stage {StageId} at {Scope} (tenant {TenantId}).",
@@ -288,7 +288,7 @@ internal sealed class ArmPimClient : IArmPimClient
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         using var response = await SendAsync(tenantId, request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken);
     }
 
@@ -313,6 +313,30 @@ internal sealed class ArmPimClient : IArmPimClient
             _ctx.ArmScope,
             request,
             cancellationToken);
+
+    // ARM returns structured JSON errors with code + message on 4xx/5xx.
+    // EnsureSuccessStatusCode would discard the body; preserve it in the
+    // exception so the call site can show the user what actually went wrong.
+    private static async Task EnsureSuccessOrThrowWithBodyAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        if (response.IsSuccessStatusCode) return;
+
+        string body;
+        try
+        {
+            body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            body = "(body unreadable)";
+        }
+        if (body.Length > 1500) body = body[..1500] + "…(truncated)";
+
+        throw new HttpRequestException(
+            $"ARM {response.RequestMessage?.Method} {response.RequestMessage?.RequestUri} returned {(int)response.StatusCode} {response.ReasonPhrase}. Body: {body}",
+            inner: null,
+            statusCode: response.StatusCode);
+    }
 
     private static string NormalizeScope(string scope)
     {

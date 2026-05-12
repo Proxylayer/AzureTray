@@ -56,8 +56,26 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private string _updateStatus = string.Empty;
 
+    // True when IUpdateService.CheckOnStartupAsync has detected (and
+    // downloaded) a newer release. Drives the blue clickable banner at
+    // the top of the Settings window. Initial value seeded from
+    // _updateService.PendingUpdateVersion in the ctor — covers the case
+    // where the update was detected before Settings was first opened.
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(UpdateBannerText))]
+    private bool _isUpdateAvailable;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(UpdateBannerText))]
+    private string? _pendingUpdateVersion;
+
+    public string UpdateBannerText => string.IsNullOrEmpty(PendingUpdateVersion)
+        ? string.Empty
+        : $"Update available: v{PendingUpdateVersion}. Click here to install and restart.";
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(CheckUpdatesCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ApplyPendingUpdateCommand))]
     private bool _isBusy;
 
     [ObservableProperty]
@@ -317,6 +335,16 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         VersionDisplay = $"Version {_updateService.CurrentVersionDisplay}";
 
+        // Seed update state from whatever the service already detected
+        // before Settings was opened — covers the case where the
+        // startup check finished before the user navigated here.
+        if (!string.IsNullOrEmpty(_updateService.PendingUpdateVersion))
+        {
+            PendingUpdateVersion = _updateService.PendingUpdateVersion;
+            IsUpdateAvailable = true;
+        }
+        _updateService.UpdateAvailable += OnUpdateAvailable;
+
         foreach (var tenant in _tenantStore.GetAll())
         {
             Tenants.Add(tenant);
@@ -324,6 +352,26 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         RefreshInstalledExtensions();
         RefreshPluginConfigs();
+    }
+
+    private void OnUpdateAvailable(string version)
+    {
+        // Marshal to the UI dispatcher because INotifyPropertyChanged
+        // subscribers (XAML bindings) must run on the WPF thread.
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess())
+        {
+            PendingUpdateVersion = version;
+            IsUpdateAvailable = true;
+        }
+        else
+        {
+            dispatcher.BeginInvoke(new Action(() =>
+            {
+                PendingUpdateVersion = version;
+                IsUpdateAvailable = true;
+            }));
+        }
     }
 
     private void RefreshPluginConfigs()
@@ -403,6 +451,28 @@ public sealed partial class SettingsViewModel : ObservableObject
             IsBusy = false;
         }
     }
+
+    // Bound to the blue update banner across the top of the Settings
+    // window. Calls into Velopack which downloads (if needed) and
+    // restarts the process into the new version. The "Restarting…"
+    // return message will only be briefly visible — the process exits
+    // shortly after.
+    [RelayCommand(CanExecute = nameof(CanApplyPendingUpdate))]
+    private async Task ApplyPendingUpdateAsync()
+    {
+        IsBusy = true;
+        UpdateStatus = "Installing update…";
+        try
+        {
+            UpdateStatus = await _updateService.CheckAndApplyAsync();
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private bool CanApplyPendingUpdate() => !IsBusy && IsUpdateAvailable;
 
     // Dispatched from the single split-button. Routes to the right async
     // action so the XAML can bind one Command + one Content regardless of

@@ -70,15 +70,16 @@ The `.editorconfig` enforces most of this. Run `dotnet format --verify-no-change
 
 These rules are configured in the GitHub UI; this document records the intent so reviewers know what to expect.
 
-## Releasing
+## Releasing the host
 
-Releases are tag-driven. To cut one:
+Host releases are tag-driven and **do not touch the plugin packages on nuget.org** — that's a separate workflow described below. To cut a host release:
 
 1. Update `CHANGELOG.md`: move entries from `[Unreleased]` to a new `[X.Y.Z]` section with today's date.
-2. Commit on `main` and push.
-3. Tag the commit: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+2. Bump `<Version>` in `Directory.Build.props` to the same `X.Y.Z`.
+3. Commit on `main` and push.
+4. Tag the commit: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
 
-The `.github/workflows/release.yml` workflow runs on tag push. It:
+The [`release.yml`](.github/workflows/release.yml) workflow runs on tag push. It:
 
 - Builds and runs the full test suite. A test failure blocks the release.
 - Publishes a self-contained `win-x64` build via `dotnet publish`.
@@ -91,9 +92,24 @@ Review the draft release on GitHub, then publish it manually. The "draft" gate i
 
 Code signing is not enabled for v0.x. Release integrity is established via GitHub's build-provenance attestation (see [SECURITY.md](SECURITY.md)).
 
-Releases are also triggerable manually from the GitHub Actions tab via `workflow_dispatch` (supply a version like `1.2.3`). The workflow creates the matching tag for you when the release is published.
+Host releases are also triggerable manually from the GitHub Actions tab via `workflow_dispatch` (supply a version like `1.2.3`). The workflow creates the matching tag for you when the release is published.
 
-The release workflow also packs `AzureTray.Plugin.Contracts`, `AzureTray.Plugin.PIM`, and `AzureTray.Plugin.LAPS` as NuGet packages and (when the `NUGET_API_KEY` repo secret is present) pushes them to nuget.org. For test-publishing prereleases from a developer machine without going through CI, use [scripts/publish-plugins-prerelease.ps1](scripts/publish-plugins-prerelease.ps1).
+## Releasing the plugin packages
+
+Plugins (`AzureTray.Plugin.Contracts`, `AzureTray.Plugin.PIM`, `AzureTray.Plugin.LAPS`) version themselves **independently** of the host — each csproj declares its own `<Version>`. This way:
+
+- Host releases that touch only the EXE don't churn nuget.org with no-op plugin re-publishes.
+- A plugin author can ship a fix on a plugin without waiting for a host release.
+- Plugin consumers pinning to `AzureTray.Plugin.PIM 0.2.0` don't see the version creep when the host goes to 0.3.0.
+
+To publish a plugin:
+
+1. Bump `<Version>` in the relevant csproj (`src/AzureTray.Plugin.Contracts/AzureTray.Plugin.Contracts.csproj`, etc.).
+2. Commit and push to `main`.
+3. Open the GitHub Actions UI → **Publish plugins** workflow → **Run workflow** → choose which package (`Contracts`, `PIM`, `LAPS`, or `all`).
+4. The workflow ([`publish-plugins.yml`](.github/workflows/publish-plugins.yml)) packs the selected csproj(s), attests build provenance, and pushes to nuget.org (when `NUGET_API_KEY` is set). `--skip-duplicate` makes pushes idempotent — selecting "all" without bumping any csproj is safe and produces no new versions.
+
+For test-publishing prereleases from a developer machine, see [scripts/publish-plugins-prerelease.ps1](scripts/publish-plugins-prerelease.ps1) — it stamps a `-preview.YYYYMMDDHHMM` suffix on top of each csproj's declared `<Version>`.
 
 ## Building a plugin for AzureTray
 

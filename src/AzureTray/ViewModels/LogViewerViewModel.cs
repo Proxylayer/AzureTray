@@ -122,23 +122,31 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
         _dispatcher = System.Windows.Application.Current?.Dispatcher
             ?? throw new InvalidOperationException("LogViewerViewModel requires a running WPF Application.");
 
-        SelectedLevel = _levelSwitch.MinimumLevel;
-        LogToDisk = _fileLoggingSwitch.Enabled;
-
-        // Seed the "(All classes)" sentinel option so the dropdown always
-        // has a value selectable even before any logs arrive.
-        ClassOptions.Add(ClassFilterOption.All);
-        SelectedClassOption = ClassFilterOption.All;
+        // CRITICAL ORDERING: initialise _viewSource + EntriesView BEFORE
+        // any [ObservableProperty] setters fire, because their partial
+        // OnXChanged methods all call EntriesView.Refresh(). Setting
+        // SelectedLevel / SelectedClassOption / etc. before EntriesView
+        // exists throws NRE inside the ctor and the Log Viewer window
+        // never opens.
 
         foreach (var entry in _buffer.Snapshot())
         {
             Entries.Add(entry);
-            EnsureClassOption(entry.Category);
         }
 
         _viewSource = new CollectionViewSource { Source = Entries };
         _viewSource.Filter += OnViewFilter;
         EntriesView = _viewSource.View;
+
+        // Seed the "(All classes)" sentinel option so the dropdown always
+        // has a value selectable even before any logs arrive. Add it BEFORE
+        // we populate per-category options so the "(All classes)" entry
+        // sorts first.
+        ClassOptions.Add(ClassFilterOption.All);
+        foreach (var entry in _buffer.Snapshot())
+        {
+            EnsureClassOption(entry.Category);
+        }
 
         // Grouped class dropdown — header shows the namespace root,
         // items show the full category. Sorted ascending.
@@ -146,6 +154,11 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
         _classOptionsSource.SortDescriptions.Add(new SortDescription(nameof(ClassFilterOption.SortKey), ListSortDirection.Ascending));
         _classOptionsSource.GroupDescriptions.Add(new PropertyGroupDescription(nameof(ClassFilterOption.Group)));
         ClassOptionsView = _classOptionsSource.View;
+
+        // Now safe to assign — every OnXChanged target is initialised.
+        SelectedLevel = _levelSwitch.MinimumLevel;
+        LogToDisk = _fileLoggingSwitch.Enabled;
+        SelectedClassOption = ClassFilterOption.All;
 
         _buffer.EntryAdded += OnEntryAdded;
     }

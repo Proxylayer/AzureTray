@@ -342,6 +342,7 @@ internal sealed class EligibleRolesWatcher
                         _context.Logger.LogError(
                             "ARM role {RoleName} on tenant {TenantId} has no scope; cannot activate.",
                             role.RoleName, _tenant.TenantId);
+                        await NotifyActivationErrorAsync(role, $"Cannot activate — the role has no ARM scope to act on.", cancellationToken).ConfigureAwait(false);
                         return;
                     }
                     if (string.IsNullOrWhiteSpace(role.EligibilityId))
@@ -349,6 +350,7 @@ internal sealed class EligibleRolesWatcher
                         _context.Logger.LogError(
                             "ARM role {RoleName} on tenant {TenantId} has no eligibility id; cannot activate.",
                             role.RoleName, _tenant.TenantId);
+                        await NotifyActivationErrorAsync(role, $"Cannot activate — the role has no eligibility id.", cancellationToken).ConfigureAwait(false);
                         return;
                     }
                     await _arm.ActivateRoleAsync(
@@ -362,6 +364,17 @@ internal sealed class EligibleRolesWatcher
                         cancellationToken).ConfigureAwait(false);
                     break;
             }
+
+            // Surface the success to the user so they know the request
+            // landed. Notification auto-dismisses (InformationRequest).
+            _ = _context.Notifier.ShowAsync(
+                new InformationRequest(
+                    Title: $"Activated {role.RoleName}",
+                    Message: $"on {role.ScopeDisplay} for {FormatDuration(duration)}.")
+                {
+                    Severity = NotificationSeverity.Info,
+                },
+                CancellationToken.None);
         }
         catch (OperationCanceledException) { /* shutdown */ }
         catch (Exception ex)
@@ -370,7 +383,46 @@ internal sealed class EligibleRolesWatcher
                 ex,
                 "Activation failed for {RoleName} on tenant {TenantId}.",
                 role.RoleName, _tenant.TenantId);
+            await NotifyActivationErrorAsync(role, ExtractReason(ex), cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private async Task NotifyActivationErrorAsync(UnifiedEligibleRole role, string reason, CancellationToken cancellationToken)
+    {
+        // Error-severity InformationRequest = red accent stripe, auto-dismiss
+        // after a few seconds. Most "what went wrong" the user needs to know
+        // is the Graph/ARM error message, which now flows through the
+        // exception thanks to EnsureSuccessOrThrowWithBodyAsync.
+        await _context.Notifier.ShowAsync(
+            new InformationRequest(
+                Title: $"Activation failed: {role.RoleName}",
+                Message: reason)
+            {
+                Severity = NotificationSeverity.Error,
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string ExtractReason(Exception ex)
+    {
+        // Strip our wrapper prefix so the user sees the underlying service
+        // error first. Body comes from EnsureSuccessOrThrowWithBodyAsync.
+        var message = ex.Message;
+        var bodyIdx = message.IndexOf("Body: ", StringComparison.Ordinal);
+        if (bodyIdx > 0)
+        {
+            var prefix = message[..bodyIdx].TrimEnd('.', ' ');
+            var body = message[(bodyIdx + "Body: ".Length)..];
+            return $"{prefix}\n\n{body}";
+        }
+        return message;
+    }
+
+    private static string FormatDuration(TimeSpan d)
+    {
+        if (d.TotalMinutes < 60) return $"{(int)d.TotalMinutes} min";
+        if (d.TotalHours < 24) return d.Minutes == 0 ? $"{(int)d.TotalHours}h" : $"{(int)d.TotalHours}h {d.Minutes}m";
+        return $"{(int)d.TotalDays}d";
     }
 
     private async Task<string?> GetPrincipalIdAsync(CancellationToken ct)

@@ -9,6 +9,11 @@
          is informational; the host gates on the in-code ITrayPlugin.ApiVersion. -->
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
 
+    <!-- Plugin version is tracked independently of the host. Bump when the
+         plugin's behaviour changes; host releases don't affect this value.
+         Publish via the workflow_dispatch trigger on publish-plugins.yml. -->
+    <Version>0.2.0</Version>
+
     <!-- See AzureTray.Plugin.PIM for rationale. Bundles transitive
          NuGet deps into the build output so they ship inside the
          .nupkg's lib/net8.0/ folder. -->

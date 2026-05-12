@@ -9,6 +9,11 @@
          is informational; the host gates on the in-code ITrayPlugin.ApiVersion. -->
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
 
+    <!-- Plugin version is tracked independently of the host. Bump when the
+         plugin's behaviour changes; host releases don't affect this value.
+         Publish via the workflow_dispatch trigger on publish-plugins.yml. -->
+    <Version>0.2.0</Version>
+
     <!-- Bundle every transitive NuGet dependency into the build output
          (and therefore into lib/net8.0/ of the .nupkg). The host's
          PluginLoadContext resolves dependencies from the plugin's
