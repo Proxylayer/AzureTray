@@ -102,14 +102,33 @@ Plugins (`AzureTray.Plugin.Contracts`, `AzureTray.Plugin.PIM`, `AzureTray.Plugin
 - A plugin author can ship a fix on a plugin without waiting for a host release.
 - Plugin consumers pinning to `AzureTray.Plugin.PIM 0.2.0` don't see the version creep when the host goes to 0.3.0.
 
-To publish a plugin:
+To publish a plugin, push a tag in the form `<plugin>-v<semver>`:
 
-1. Bump `<Version>` in the relevant csproj (`src/AzureTray.Plugin.Contracts/AzureTray.Plugin.Contracts.csproj`, etc.).
-2. Commit and push to `main`.
+```bash
+git tag -a pim-v0.3.1 -m "PIM 0.3.1"
+git push origin pim-v0.3.1
+```
 
-The [`publish-plugins.yml`](.github/workflows/publish-plugins.yml) workflow fires automatically: it uses path filters to detect which plugin folder changed in your push, packs only that csproj, attests build provenance, and pushes to nuget.org (when `NUGET_API_KEY` is set). `--skip-duplicate` makes pushes idempotent — if you forget to bump `<Version>`, the push is a no-op rather than a failure, but **your code doesn't reach nuget.org until you bump**. That's the enforcement.
+The [`publish-plugins.yml`](.github/workflows/publish-plugins.yml) workflow fires on the tag, parses out which plugin (`contracts` / `pim` / `laps`) and which version, builds + packs the plugin's csproj with `/p:Version=<version>` (overriding whatever the csproj's `<Version>` says), attests build provenance, and pushes to nuget.org (when `NUGET_API_KEY` is set). The tag is the version of record.
 
-You can also trigger the workflow manually from the GitHub Actions UI → **Publish plugins** → **Run workflow** → pick `Contracts`, `PIM`, `LAPS`, or `all`. Useful for retrying after a transient failure or republishing after a NuGet-side outage.
+Per-plugin tag prefixes mean the host can keep tagging its own `v0.2.x` releases independently — they don't collide.
+
+### Other ways to publish
+
+These exist for convenience; the tag-driven flow above is the recommended path.
+
+- **Branch push to `main` with changes inside a plugin folder.** The workflow auto-detects via path filters and packs that plugin at its current csproj `<Version>`. If the version hasn't been bumped since the last publish, `--skip-duplicate` makes the push a no-op — your code doesn't reach nuget.org until you bump. Useful if you prefer to drive everything through the csproj `<Version>` and skip tags.
+- **Manual `workflow_dispatch`.** GitHub Actions UI → **Publish plugins** → **Run workflow** → pick `Contracts` / `PIM` / `LAPS` / `all`, optionally pin a version. Useful for retrying after a transient NuGet outage or for a one-off republish.
+
+### Choosing between csproj `<Version>` and tag-driven
+
+Both work. Most plugin authors will pick one and stick with it:
+
+| If you... | Use |
+|---|---|
+| Want git history to show "this commit bumped to X.Y.Z" | Edit csproj `<Version>` and let branch-push publish |
+| Want CI to never touch the csproj and prefer a single decisive gesture | Tag-driven (`pim-vX.Y.Z`) |
+| Need a prerelease (`pim-v0.3.1-preview.1`) | Tag-driven — the workflow takes any `*-v*` tag including prerelease suffixes |
 
 For test-publishing prereleases from a developer machine, see [scripts/publish-plugins-prerelease.ps1](scripts/publish-plugins-prerelease.ps1) — it stamps a `-preview.YYYYMMDDHHMM` suffix on top of each csproj's declared `<Version>`.
 

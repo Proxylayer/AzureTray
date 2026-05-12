@@ -3,15 +3,22 @@ name: Publish plugins
 # Plugin packages are released independently from the host:
 #   * The host's release workflow (release.yml) handles the Velopack
 #     installer + draft GitHub Release; it does NOT touch nuget.org.
-#   * This workflow handles plugin .nupkg publish. Two triggers:
-#       - push to main with changes inside a plugin folder → auto-detect
-#         which plugin changed and publish only that one
-#       - workflow_dispatch → manual "publish this specific package now"
+#   * This workflow handles plugin .nupkg publish. Three triggers:
+#       - Tag push like `pim-v0.3.1` / `contracts-v0.2.2` / `laps-v1.0.0`
+#         → authoritative: builds that plugin at the tag's version
+#           (overriding the csproj <Version>) and pushes to NuGet.
+#       - Branch push to main with changes inside a plugin folder
+#         → opportunistic: builds the plugin at its csproj <Version>;
+#           --skip-duplicate makes it a no-op if the version on NuGet
+#           is already current.
+#       - workflow_dispatch → manual selector for retry / out-of-band
+#         republish.
 #
-# Each plugin tracks its own version in its csproj. nuget.org's
-# `--skip-duplicate` makes pushing an unchanged version a no-op, so a
-# code edit that forgets to bump <Version> simply doesn't ship — author
-# has to bump the csproj to actually publish.
+# Tag-driven is the recommended workflow because the tag IS the
+# version-of-record (and matches the host's tag pattern). Bumping the
+# csproj is optional and historical-only — useful for keeping the
+# checked-in state in sync with what shipped, but not required for the
+# publish itself.
 
 on:
   push:
@@ -20,10 +27,14 @@ on:
       - 'src/AzureTray.Plugin.Contracts/**'
       - 'src/AzureTray.Plugin.PIM/**'
       - 'src/AzureTray.Plugin.LAPS/**'
+    tags:
+      - 'contracts-v*'
+      - 'pim-v*'
+      - 'laps-v*'
   workflow_dispatch:
     inputs:
       plugin:
-        description: Which package to publish (used only on manual runs)
+        description: Which package to publish
         type: choice
         required: true
         default: all
@@ -32,6 +43,11 @@ on:
           - Contracts
           - PIM
           - LAPS
+      version:
+        description: Optional override (leave blank to use the csproj <Version>)
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -52,12 +68,10 @@ jobs:
         with:
           fetch-depth: 0   # SourceLink + paths-filter need history
 
-      # Per-plugin path filter. Outputs booleans we'll read below to
-      # decide which projects to pack. On workflow_dispatch the action
-      # is skipped (push event only); we fall back to the manual input.
-      - name: Detect changed plugin folders
+      # Path filter only runs for BRANCH pushes; tag pushes ignore paths.
+      - name: Detect changed plugin folders (branch push only)
         id: filter
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
         uses: dorny/paths-filter@v3
         with:
           base: ${{ github.event.before }}
@@ -69,40 +83,74 @@ jobs:
             laps:
               - 'src/AzureTray.Plugin.LAPS/**'
 
-      - name: Resolve plugin selection
+      # Resolve trigger → (selected plugins, optional version override).
+      # All three trigger modes funnel through this one step so the Pack
+      # step downstream stays trigger-agnostic.
+      - name: Resolve plugin selection + version
         id: pick
         shell: pwsh
         env:
-          IS_PUSH: ${{ github.event_name == 'push' }}
-          MANUAL: ${{ github.event.inputs.plugin }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          MANUAL_PLUGIN: ${{ github.event.inputs.plugin }}
+          MANUAL_VERSION: ${{ github.event.inputs.version }}
           CHANGED_CONTRACTS: ${{ steps.filter.outputs.contracts }}
           CHANGED_PIM: ${{ steps.filter.outputs.pim }}
           CHANGED_LAPS: ${{ steps.filter.outputs.laps }}
         run: |
           $selected = New-Object System.Collections.Generic.List[string]
-          if ($env:IS_PUSH -eq 'true') {
-            # Auto mode — include every plugin folder that changed in this push.
-            if ($env:CHANGED_CONTRACTS -eq 'true') { $selected.Add('Contracts') }
-            if ($env:CHANGED_PIM       -eq 'true') { $selected.Add('PIM') }
-            if ($env:CHANGED_LAPS      -eq 'true') { $selected.Add('LAPS') }
+          $version = ''
+
+          if ($env:EVENT_NAME -eq 'push' -and $env:REF -like 'refs/tags/*') {
+            # Tag push: parse `<plugin>-v<version>` from the tag name.
+            # The lower-case plugin id maps to the title-case csproj key
+            # via $idMap below. Anything that doesn't match the pattern
+            # is rejected loudly — the tag is meant to ship something
+            # specific; ambiguity isn't safe.
+            $tag = $env:REF -replace '^refs/tags/', ''
+            $idMap = @{ 'contracts' = 'Contracts'; 'pim' = 'PIM'; 'laps' = 'LAPS' }
+            if ($tag -match '^(?<id>contracts|pim|laps)-v(?<ver>.+)$') {
+              $selected.Add($idMap[$Matches['id']])
+              $version = $Matches['ver']
+              Write-Host "Tag-driven publish: plugin=$($selected[0]) version=$version" -ForegroundColor Cyan
+            } else {
+              throw "Tag '$tag' doesn't match expected pattern '<contracts|pim|laps>-v<version>'."
+            }
           }
-          else {
-            # Manual mode — honour the dropdown.
-            switch ($env:MANUAL) {
+          elseif ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            # Manual: honour the dropdown + optional version override.
+            switch ($env:MANUAL_PLUGIN) {
               'all'       { $selected.AddRange([string[]]@('Contracts','PIM','LAPS')) }
               'Contracts' { $selected.Add('Contracts') }
               'PIM'       { $selected.Add('PIM') }
               'LAPS'      { $selected.Add('LAPS') }
             }
+            if (-not [string]::IsNullOrWhiteSpace($env:MANUAL_VERSION)) {
+              $version = $env:MANUAL_VERSION.Trim()
+              if ($selected.Count -ne 1) {
+                throw "Version override is only valid when a single plugin is selected (got '$($env:MANUAL_PLUGIN)')."
+              }
+              Write-Host "Manual publish (override): plugin=$($selected[0]) version=$version" -ForegroundColor Cyan
+            } else {
+              Write-Host "Manual publish: [$($selected -join ', ')] at csproj <Version>" -ForegroundColor Cyan
+            }
+          }
+          else {
+            # Branch push: include every plugin folder paths-filter saw change.
+            if ($env:CHANGED_CONTRACTS -eq 'true') { $selected.Add('Contracts') }
+            if ($env:CHANGED_PIM       -eq 'true') { $selected.Add('PIM') }
+            if ($env:CHANGED_LAPS      -eq 'true') { $selected.Add('LAPS') }
+            if ($selected.Count -gt 0) {
+              Write-Host "Branch-push publish: [$($selected -join ', ')] at csproj <Version>" -ForegroundColor Cyan
+            }
           }
 
-          $list = ($selected -join ',')
-          Write-Host "Selected for publish: [$list]"
-          "selected=$list" >> $env:GITHUB_OUTPUT
+          "selected=$($selected -join ',')" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
           "any=$([bool]($selected.Count -gt 0)).ToString().ToLower()" >> $env:GITHUB_OUTPUT
 
-      # Everything below is a no-op when the selection is empty — saves
-      # restore/build time on push events that didn't touch a plugin.
+      # Everything below is a no-op when nothing was selected — saves
+      # restore/build time on branch pushes that didn't touch a plugin.
       - name: Setup .NET
         if: steps.pick.outputs.any == 'true'
         uses: actions/setup-dotnet@v4
@@ -115,13 +163,26 @@ jobs:
 
       - name: Build (Release)
         if: steps.pick.outputs.any == 'true'
-        run: dotnet build AzureTray.sln --configuration Release --no-restore
+        shell: pwsh
+        env:
+          PIN_VERSION: ${{ steps.pick.outputs.version }}
+        run: |
+          # Tag-driven and manual-override paths supply an explicit
+          # version; pass it as /p:Version so AssemblyFileVersion,
+          # AssemblyInformationalVersion, and PackageVersion all line up.
+          # Branch-push leaves the csproj <Version> as-is.
+          if ([string]::IsNullOrWhiteSpace($env:PIN_VERSION)) {
+            dotnet build AzureTray.sln --configuration Release --no-restore
+          } else {
+            dotnet build AzureTray.sln --configuration Release --no-restore /p:Version=$env:PIN_VERSION
+          }
 
       - name: Pack selected plugin(s)
         if: steps.pick.outputs.any == 'true'
         shell: pwsh
         env:
           SELECTED: ${{ steps.pick.outputs.selected }}
+          PIN_VERSION: ${{ steps.pick.outputs.version }}
         run: |
           $projects = @{
             'Contracts' = 'src/AzureTray.Plugin.Contracts/AzureTray.Plugin.Contracts.csproj'
@@ -132,8 +193,13 @@ jobs:
           if (-not (Test-Path NuGet)) { New-Item -ItemType Directory -Path NuGet | Out-Null }
           foreach ($pick in $picks) {
             $csproj = $projects[$pick]
-            Write-Host "Packing $pick ($csproj) ..." -ForegroundColor Cyan
-            dotnet pack $csproj --configuration Release --no-build --output NuGet
+            if ([string]::IsNullOrWhiteSpace($env:PIN_VERSION)) {
+              Write-Host "Packing $pick ($csproj) at csproj <Version> ..." -ForegroundColor Cyan
+              dotnet pack $csproj --configuration Release --no-build --output NuGet
+            } else {
+              Write-Host "Packing $pick ($csproj) at pinned version $env:PIN_VERSION ..." -ForegroundColor Cyan
+              dotnet pack $csproj --configuration Release --no-build --output NuGet /p:Version=$env:PIN_VERSION
+            }
             if ($LASTEXITCODE -ne 0) { throw "dotnet pack failed for $csproj" }
           }
 
@@ -168,9 +234,10 @@ jobs:
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
-          # --skip-duplicate keeps the push idempotent: a code change
-          # that didn't bump the csproj's <Version> is a no-op rather
-          # than a workflow failure.
+          # --skip-duplicate keeps the push idempotent: a branch-push run
+          # that didn't bump the csproj's <Version> is a no-op rather than
+          # a workflow failure. Tag-driven and manual-override runs are
+          # expected to be unique versions.
           $packages = Get-ChildItem NuGet\*.nupkg | Where-Object { $_.Name -notlike '*.symbols.nupkg' }
           foreach ($pkg in $packages) {
             Write-Host "Pushing $($pkg.Name)..."
