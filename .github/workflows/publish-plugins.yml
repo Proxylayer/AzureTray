@@ -3,18 +3,27 @@ name: Publish plugins
 # Plugin packages are released independently from the host:
 #   * The host's release workflow (release.yml) handles the Velopack
 #     installer + draft GitHub Release; it does NOT touch nuget.org.
-#   * This workflow handles plugin .nupkg publish. Run it manually
-#     whenever a plugin's <Version> in its csproj changes.
+#   * This workflow handles plugin .nupkg publish. Two triggers:
+#       - push to main with changes inside a plugin folder → auto-detect
+#         which plugin changed and publish only that one
+#       - workflow_dispatch → manual "publish this specific package now"
 #
 # Each plugin tracks its own version in its csproj. nuget.org's
-# `--skip-duplicate` makes pushing an unchanged version a no-op, so
-# selecting "all" never republishes versions that already exist.
+# `--skip-duplicate` makes pushing an unchanged version a no-op, so a
+# code edit that forgets to bump <Version> simply doesn't ship — author
+# has to bump the csproj to actually publish.
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/AzureTray.Plugin.Contracts/**'
+      - 'src/AzureTray.Plugin.PIM/**'
+      - 'src/AzureTray.Plugin.LAPS/**'
   workflow_dispatch:
     inputs:
       plugin:
-        description: Which package to publish
+        description: Which package to publish (used only on manual runs)
         type: choice
         required: true
         default: all
@@ -41,41 +50,95 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # SourceLink needs commit history
+          fetch-depth: 0   # SourceLink + paths-filter need history
 
+      # Per-plugin path filter. Outputs booleans we'll read below to
+      # decide which projects to pack. On workflow_dispatch the action
+      # is skipped (push event only); we fall back to the manual input.
+      - name: Detect changed plugin folders
+        id: filter
+        if: github.event_name == 'push'
+        uses: dorny/paths-filter@v3
+        with:
+          base: ${{ github.event.before }}
+          filters: |
+            contracts:
+              - 'src/AzureTray.Plugin.Contracts/**'
+            pim:
+              - 'src/AzureTray.Plugin.PIM/**'
+            laps:
+              - 'src/AzureTray.Plugin.LAPS/**'
+
+      - name: Resolve plugin selection
+        id: pick
+        shell: pwsh
+        env:
+          IS_PUSH: ${{ github.event_name == 'push' }}
+          MANUAL: ${{ github.event.inputs.plugin }}
+          CHANGED_CONTRACTS: ${{ steps.filter.outputs.contracts }}
+          CHANGED_PIM: ${{ steps.filter.outputs.pim }}
+          CHANGED_LAPS: ${{ steps.filter.outputs.laps }}
+        run: |
+          $selected = New-Object System.Collections.Generic.List[string]
+          if ($env:IS_PUSH -eq 'true') {
+            # Auto mode — include every plugin folder that changed in this push.
+            if ($env:CHANGED_CONTRACTS -eq 'true') { $selected.Add('Contracts') }
+            if ($env:CHANGED_PIM       -eq 'true') { $selected.Add('PIM') }
+            if ($env:CHANGED_LAPS      -eq 'true') { $selected.Add('LAPS') }
+          }
+          else {
+            # Manual mode — honour the dropdown.
+            switch ($env:MANUAL) {
+              'all'       { $selected.AddRange([string[]]@('Contracts','PIM','LAPS')) }
+              'Contracts' { $selected.Add('Contracts') }
+              'PIM'       { $selected.Add('PIM') }
+              'LAPS'      { $selected.Add('LAPS') }
+            }
+          }
+
+          $list = ($selected -join ',')
+          Write-Host "Selected for publish: [$list]"
+          "selected=$list" >> $env:GITHUB_OUTPUT
+          "any=$([bool]($selected.Count -gt 0)).ToString().ToLower()" >> $env:GITHUB_OUTPUT
+
+      # Everything below is a no-op when the selection is empty — saves
+      # restore/build time on push events that didn't touch a plugin.
       - name: Setup .NET
+        if: steps.pick.outputs.any == 'true'
         uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
 
       - name: Restore
+        if: steps.pick.outputs.any == 'true'
         run: dotnet restore AzureTray.sln
 
       - name: Build (Release)
+        if: steps.pick.outputs.any == 'true'
         run: dotnet build AzureTray.sln --configuration Release --no-restore
 
-      # Pack only the selected projects. Each csproj declares its own
-      # <Version> so no /p:Version override is passed — the package
-      # version is whatever the csproj says.
-      - name: Pack
+      - name: Pack selected plugin(s)
+        if: steps.pick.outputs.any == 'true'
         shell: pwsh
+        env:
+          SELECTED: ${{ steps.pick.outputs.selected }}
         run: |
-          $plugin = '${{ github.event.inputs.plugin }}'
           $projects = @{
             'Contracts' = 'src/AzureTray.Plugin.Contracts/AzureTray.Plugin.Contracts.csproj'
             'PIM'       = 'src/AzureTray.Plugin.PIM/AzureTray.Plugin.PIM.csproj'
             'LAPS'      = 'src/AzureTray.Plugin.LAPS/AzureTray.Plugin.LAPS.csproj'
           }
-          $selected = if ($plugin -eq 'all') { $projects.Values } else { @($projects[$plugin]) }
-
+          $picks = $env:SELECTED -split ',' | Where-Object { $_ }
           if (-not (Test-Path NuGet)) { New-Item -ItemType Directory -Path NuGet | Out-Null }
-          foreach ($csproj in $selected) {
-            Write-Host "Packing $csproj …" -ForegroundColor Cyan
+          foreach ($pick in $picks) {
+            $csproj = $projects[$pick]
+            Write-Host "Packing $pick ($csproj) ..." -ForegroundColor Cyan
             dotnet pack $csproj --configuration Release --no-build --output NuGet
             if ($LASTEXITCODE -ne 0) { throw "dotnet pack failed for $csproj" }
           }
 
       - name: Upload nupkgs as artifact
+        if: steps.pick.outputs.any == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: plugin-packages
@@ -83,12 +146,14 @@ jobs:
           if-no-files-found: error
 
       - name: Attest build provenance
+        if: steps.pick.outputs.any == 'true'
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: NuGet/*.nupkg
 
       - name: Check NuGet config
         id: nugetcfg
+        if: steps.pick.outputs.any == 'true'
         shell: pwsh
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
@@ -98,20 +163,25 @@ jobs:
           Write-Host "Push to nuget.org enabled: $enabled"
 
       - name: Push to nuget.org
-        if: steps.nugetcfg.outputs.enabled == 'true'
+        if: steps.pick.outputs.any == 'true' && steps.nugetcfg.outputs.enabled == 'true'
         shell: pwsh
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
-          # --skip-duplicate keeps re-runs idempotent: a plugin whose
-          # csproj version hasn't been bumped since its last publish
-          # is a no-op rather than a failure.
+          # --skip-duplicate keeps the push idempotent: a code change
+          # that didn't bump the csproj's <Version> is a no-op rather
+          # than a workflow failure.
           $packages = Get-ChildItem NuGet\*.nupkg | Where-Object { $_.Name -notlike '*.symbols.nupkg' }
           foreach ($pkg in $packages) {
-            Write-Host "Pushing $($pkg.Name)…"
+            Write-Host "Pushing $($pkg.Name)..."
             dotnet nuget push $pkg.FullName `
               --api-key $env:NUGET_API_KEY `
               --source https://api.nuget.org/v3/index.json `
               --skip-duplicate
             if ($LASTEXITCODE -ne 0) { throw "nuget push failed for $($pkg.Name)" }
           }
+
+      - name: Nothing to publish
+        if: steps.pick.outputs.any != 'true'
+        shell: pwsh
+        run: Write-Host "No plugin folder changed in this push and no manual selection — skipping." -ForegroundColor Yellow

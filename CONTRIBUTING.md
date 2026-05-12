@@ -106,8 +106,10 @@ To publish a plugin:
 
 1. Bump `<Version>` in the relevant csproj (`src/AzureTray.Plugin.Contracts/AzureTray.Plugin.Contracts.csproj`, etc.).
 2. Commit and push to `main`.
-3. Open the GitHub Actions UI → **Publish plugins** workflow → **Run workflow** → choose which package (`Contracts`, `PIM`, `LAPS`, or `all`).
-4. The workflow ([`publish-plugins.yml`](.github/workflows/publish-plugins.yml)) packs the selected csproj(s), attests build provenance, and pushes to nuget.org (when `NUGET_API_KEY` is set). `--skip-duplicate` makes pushes idempotent — selecting "all" without bumping any csproj is safe and produces no new versions.
+
+The [`publish-plugins.yml`](.github/workflows/publish-plugins.yml) workflow fires automatically: it uses path filters to detect which plugin folder changed in your push, packs only that csproj, attests build provenance, and pushes to nuget.org (when `NUGET_API_KEY` is set). `--skip-duplicate` makes pushes idempotent — if you forget to bump `<Version>`, the push is a no-op rather than a failure, but **your code doesn't reach nuget.org until you bump**. That's the enforcement.
+
+You can also trigger the workflow manually from the GitHub Actions UI → **Publish plugins** → **Run workflow** → pick `Contracts`, `PIM`, `LAPS`, or `all`. Useful for retrying after a transient failure or republishing after a NuGet-side outage.
 
 For test-publishing prereleases from a developer machine, see [scripts/publish-plugins-prerelease.ps1](scripts/publish-plugins-prerelease.ps1) — it stamps a `-preview.YYYYMMDDHHMM` suffix on top of each csproj's declared `<Version>`.
 
