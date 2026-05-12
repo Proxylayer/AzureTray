@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-05-12
+
+### Changed
+
+- **Host permission audit + restructure.** `HostRequiredPermissions` split into two layered sets:
+  - `Baseline` — `User.Read` only. What the runtime host actually exercises (sign-in identity, /me lookup, tenant display name resolution).
+  - `AdminTools` — `Application.ReadWrite.All` + `DelegatedPermissionGrant.ReadWrite.All`. Only needed by the in-app admin features (Fix Permissions, Create App Registration, App Registration search). A user who never invokes those features doesn't need them functionally.
+  - `All` = `Baseline ∪ AdminTools`, used by the aggregation that drives Create App Registration / Fix Permissions provisioning. No behavioural change vs. v0.2.1; the split makes intent legible. Plugins continue to declare their own runtime scopes via `ITrayPlugin.RequiredPermissions`.
+
+### Fixed
+
+- **Log Viewer redesign.** Replaced the `DataGrid` (which truncated "Information" to "Informatio", horizontally scrolled, and made selected rows unreadable) with a virtualized `ListBox` whose rows lead with a 3-char severity glyph (`ERR`/`WRN`/`INF`/`DBG`/`VRB`/`FTL`) and an accent-colored stripe. Messages wrap. Exception text renders inline under the message in muted monospace. Class label is right-aligned and click-to-filter. Dropped the date pickers (not useful for a 500-entry ring) and collapsed the two filter rows to one. New `LevelToGlyphConverter` + `NullToVisibilityConverter`.
+- **Host crash on shutdown.** `TrayIcon.Dispose()` called `_services.GetService<IPluginLoader>()` to unsubscribe `PluginsChanged`, but the IServiceProvider is disposed *before* singleton `Dispose()` runs. Cached the loader at `Start()` time and use that reference in `Dispose()` — no more `ObjectDisposedException` at exit (the `[FTL] Host terminated unexpectedly` entries).
+- **PIM activation 400 Bad Request.** Both `GraphPimClient.ActivateRoleAsync` and `ArmPimClient.ActivateRoleAsync` were sending `startDateTime = DateTimeOffset.UtcNow.ToString("o")`. By the time the request reached the server, that timestamp was a few hundred milliseconds in the past, and Graph/ARM 400 any schedule with a past start. Now passes `null` (omitted via `WhenWritingNull`) so the service computes the instant itself. Matches legacy `Azure.PIM.Tray` behaviour.
+- **Graph error response bodies now visible.** `AppRegistrationGraphClient` previously used `EnsureSuccessStatusCode` which discarded the response body, leaving Fix Permissions / Create App Registration failures as opaque "403 Forbidden". Now uses `EnsureSuccessOrThrowWithBodyAsync` (same pattern already in the PIM clients) so the user sees `Authorization_RequestDenied: Insufficient privileges...` and similar Graph error codes in the log.
+
 ## [0.2.1] — 2026-05-12
 
 ### Added
@@ -133,7 +149,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - This release is foundation only; no features from `Azure.PIM.Tray` have been ported yet.
 
-[Unreleased]: https://github.com/Proxylayer/AzureTray/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Proxylayer/AzureTray/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Proxylayer/AzureTray/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Proxylayer/AzureTray/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Proxylayer/AzureTray/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Proxylayer/AzureTray/releases/tag/v0.1.0

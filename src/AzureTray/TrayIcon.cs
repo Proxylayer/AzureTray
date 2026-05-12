@@ -32,6 +32,10 @@ public sealed class TrayIcon : IDisposable
     private TrayMenuWindow? _openMenu;
     private SettingsWindow? _settingsWindow;
     private LogViewerWindow? _logViewerWindow;
+    // Cached IPluginLoader resolved at Start() — Dispose can't go back to the
+    // service provider because host shutdown disposes the IServiceProvider
+    // BEFORE Dispose() is invoked on the singletons it owns.
+    private IPluginLoader? _pluginLoader;
 
     public TrayIcon(IServiceProvider services, ILogger<TrayIcon> logger)
     {
@@ -54,10 +58,13 @@ public sealed class TrayIcon : IDisposable
 
         // Re-wire MenuChanged subscriptions whenever the set of loaded plugins
         // changes so hot-installed plugins drive their busy animations through
-        // the same path as plugins loaded at startup.
-        if (_services.GetService<IPluginLoader>() is { } loader)
+        // the same path as plugins loaded at startup. Cache the loader so
+        // Dispose() can unsubscribe without going back to the (by-then-
+        // disposed) service provider.
+        _pluginLoader = _services.GetService<IPluginLoader>();
+        if (_pluginLoader is not null)
         {
-            loader.PluginsChanged += OnPluginsChanged;
+            _pluginLoader.PluginsChanged += OnPluginsChanged;
         }
     }
 
@@ -561,9 +568,10 @@ public sealed class TrayIcon : IDisposable
         UnsubscribeFromPluginMenuChanges();
         UnsubscribeFromBadgeProviders();
 
-        if (_services.GetService<IPluginLoader>() is { } loader)
+        if (_pluginLoader is not null)
         {
-            loader.PluginsChanged -= OnPluginsChanged;
+            _pluginLoader.PluginsChanged -= OnPluginsChanged;
+            _pluginLoader = null;
         }
 
         if (_openMenu is not null)

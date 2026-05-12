@@ -48,7 +48,7 @@ public sealed class AppRegistrationGraphClient
     public async Task<T?> GetAsync<T>(string tenantId, string url, CancellationToken ct)
     {
         using var response = await SendAsync(tenantId, HttpMethod.Get, url, body: null, ct);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessOrThrowWithBodyAsync(response, ct).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<T>(JsonOptions, ct);
     }
 
@@ -69,20 +69,48 @@ public sealed class AppRegistrationGraphClient
     public async Task<T?> PostAsync<T>(string tenantId, string url, object body, CancellationToken ct)
     {
         using var response = await SendAsync(tenantId, HttpMethod.Post, url, body, ct);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessOrThrowWithBodyAsync(response, ct).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<T>(JsonOptions, ct);
     }
 
     public async Task PatchAsync(string tenantId, string url, object body, CancellationToken ct)
     {
         using var response = await SendAsync(tenantId, HttpMethod.Patch, url, body, ct);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessOrThrowWithBodyAsync(response, ct).ConfigureAwait(false);
     }
 
     public async Task DeleteAsync(string tenantId, string url, CancellationToken ct)
     {
         using var response = await SendAsync(tenantId, HttpMethod.Delete, url, body: null, ct);
-        response.EnsureSuccessStatusCode();
+        await EnsureSuccessOrThrowWithBodyAsync(response, ct).ConfigureAwait(false);
+    }
+
+    // Microsoft Graph returns rich error JSON on 4xx/5xx — code, message,
+    // request-id, often a helpful inner-error block. EnsureSuccessStatusCode
+    // throws but discards the body, so the user / log sees just "403
+    // Forbidden" with no clue what scope was insufficient. This helper
+    // preserves the body in the exception Message so the caller (Settings
+    // Fix Permissions, etc.) can surface "Authorization_RequestDenied:
+    // Insufficient privileges to complete the operation." instead.
+    private static async Task EnsureSuccessOrThrowWithBodyAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        if (response.IsSuccessStatusCode) return;
+
+        string body;
+        try
+        {
+            body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            body = "(body unreadable)";
+        }
+        if (body.Length > 1500) body = body[..1500] + "…(truncated)";
+
+        throw new HttpRequestException(
+            $"Graph {response.RequestMessage?.Method} {response.RequestMessage?.RequestUri} returned {(int)response.StatusCode} {response.ReasonPhrase}. Body: {body}",
+            inner: null,
+            statusCode: response.StatusCode);
     }
 
     public async Task<HttpResponseMessage> SendAsync(

@@ -123,7 +123,13 @@ internal sealed class GraphPimClient : IGraphPimClient
             justification,
             scheduleInfo = new
             {
-                startDateTime = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+                // Pass null (omitted from the JSON by WhenWritingNull) so
+                // Graph defaults to "activate now". Sending DateTimeOffset.UtcNow
+                // here causes intermittent 400s — by the time the request
+                // lands on Graph's server, the timestamp is already in the
+                // past by network-latency milliseconds, and Graph rejects
+                // any startDateTime in the past. Matches legacy behaviour.
+                startDateTime = (string?)null,
                 expiration = new
                 {
                     type = "afterDuration",

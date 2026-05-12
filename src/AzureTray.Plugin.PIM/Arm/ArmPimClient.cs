@@ -144,7 +144,12 @@ internal sealed class ArmPimClient : IArmPimClient
                     : linkedRoleEligibilityScheduleId,
                 scheduleInfo = new
                 {
-                    startDateTime = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+                    // See GraphPimClient.ActivateRoleAsync — sending a UtcNow
+                    // timestamp here is racy because by the time ARM
+                    // evaluates the request, the moment is already in the
+                    // past and ARM rejects past start times. Null (omitted
+                    // via WhenWritingNull) means "start now".
+                    startDateTime = (string?)null,
                     expiration = new
                     {
                         type = "AfterDuration",

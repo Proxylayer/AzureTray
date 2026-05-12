@@ -1,11 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Specialized;
 using System.Globalization;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Media;
 using AzureTray.Logging;
 using AzureTray.Shell;
 using AzureTray.ViewModels;
@@ -43,9 +42,9 @@ public partial class LogViewerWindow : Window
         if (!_viewModel.AutoScroll) return;
         if (e.Action != NotifyCollectionChangedAction.Add) return;
 
-        // Scroll to whatever the filtered+sorted view currently considers last.
-        // Hop to the dispatcher's Background priority so the grid finishes
-        // realizing the new row before we try to scroll to it.
+        // Wait for the ListBox to realise the new row before scrolling, so
+        // ScrollIntoView lands on the right element. Background priority
+        // fires after layout / item containers materialise.
         Dispatcher.BeginInvoke(new Action(() =>
         {
             var view = _viewModel.EntriesView;
@@ -53,46 +52,51 @@ public partial class LogViewerWindow : Window
             foreach (var item in view) last = item;
             if (last is not null)
             {
-                EntriesGrid.ScrollIntoView(last);
+                EntriesList.ScrollIntoView(last);
             }
         }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
     private void CloseClick(object sender, RoutedEventArgs e) => Close();
 
-    // WPF's DataGrid doesn't change selection on right-click by default, so the
-    // ContextMenu would operate on whichever cell was last selected. Walk up
-    // from the click target to the System.Windows.Controls.DataGridCell, select + focus it, so Copy
-    // cell / Copy row always act on what the user actually clicked.
-    private void EntriesGrid_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    // Right-clicking anywhere inside a ListBoxItem should select that row
+    // first so the context menu's Copy commands act on what the user
+    // pointed at — not on whichever row was last clicked.
+    protected override void OnPreviewMouseRightButtonDown(MouseButtonEventArgs e)
     {
-        DependencyObject? element = e.OriginalSource as DependencyObject;
-        while (element is not null && element is not System.Windows.Controls.DataGridCell)
+        base.OnPreviewMouseRightButtonDown(e);
+        if (e.OriginalSource is DependencyObject element)
         {
-            element = VisualTreeHelper.GetParent(element);
-        }
-        if (element is System.Windows.Controls.DataGridCell cell)
-        {
-            EntriesGrid.CurrentCell = new System.Windows.Controls.DataGridCellInfo(cell.DataContext, cell.Column);
-            cell.Focus();
-        }
-    }
-
-    private void CopyCellClick(object sender, RoutedEventArgs e)
-    {
-        var cell = EntriesGrid.CurrentCell;
-        if (cell.Column is null || cell.Item is not LogEntry entry) return;
-        var text = ExtractCellText(entry, cell.Column);
-        if (!string.IsNullOrEmpty(text))
-        {
-            SafeSetClipboard(text);
+            var item = FindAncestor<ListBoxItem>(element);
+            if (item is not null)
+            {
+                item.IsSelected = true;
+            }
         }
     }
 
     private void CopyRowClick(object sender, RoutedEventArgs e)
     {
-        if (EntriesGrid.CurrentItem is not LogEntry entry) return;
+        if (EntriesList.SelectedItem is not LogEntry entry) return;
         SafeSetClipboard(FormatRow(entry));
+    }
+
+    private void CopyMessageClick(object sender, RoutedEventArgs e)
+    {
+        if (EntriesList.SelectedItem is not LogEntry entry) return;
+        if (!string.IsNullOrEmpty(entry.Message))
+        {
+            SafeSetClipboard(entry.Message);
+        }
+    }
+
+    private void CopyExceptionClick(object sender, RoutedEventArgs e)
+    {
+        if (EntriesList.SelectedItem is not LogEntry entry) return;
+        if (entry.Exception is { } ex)
+        {
+            SafeSetClipboard(ex.ToString());
+        }
     }
 
     private void CopyAllRowsClick(object sender, RoutedEventArgs e)
@@ -121,14 +125,16 @@ public partial class LogViewerWindow : Window
         return entry.Exception is null ? line : $"{line}{Environment.NewLine}{entry.Exception}";
     }
 
-    private static string? ExtractCellText(LogEntry entry, DataGridColumn column) => column.SortMemberPath switch
+    private static T? FindAncestor<T>(DependencyObject? start) where T : DependencyObject
     {
-        nameof(LogEntry.Timestamp) => entry.Timestamp.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture),
-        nameof(LogEntry.Level) => entry.Level.ToString(),
-        nameof(LogEntry.Message) => entry.Message,
-        nameof(LogEntry.Category) => entry.Category,
-        _ => null,
-    };
+        var current = start;
+        while (current is not null)
+        {
+            if (current is T match) return match;
+            current = System.Windows.Media.VisualTreeHelper.GetParent(current);
+        }
+        return null;
+    }
 
     // Clipboard.SetText throws on the rare COM race when something else is
     // holding it open. The Log Viewer is a non-critical surface — swallow it

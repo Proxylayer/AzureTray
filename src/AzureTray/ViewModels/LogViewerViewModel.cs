@@ -46,22 +46,6 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _logToDisk;
 
-    // Timestamp filter — both bounds optional. When a date is set, the
-    // paired time text refines it; an empty time defaults to the start
-    // of day (From) or the end of day (To). When the date is null, the
-    // bound is ignored entirely.
-    [ObservableProperty]
-    private DateTime? _fromDate;
-
-    [ObservableProperty]
-    private string _fromTime = string.Empty;
-
-    [ObservableProperty]
-    private DateTime? _toDate;
-
-    [ObservableProperty]
-    private string _toTime = string.Empty;
-
     // Type filter: list of strings including "(All types)" as the first
     // option. ComboBox binds to SelectedTypeFilter; MatchesFilter parses
     // it back to LogEventLevel.
@@ -176,13 +160,21 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
         _logger.LogInformation("Log-to-disk {State}", value ? "enabled" : "disabled");
     }
 
-    partial void OnFromDateChanged(DateTime? value) => EntriesView.Refresh();
-    partial void OnFromTimeChanged(string value) => EntriesView.Refresh();
-    partial void OnToDateChanged(DateTime? value) => EntriesView.Refresh();
-    partial void OnToTimeChanged(string value) => EntriesView.Refresh();
     partial void OnSelectedTypeFilterChanged(string value) => EntriesView.Refresh();
     partial void OnMessageFilterChanged(string value) => EntriesView.Refresh();
     partial void OnSelectedClassOptionChanged(ClassFilterOption? value) => EntriesView.Refresh();
+
+    // Wired to "click the class name on a row to filter by it". Saves the
+    // user from hunting through the Class dropdown when they've already
+    // spotted the source they care about in the visible log lines.
+    [RelayCommand]
+    private void FilterByCategory(string? category)
+    {
+        if (string.IsNullOrWhiteSpace(category)) return;
+        var option = ClassOptions.FirstOrDefault(o =>
+            string.Equals(o.Category, category, StringComparison.Ordinal));
+        if (option is not null) SelectedClassOption = option;
+    }
 
     [RelayCommand]
     private void ClearLog()
@@ -204,10 +196,6 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void ClearFilters()
     {
-        FromDate = null;
-        FromTime = string.Empty;
-        ToDate = null;
-        ToTime = string.Empty;
         SelectedTypeFilter = AllTypesLabel;
         MessageFilter = string.Empty;
         SelectedClassOption = ClassFilterOption.All;
@@ -248,20 +236,6 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
 
     private bool MatchesFilter(LogEntry entry)
     {
-        // Timestamp lower bound.
-        if (FromDate is { } fromDate)
-        {
-            var from = CombineDateAndTime(fromDate, FromTime, endOfDay: false);
-            if (entry.Timestamp < from) return false;
-        }
-
-        // Timestamp upper bound.
-        if (ToDate is { } toDate)
-        {
-            var to = CombineDateAndTime(toDate, ToTime, endOfDay: true);
-            if (entry.Timestamp > to) return false;
-        }
-
         // Type filter.
         if (!string.Equals(SelectedTypeFilter, AllTypesLabel, StringComparison.Ordinal)
             && Enum.TryParse<LogEventLevel>(SelectedTypeFilter, out var levelFilter)
@@ -270,14 +244,15 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
             return false;
         }
 
-        // Message search.
+        // Message search. Searches both the message body and the exception
+        // text so a user typing "403" or "TimeoutException" finds the right
+        // row whether the term landed in the formatted message or the
+        // attached exception.
         if (!string.IsNullOrEmpty(MessageFilter))
         {
-            if (string.IsNullOrEmpty(entry.Message)) return false;
-            if (entry.Message.IndexOf(MessageFilter, StringComparison.OrdinalIgnoreCase) < 0)
-            {
-                return false;
-            }
+            var inMessage = entry.Message?.IndexOf(MessageFilter, StringComparison.OrdinalIgnoreCase) >= 0;
+            var inException = entry.Exception?.ToString().IndexOf(MessageFilter, StringComparison.OrdinalIgnoreCase) >= 0;
+            if (!inMessage && !inException) return false;
         }
 
         // Class filter.
@@ -290,30 +265,6 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
         }
 
         return true;
-    }
-
-    // Combines the date part with the user-typed time. Accepts "HH:mm",
-    // "HH:mm:ss", and "HH:mm:ss.fff". Falls back to start-of-day or
-    // end-of-day when the time is unparseable.
-    private static DateTimeOffset CombineDateAndTime(DateTime date, string timeText, bool endOfDay)
-    {
-        var basePart = new DateTime(date.Year, date.Month, date.Day, 0, 0, 0, DateTimeKind.Local);
-
-        if (string.IsNullOrWhiteSpace(timeText))
-        {
-            return endOfDay
-                ? new DateTimeOffset(basePart.AddDays(1).AddTicks(-1))
-                : new DateTimeOffset(basePart);
-        }
-
-        if (TimeSpan.TryParse(timeText.Trim(), CultureInfo.InvariantCulture, out var parsed))
-        {
-            return new DateTimeOffset(basePart + parsed);
-        }
-
-        return endOfDay
-            ? new DateTimeOffset(basePart.AddDays(1).AddTicks(-1))
-            : new DateTimeOffset(basePart);
     }
 
     private void OnEntryAdded(LogEntry entry)
