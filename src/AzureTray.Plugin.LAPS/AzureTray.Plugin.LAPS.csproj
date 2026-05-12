@@ -1,0 +1,45 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>AzureTray.Plugin.LAPS</RootNamespace>
+    <AssemblyName>AzureTray.Plugin.LAPS</AssemblyName>
+
+    <!-- Plugins must declare ApiVersion = PluginApiVersion.Current. AssemblyVersion
+         is informational; the host gates on the in-code ITrayPlugin.ApiVersion. -->
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+
+    <!-- See AzureTray.Plugin.PIM for rationale. Bundles transitive
+         NuGet deps into the build output so they ship inside the
+         .nupkg's lib/net8.0/ folder. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+
+    <IsPackable>true</IsPackable>
+    <PackageId>AzureTray.Plugin.LAPS</PackageId>
+    <PackageDescription>LAPS (Local Administrator Password Solution) plugin for AzureTray. Retrieves passwords for Entra-joined devices via Microsoft Graph from the system tray.</PackageDescription>
+    <!-- See AzureTray.Plugin.PIM for the 'proxylayer.azuretray-plugin'
+         discovery tag rationale. -->
+    <PackageTags>proxylayer.azuretray-plugin;proxylayer.azuretray;laps;entra</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Host provides AzureTray.Plugin.Contracts at runtime; omit from
+         the .nuspec so consumers don't pull a duplicate. -->
+    <ProjectReference Include="..\AzureTray.Plugin.Contracts\AzureTray.Plugin.Contracts.csproj"
+                      PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AzureTray.Tests" />
+    <InternalsVisibleTo Include="DynamicProxyGenAssembly2" />
+  </ItemGroup>
+
+  <!-- See AzureTray.Plugin.PIM for the rationale. Plugin install is
+       user-driven via the Settings UI; no auto-deploy on build. -->
+
+</Project>

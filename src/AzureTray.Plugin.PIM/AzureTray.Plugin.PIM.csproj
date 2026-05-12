@@ -1,0 +1,55 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>AzureTray.Plugin.PIM</RootNamespace>
+    <AssemblyName>AzureTray.Plugin.PIM</AssemblyName>
+
+    <!-- Plugins must declare ApiVersion = PluginApiVersion.Current. AssemblyVersion
+         is informational; the host gates on the in-code ITrayPlugin.ApiVersion. -->
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+
+    <!-- Bundle every transitive NuGet dependency into the build output
+         (and therefore into lib/net8.0/ of the .nupkg). The host's
+         PluginLoadContext resolves dependencies from the plugin's
+         install folder, so shipping them in the same package is the
+         path to "plugins can have their own deps". One line for plugin
+         authors, no manual zip step. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+
+    <IsPackable>true</IsPackable>
+    <PackageId>AzureTray.Plugin.PIM</PackageId>
+    <PackageDescription>PIM (Privileged Identity Management) plugin for AzureTray. Drives interactive Entra ID + Azure RBAC approvals, eligible-role activation, and active-role grayout from the system tray.</PackageDescription>
+    <!-- 'proxylayer.azuretray-plugin' is the discovery tag the host's
+         in-app plugin browser queries on nuget.org. The proxylayer prefix
+         reserves the tag namespace; community plugins should carry the
+         same tag to be discoverable. -->
+    <PackageTags>proxylayer.azuretray-plugin;proxylayer.azuretray;pim;entra;rbac</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The host loads its own copy of AzureTray.Plugin.Contracts into the
+         plugin's collectible AssemblyLoadContext; the plugin package
+         should NOT carry a transitive dependency on the contracts package,
+         since that would cause duplicate type loads. PrivateAssets="all"
+         keeps the project reference but omits it from the .nuspec. -->
+    <ProjectReference Include="..\AzureTray.Plugin.Contracts\AzureTray.Plugin.Contracts.csproj"
+                      PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AzureTray.Tests" />
+    <!-- NSubstitute uses Castle DynamicProxy, which needs visibility to proxy internal interfaces. -->
+    <InternalsVisibleTo Include="DynamicProxyGenAssembly2" />
+  </ItemGroup>
+
+  <!-- Plugin install is user-driven via Settings → Browse online plugins
+       (NuGet tag search) or Install from file. No auto-deploy here on
+       build — keeps dev iteration honest about how production behaves. -->
+
+</Project>

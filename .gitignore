@@ -1,0 +1,64 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Dd]ebug/
+[Rr]elease/
+[Dd]ebugPublic/
+[Bb]uild/
+[Bb]uilds/
+artifacts/
+publish/
+
+# Test artifacts
+TestResults/
+[Tt]est[Rr]esult*/
+coverage*.xml
+coverage*.json
+*.coverage
+*.coveragexml
+.coverlet/
+
+# Velopack output
+Releases/
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.swp
+
+# Rider
+_ReSharper*/
+*.DotSettings.user
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Logs from local runs
+*.log
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+project.lock.json
+project.fragment.lock.json
+**/Properties/launchSettings.json
+
+# Local override config — must not be committed
+src/AzureTray/appsettings.Development.json
+src/AzureTray/appsettings.Local.json
+
+# Secrets — never commit
+*.pfx
+*.p12
+*.pem
+*.key
+secrets.json

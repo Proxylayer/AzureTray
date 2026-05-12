@@ -1,0 +1,661 @@
+﻿<Window x:Class="AzureTray.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="{Binding WindowTitle}"
+        Width="640" Height="780"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        Background="{DynamicResource Brush.Surface.Base}"
+        Foreground="{DynamicResource Brush.Text.Primary}"
+        FontFamily="{DynamicResource Font.Family.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        TextOptions.TextFormattingMode="Display"
+        TextOptions.TextRenderingMode="ClearType">
+    <Window.Resources>
+        <!-- Right-aligned form label. Keeps a fixed column width so all labels
+             stack flush with the inputs to their right. -->
+        <Style x:Key="FormLabel" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource Brush.Text.Secondary}"/>
+            <Setter Property="HorizontalAlignment" Value="Right"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,3,12,3"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="{StaticResource Padding.Window}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="Settings"
+                   Style="{StaticResource Text.Display}"
+                   Margin="0,0,0,12"/>
+
+        <!-- All configuration cards live inside a single ScrollViewer so the
+             plugin section can grow with the number of installed plugins
+             without pushing the version/close row off-screen. -->
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel>
+
+        <!-- Combined Tenants card: existing tenants list + add-tenant action.
+             The list renders only when there are tenants; otherwise an
+             empty-state hint takes its place so first-launch users see the
+             section and understand what to do. -->
+        <Border Style="{StaticResource Card}">
+            <StackPanel>
+                <TextBlock Text="Tenants"
+                           Style="{StaticResource Text.Subheading}"
+                           Margin="0,0,0,8"/>
+
+                <ItemsControl ItemsSource="{Binding Tenants}"
+                              Visibility="{Binding Tenants.Count, Converter={StaticResource CountToVisibilityConverter}}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <!-- Left side: tenant identity. Dimmed when
+                                     the tenant is in "Disabled" state so the
+                                     user can see at a glance which entries
+                                     are inactive and need a sign-in. -->
+                                <StackPanel Grid.Column="0">
+                                    <StackPanel.Style>
+                                        <Style TargetType="StackPanel">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding ProbeDisabled}" Value="True">
+                                                    <Setter Property="Opacity" Value="0.55"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </StackPanel.Style>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                                        <TextBlock Text="  (disabled)"
+                                                   FontStyle="Italic"
+                                                   Style="{StaticResource Text.Muted}"
+                                                   VerticalAlignment="Center"
+                                                   Visibility="{Binding ProbeDisabled, Converter={StaticResource BoolToVisibility}}"/>
+                                    </StackPanel>
+                                    <TextBlock Text="{Binding TenantId}" Style="{StaticResource Text.Muted}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                    <!-- "Sign in" appears only for disabled tenants.
+                                         Successful sign-in clears ProbeDisabled and
+                                         the button collapses on its own. -->
+                                    <Button Content="Sign in"
+                                            Margin="0,0,8,0"
+                                            ToolTip="Sign in to this tenant via the broker. On success the tenant is re-enabled and plugins resume polling."
+                                            Visibility="{Binding ProbeDisabled, Converter={StaticResource BoolToVisibility}}"
+                                            Command="{Binding DataContext.SignInToTenantCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                            CommandParameter="{Binding}"/>
+                                    <!-- Action buttons only make sense for active
+                                         tenants. Hide them while disabled so the
+                                         user must sign in first. -->
+                                    <Button Content="Fix permissions"
+                                            Margin="0,0,8,0"
+                                            ToolTip="Replace required scopes &amp; admin-consent matching the host + loaded plugins. Requires Global Administrator. Disabled when the tenant has no dedicated app registration.">
+                                        <Button.Style>
+                                            <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding ProbeDisabled}" Value="False"/>
+                                                            <Condition Binding="{Binding DataContext.IsAdminMode, RelativeSource={RelativeSource AncestorType=Window}}" Value="True"/>
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </MultiDataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Button.Style>
+                                        <Button.Command>
+                                            <Binding Path="DataContext.FixPermissionsCommand" RelativeSource="{RelativeSource AncestorType=Window}"/>
+                                        </Button.Command>
+                                        <Button.CommandParameter>
+                                            <Binding/>
+                                        </Button.CommandParameter>
+                                    </Button>
+                                    <Button Content="✚ App reg"
+                                            Margin="0,0,8,0"
+                                            ToolTip="Create a brand-new app registration (single-tenant public client) named per appsettings.json, pre-populated with all host + plugin scopes and admin-consented. Disabled when the tenant already has a dedicated app registration.">
+                                        <Button.Style>
+                                            <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding ProbeDisabled}" Value="False"/>
+                                                            <Condition Binding="{Binding DataContext.IsAdminMode, RelativeSource={RelativeSource AncestorType=Window}}" Value="True"/>
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </MultiDataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Button.Style>
+                                        <Button.Command>
+                                            <Binding Path="DataContext.CreateAppRegistrationCommand" RelativeSource="{RelativeSource AncestorType=Window}"/>
+                                        </Button.Command>
+                                        <Button.CommandParameter>
+                                            <Binding/>
+                                        </Button.CommandParameter>
+                                    </Button>
+                                    <Button Content="Edit"
+                                            Margin="0,0,8,0"
+                                            ToolTip="Pre-fills the manual form below with this tenant's display name and client id so you can change them. Tenant ID itself is locked.">
+                                        <Button.Style>
+                                            <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding ProbeDisabled}" Value="True">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Button.Style>
+                                        <Button.Command>
+                                            <Binding Path="DataContext.BeginEditTenantCommand" RelativeSource="{RelativeSource AncestorType=Window}"/>
+                                        </Button.Command>
+                                        <Button.CommandParameter>
+                                            <Binding/>
+                                        </Button.CommandParameter>
+                                    </Button>
+                                    <Button Content="Remove"
+                                            Command="{Binding DataContext.RemoveTenantCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                            CommandParameter="{Binding}"/>
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- Status banner for per-tenant actions (Fix Permissions,
+                     etc.). Hidden when empty. -->
+                <TextBlock Text="{Binding TenantActionStatus}"
+                           TextWrapping="Wrap"
+                           Margin="0,8,0,0">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource Text.Muted}">
+                            <Setter Property="Visibility" Value="Visible"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding TenantActionStatus}" Value="">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+
+                <!-- Empty state: shown only when no tenants are configured.
+                     Uses a DataTrigger on Tenants.Count so it inverts the
+                     visibility of the ItemsControl above. -->
+                <StackPanel HorizontalAlignment="Center" Margin="0,16,0,12">
+                    <StackPanel.Style>
+                        <Style TargetType="StackPanel">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Tenants.Count}" Value="0">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </StackPanel.Style>
+                    <TextBlock Text="No tenants yet"
+                               Foreground="{StaticResource Brush.Text.Secondary}"
+                               HorizontalAlignment="Center"
+                               FontWeight="SemiBold"/>
+                    <TextBlock Text="Click &quot;Sign in with Windows account&quot; below to add the tenant your Windows session is signed in to."
+                               Style="{StaticResource Text.Muted}"
+                               HorizontalAlignment="Center"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap"
+                               MaxWidth="380"
+                               Margin="0,4,0,0"/>
+                </StackPanel>
+
+                <!-- Add-tenant action lives in the same card as the existing
+                     tenants list. Separator visually divides the list from
+                     the add-action without needing a second Border. -->
+                <Separator Margin="0,12,0,12"
+                           Background="{DynamicResource Brush.Border.Default}"/>
+
+                <TextBlock Text="Add tenant"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,4"/>
+                <TextBlock Text="{Binding AddTenantHint}"
+                           Style="{StaticResource Text.Muted}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,10"/>
+
+                <!-- Split primary action button. Main half fires the
+                     current mode's action (Windows sign-in OR manual save);
+                     chevron half opens a ContextMenu to switch modes. -->
+                <StackPanel Orientation="Horizontal"
+                            HorizontalAlignment="Right"
+                            Margin="0,0,0,4">
+                    <Button Style="{StaticResource Button.SplitPrimary.Main}"
+                            Content="{Binding PrimaryActionLabel}"
+                            Command="{Binding PrimaryActionCommand}"
+                            ToolTip="In Windows mode: opens the WAM picker and auto-detects tenant + app registration. In Manual mode: saves the values you typed below."/>
+                    <Button x:Name="ModeDropdownButton"
+                            Style="{StaticResource Button.SplitPrimary.Chevron}"
+                            Click="OnModeDropdownClick"
+                            ToolTip="Switch between Windows sign-in and manual setup.">
+                        <TextBlock Text="&#x25BE;" FontSize="11"/>
+                        <Button.ContextMenu>
+                            <ContextMenu Placement="Bottom">
+                                <MenuItem Header="Sign in with Windows account"
+                                          Command="{Binding SetModeCommand}"
+                                          CommandParameter="windows"/>
+                                <MenuItem Header="Sign in with email"
+                                          Command="{Binding SetModeCommand}"
+                                          CommandParameter="email"/>
+                                <MenuItem Header="Manual setup"
+                                          Command="{Binding SetModeCommand}"
+                                          CommandParameter="manual"/>
+                            </ContextMenu>
+                        </Button.ContextMenu>
+                    </Button>
+                </StackPanel>
+
+                <TextBlock Text="{Binding AddTenantStatus}"
+                           TextWrapping="Wrap"
+                           Margin="0,4,0,0">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource Text.Muted}">
+                            <Setter Property="Visibility" Value="Visible"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding AddTenantStatus}" Value="">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding AddTenantStatusIsError}" Value="True">
+                                    <Setter Property="Foreground" Value="{StaticResource Brush.Status.Error}"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+
+                <!-- Contextual "Create app registration" prompt. Appears only
+                     when the most-recent Add Tenant flow finished without
+                     binding the tenant to a dedicated app registration. -->
+                <StackPanel Margin="0,8,0,0"
+                            Visibility="{Binding HasTenantNeedingAppReg, Converter={StaticResource BoolToVisibility}}">
+                    <TextBlock Text="{Binding CreateAppRegistrationPromptText}"
+                               Style="{StaticResource Text.Muted}"
+                               TextWrapping="Wrap"/>
+                    <Button Content="✚ Create app registration"
+                            HorizontalAlignment="Left"
+                            Margin="0,6,0,0"
+                            ToolTip="Provisions a new app registration (single-tenant public client) named per appsettings.json, pre-populated with all host + plugin scopes and admin-consented. Requires Application Administrator on the target tenant."
+                            Command="{Binding CreateAppRegistrationCommand}"
+                            CommandParameter="{Binding TenantNeedingAppReg}"/>
+                </StackPanel>
+
+                <!-- Manual inputs. Visible only when AddMode = Manual, which
+                     the user selects from the split button's dropdown.
+                     Also used as the Edit form when the user clicks Edit
+                     on a tenant row (pre-populated, Tenant ID locked). -->
+                <StackPanel Visibility="{Binding IsManualMode, Converter={StaticResource BoolToVisibility}}"
+                            Margin="0,12,0,0">
+
+                <!-- Edit-mode banner: tells the user they're editing an
+                     existing tenant, with Cancel to bail out. -->
+                <Border Margin="0,0,0,8"
+                        Padding="10,6"
+                        Background="{DynamicResource Brush.Surface.Subtle}"
+                        CornerRadius="3"
+                        Visibility="{Binding IsEditingTenant, Converter={StaticResource BoolToVisibility}}">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0"
+                                   Text="{Binding EditTenantBannerText}"
+                                   VerticalAlignment="Center"
+                                   TextWrapping="Wrap"
+                                   Style="{StaticResource Text.Muted}"/>
+                        <Button Grid.Column="1"
+                                Content="Cancel edit"
+                                Margin="8,0,0,0"
+                                Command="{Binding CancelEditCommand}"/>
+                    </Grid>
+                </Border>
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="{StaticResource Width.FormLabelColumn}"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Domain" Style="{StaticResource FormLabel}"/>
+                    <TextBox Grid.Row="0" Grid.Column="1"
+                             Text="{Binding NewTenantDomain, UpdateSourceTrigger=PropertyChanged}"
+                             Margin="0,3"/>
+                    <Button Grid.Row="0" Grid.Column="2"
+                            Content="Look up"
+                            Margin="6,3,0,3"
+                            Command="{Binding LookupDomainCommand}"/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2"
+                               Text="{Binding LookupStatus}"
+                               Style="{StaticResource Text.Muted}"
+                               TextWrapping="Wrap"
+                               Margin="0,2,0,4"/>
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Tenant ID" Style="{StaticResource FormLabel}"/>
+                    <TextBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2"
+                             Text="{Binding NewTenantId, UpdateSourceTrigger=PropertyChanged}"
+                             IsReadOnly="{Binding IsTenantIdReadOnly}"
+                             Margin="0,3"
+                             ToolTip="The tenant's GUID. Locked while editing — remove and re-add to change."/>
+
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Display name" Style="{StaticResource FormLabel}"/>
+                    <TextBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
+                             Text="{Binding NewTenantDisplayName, UpdateSourceTrigger=PropertyChanged}"
+                             Margin="0,3"/>
+
+                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Client ID" Style="{StaticResource FormLabel}"/>
+                    <TextBox Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2"
+                             Text="{Binding NewTenantClientId, UpdateSourceTrigger=PropertyChanged}"
+                             Margin="0,3"
+                             ToolTip="GUID of an app registration in this tenant. Leave blank to use the global App:Auth:ClientId, or use the search below to find one by name."/>
+                </Grid>
+
+                <Grid Margin="0,8,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="{StaticResource Width.FormLabelColumn}"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Search by name" Style="{StaticResource FormLabel}"/>
+                    <TextBox Grid.Row="0" Grid.Column="1"
+                             Text="{Binding NewTenantAppRegistrationName, UpdateSourceTrigger=PropertyChanged}"
+                             Margin="0,3"
+                             ToolTip="Type a prefix and click Search to find app registrations in this tenant."/>
+                    <Button Grid.Row="0" Grid.Column="2"
+                            Content="Search"
+                            Margin="6,3,0,3"
+                            Command="{Binding SearchAppRegistrationsCommand}"/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2"
+                               Text="{Binding AppRegistrationSearchStatus}"
+                               Style="{StaticResource Text.Muted}"
+                               TextWrapping="Wrap"
+                               Margin="0,2,0,4"/>
+
+                    <ListBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2"
+                             ItemsSource="{Binding AppRegistrationResults}"
+                             MinHeight="40"
+                             MaxHeight="140"
+                             Visibility="{Binding HasAppRegistrationResults, Converter={StaticResource BoolToVisibility}}"
+                             SelectionChanged="AppRegistrationResults_SelectionChanged">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel>
+                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                                    <TextBlock Text="{Binding AppId}" Style="{StaticResource Text.Muted}"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+
+                </StackPanel>
+
+                <!-- Cancel sign-in shows only while an interactive sign-in
+                     is in progress so the user can bail out. The split
+                     button at the top drives the primary save/sign-in
+                     action; no separate "Add & Sign In" button needed. -->
+                <Button Content="Cancel sign-in"
+                        HorizontalAlignment="Left"
+                        Margin="0,12,0,0"
+                        Command="{Binding CancelAddTenantCommand}">
+                    <Button.Style>
+                        <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsAddingTenant}" Value="True">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Button.Style>
+                </Button>
+            </StackPanel>
+        </Border>
+
+        <!-- Per-plugin config now lives in a popup launched from each
+             Extensions row's "Configure" button. The PluginConfigs collection
+             on the VM still backs that popup. -->
+
+        <!-- Single Plugins card: NuGet tag-search at top, installed list
+             in the middle, file-install + open-folder actions at the
+             bottom. -->
+        <Border Style="{StaticResource Card}" Margin="{StaticResource Margin.CardGap}">
+            <Border.Resources>
+                <!-- Soften the system selection highlight so the bright
+                     accent blue doesn't render row text unreadable. Pin
+                     the foreground to Brush.Text.Primary for both active
+                     and inactive selection states. Scoped to this card
+                     so other ListBoxes elsewhere keep their behaviour. -->
+                <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}"
+                                 Color="{StaticResource Color.Accent}" Opacity="0.25"/>
+                <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"
+                                 Color="{StaticResource Color.Text.Primary}"/>
+                <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"
+                                 Color="{StaticResource Color.Accent}" Opacity="0.18"/>
+                <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}"
+                                 Color="{StaticResource Color.Text.Primary}"/>
+                <SolidColorBrush x:Key="{x:Static SystemColors.ControlBrushKey}"
+                                 Color="{StaticResource Color.Accent}" Opacity="0.18"/>
+            </Border.Resources>
+            <StackPanel>
+                <TextBlock Text="Plugins"
+                           Style="{StaticResource Text.Subheading}"
+                           Margin="0,0,0,4"/>
+                <TextBlock Text="Search nuget.org for packages tagged proxylayer.azuretray-plugin, or install a local .nupkg. Installs and uninstalls take effect immediately — no app restart required."
+                           Style="{StaticResource Text.Muted}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,10"/>
+
+                <!-- Available plugins (NuGet tag search). Expander
+                     starts collapsed; opening it auto-fetches once. The
+                     in-VM cache + the feed's 60s TTL keep this cheap. -->
+                <Expander Header="Available plugins"
+                          IsExpanded="{Binding IsAvailablePluginsExpanded, Mode=TwoWay}"
+                          Margin="0,0,0,12">
+                    <StackPanel Margin="0,8,0,0">
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0"
+                                     Text="{Binding OnlinePluginFilter, UpdateSourceTrigger=PropertyChanged}"
+                                     ToolTip="Filter the list by name, description, or publisher."/>
+                            <CheckBox Grid.Column="1"
+                                      Content="Include prerelease"
+                                      IsChecked="{Binding IncludeOnlinePrereleases, Mode=TwoWay}"
+                                      VerticalAlignment="Center"
+                                      Margin="12,0,0,0"/>
+                            <Button Grid.Column="2"
+                                    Content="Refresh"
+                                    Margin="8,0,0,0"
+                                    Command="{Binding RefreshOnlinePluginsCommand}"/>
+                        </Grid>
+
+                        <TextBlock Text="{Binding OnlinePluginsStatus}"
+                                   TextWrapping="Wrap"
+                                   Margin="0,0,0,6">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource Text.Muted}">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding OnlinePluginsStatus}" Value="">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+
+                        <ListBox ItemsSource="{Binding AvailableOnlinePlugins}"
+                                 MaxHeight="220"
+                                 HorizontalContentAlignment="Stretch"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 Visibility="{Binding HasOnlinePluginsListed, Converter={StaticResource BoolToVisibility}}">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Margin="4,6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                                            <TextBlock TextWrapping="Wrap">
+                                                <Run Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                                                <Run Text="  by " Foreground="{StaticResource Brush.Text.Muted}"/>
+                                                <Run Text="{Binding Publisher}" Foreground="{StaticResource Brush.Text.Muted}"/>
+                                                <Run Text="  v" Foreground="{StaticResource Brush.Text.Muted}"/>
+                                                <Run Text="{Binding Versions[0].Version}" Foreground="{StaticResource Brush.Text.Muted}"/>
+                                            </TextBlock>
+                                            <TextBlock Text="{Binding Description}"
+                                                       Style="{StaticResource Text.Muted}"
+                                                       TextWrapping="Wrap"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       MaxHeight="44"/>
+                                        </StackPanel>
+                                        <Button Grid.Column="1"
+                                                Content="Install"
+                                                VerticalAlignment="Top"
+                                                Command="{Binding DataContext.InstallOnlinePluginCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                CommandParameter="{Binding}"/>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <!-- Empty-state copy. Hidden whenever the list above
+                             has rows. The VM picks the right message based on
+                             load / no-results / all-installed / filter-miss. -->
+                        <TextBlock Text="{Binding AvailableEmptyMessage}"
+                                   Style="{StaticResource Text.Muted}"
+                                   TextWrapping="Wrap"
+                                   Margin="4,6,4,6"
+                                   Visibility="{Binding HasAvailableEmptyMessage, Converter={StaticResource BoolToVisibility}}"/>
+                    </StackPanel>
+                </Expander>
+
+                <!-- Installed list -->
+                <TextBlock Text="Installed"
+                           Style="{StaticResource Text.Subheading}"
+                           FontSize="13"
+                           Margin="0,4,0,4"/>
+                <ListBox ItemsSource="{Binding InstalledExtensions}"
+                         MaxHeight="220"
+                         HorizontalContentAlignment="Stretch"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="4,6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                                    <TextBlock Text="{Binding FileName}" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                    <TextBlock Text="{Binding StatusDisplay}" Style="{StaticResource Text.Muted}" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <!-- Configure opens a per-plugin popup. Only enabled when the
+                                     DLL is actually loaded — an installed-but-rejected DLL
+                                     has no IPluginContext / config to surface. -->
+                                <Button Grid.Column="1"
+                                        Content="Configure"
+                                        Margin="0,0,6,0"
+                                        IsEnabled="{Binding IsLoaded}"
+                                        Command="{Binding DataContext.ConfigureExtensionCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                        CommandParameter="{Binding}"/>
+                                <Button Grid.Column="2"
+                                        Content="Uninstall"
+                                        Command="{Binding DataContext.UninstallExtensionCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                        CommandParameter="{Binding}"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <!-- Bottom actions: file install + folder open + status -->
+                <Grid Margin="0,12,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
+                               Text="{Binding ExtensionStatus}"
+                               Style="{StaticResource Text.Muted}"
+                               VerticalAlignment="Center"
+                               TextWrapping="Wrap"
+                               Margin="0,0,8,0"/>
+                    <Button Grid.Column="1"
+                            Content="Install from file..."
+                            Command="{Binding InstallExtensionCommand}"/>
+                    <Button Grid.Column="2"
+                            Content="Open plugins folder"
+                            Margin="8,0,0,0"
+                            Command="{Binding OpenPluginsFolderCommand}"/>
+                </Grid>
+            </StackPanel>
+        </Border>
+
+        </StackPanel>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="2"
+                    Orientation="Horizontal"
+                    Margin="0,12,0,0">
+            <TextBlock Text="{Binding VersionDisplay}"
+                       Style="{StaticResource Text.Muted}"
+                       VerticalAlignment="Center"
+                       Margin="0,0,12,0"/>
+            <Button Content="Check for updates"
+                    Command="{Binding CheckUpdatesCommand}"/>
+            <TextBlock Text="{Binding UpdateStatus}"
+                       Style="{StaticResource Text.Muted}"
+                       VerticalAlignment="Center"
+                       Margin="12,0,0,0"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="3"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Margin="0,12,0,0">
+            <Button Content="Close"
+                    Width="90"
+                    Click="CloseClick"
+                    IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+</Window>

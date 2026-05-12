@@ -1,0 +1,266 @@
+﻿<Window x:Class="AzureTray.LogViewerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:logging="clr-namespace:AzureTray.Logging"
+        Title="Log Viewer"
+        Width="1100" Height="600"
+        MinWidth="600" MinHeight="320"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResize"
+        Background="{DynamicResource Brush.Surface.Base}"
+        Foreground="{DynamicResource Brush.Text.Primary}"
+        FontFamily="{DynamicResource Font.Family.UI}"
+        FontSize="{DynamicResource Font.Size.Body}"
+        TextOptions.TextFormattingMode="Display"
+        TextOptions.TextRenderingMode="ClearType">
+    <Window.Resources>
+        <logging:LevelToBrushConverter x:Key="LevelToBrush"/>
+
+        <Style x:Key="LogCellTextBlock" TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Top"/>
+            <Setter Property="Margin" Value="6,3"/>
+            <!-- When the containing DataGridRow is selected, force the cell
+                 text to the primary foreground brush. The column-specific
+                 styles (BasedOn this) set Foreground unconditionally to
+                 muted gray / level color, which renders unreadable on the
+                 darkened "selected" background. Style triggers beat
+                 cross-style setters in WPF precedence, so this fires for
+                 every derived style without further changes. -->
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding RelativeSource={RelativeSource AncestorType=DataGridRow}, Path=IsSelected}" Value="True">
+                    <Setter Property="Foreground" Value="{StaticResource Brush.Text.Primary}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Filter row labels read as form labels rather than hint text — use
+             Brush.Text.Secondary, not Muted, so they're clearly legible. -->
+        <Style x:Key="FilterLabel" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource Brush.Text.Secondary}"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="{StaticResource Padding.Window}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <DockPanel Grid.Row="0" LastChildFill="False" Margin="0,0,0,10">
+            <TextBlock DockPanel.Dock="Left"
+                       Text="Log Viewer"
+                       Style="{StaticResource Text.Heading}"
+                       VerticalAlignment="Center"/>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <TextBlock Text="Capture level"
+                           Foreground="{StaticResource Brush.Text.Secondary}"
+                           VerticalAlignment="Center"
+                           Margin="0,0,8,0"/>
+                <ComboBox ItemsSource="{Binding AvailableLevels}"
+                          SelectedItem="{Binding SelectedLevel, Mode=TwoWay}"
+                          Width="130"/>
+                <CheckBox Content="Auto-scroll"
+                          IsChecked="{Binding AutoScroll, Mode=TwoWay}"
+                          Margin="16,0,0,0"
+                          VerticalAlignment="Center"/>
+                <CheckBox Content="Log to disk"
+                          IsChecked="{Binding LogToDisk, Mode=TwoWay}"
+                          ToolTip="{Binding LogsDirectory, StringFormat='Writes log files to {0}'}"
+                          Margin="16,0,0,0"
+                          VerticalAlignment="Center"/>
+                <Button Content="Open log folder"
+                        Margin="16,0,0,0"
+                        Command="{Binding OpenLogsFolderCommand}"/>
+                <Button Content="Clear filters"
+                        Margin="8,0,0,0"
+                        Command="{Binding ClearFiltersCommand}"/>
+                <Button Content="Clear log"
+                        Margin="8,0,0,0"
+                        Command="{Binding ClearLogCommand}"/>
+            </StackPanel>
+        </DockPanel>
+
+        <Border Grid.Row="1"
+                Style="{StaticResource Card}"
+                Padding="10"
+                Margin="0,0,0,10">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Row 1: timestamp between, type dropdown. -->
+                <Grid Grid.Row="0" Margin="0,0,0,6">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- From: date + time. Time is optional refinement —
+                         empty means "start of day". -->
+                    <DockPanel Grid.Column="0" Margin="0,0,8,0">
+                        <TextBlock DockPanel.Dock="Left" Text="From" Style="{StaticResource FilterLabel}"/>
+                        <TextBox DockPanel.Dock="Right"
+                                 Width="80"
+                                 Margin="6,0,0,0"
+                                 ToolTip="Optional. HH:mm or HH:mm:ss. Empty = 00:00:00."
+                                 Text="{Binding FromTime, UpdateSourceTrigger=PropertyChanged}"/>
+                        <DatePicker SelectedDate="{Binding FromDate, Mode=TwoWay}"/>
+                    </DockPanel>
+
+                    <!-- To: date + time. Empty time = end of day. -->
+                    <DockPanel Grid.Column="1" Margin="0,0,8,0">
+                        <TextBlock DockPanel.Dock="Left" Text="To" Style="{StaticResource FilterLabel}"/>
+                        <TextBox DockPanel.Dock="Right"
+                                 Width="80"
+                                 Margin="6,0,0,0"
+                                 ToolTip="Optional. HH:mm or HH:mm:ss. Empty = end of day."
+                                 Text="{Binding ToTime, UpdateSourceTrigger=PropertyChanged}"/>
+                        <DatePicker SelectedDate="{Binding ToDate, Mode=TwoWay}"/>
+                    </DockPanel>
+
+                    <DockPanel Grid.Column="2">
+                        <TextBlock DockPanel.Dock="Left" Text="Type" Style="{StaticResource FilterLabel}"/>
+                        <ComboBox ItemsSource="{Binding TypeFilterOptions}"
+                                  SelectedItem="{Binding SelectedTypeFilter, Mode=TwoWay}"/>
+                    </DockPanel>
+                </Grid>
+
+                <!-- Row 2: class dropdown (grouped by namespace root)
+                     + free-text message search. -->
+                <Grid Grid.Row="1">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="2*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <DockPanel Grid.Column="0" Margin="0,0,8,0">
+                        <TextBlock DockPanel.Dock="Left" Text="Class" Style="{StaticResource FilterLabel}"/>
+                        <ComboBox ItemsSource="{Binding ClassOptionsView}"
+                                  SelectedItem="{Binding SelectedClassOption, Mode=TwoWay}"
+                                  DisplayMemberPath="DisplayName"
+                                  ToolTip="Grouped by namespace root. Pick a class to show only its log lines.">
+                            <ComboBox.GroupStyle>
+                                <GroupStyle>
+                                    <GroupStyle.HeaderTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Name}"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource Brush.Text.Secondary}"
+                                                       Margin="4,4,0,2"/>
+                                        </DataTemplate>
+                                    </GroupStyle.HeaderTemplate>
+                                </GroupStyle>
+                            </ComboBox.GroupStyle>
+                        </ComboBox>
+                    </DockPanel>
+
+                    <DockPanel Grid.Column="1">
+                        <TextBlock DockPanel.Dock="Left" Text="Search" Style="{StaticResource FilterLabel}"/>
+                        <TextBox Text="{Binding MessageFilter, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Case-insensitive substring match against the Message column."/>
+                    </DockPanel>
+                </Grid>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="2"
+                Background="{StaticResource Brush.Surface.Panel}"
+                BorderBrush="{StaticResource Brush.Border.Subtle}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource Radius.Medium}">
+            <DataGrid x:Name="EntriesGrid"
+                      ItemsSource="{Binding EntriesView}"
+                      AutoGenerateColumns="False"
+                      CanUserAddRows="False"
+                      CanUserDeleteRows="False"
+                      CanUserResizeColumns="True"
+                      CanUserResizeRows="False"
+                      CanUserReorderColumns="True"
+                      CanUserSortColumns="True"
+                      IsReadOnly="True"
+                      SelectionUnit="CellOrRowHeader"
+                      SelectionMode="Extended"
+                      Background="Transparent"
+                      ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                      ScrollViewer.VerticalScrollBarVisibility="Auto"
+                      VirtualizingPanel.IsVirtualizing="True"
+                      VirtualizingPanel.VirtualizationMode="Recycling"
+                      PreviewMouseRightButtonDown="EntriesGrid_PreviewMouseRightButtonDown">
+                <DataGrid.ContextMenu>
+                    <ContextMenu>
+                        <MenuItem Header="Copy cell" Click="CopyCellClick"/>
+                        <MenuItem Header="Copy row" Click="CopyRowClick"/>
+                        <Separator Style="{StaticResource MenuSeparator}"/>
+                        <MenuItem Header="Copy all matching rows" Click="CopyAllRowsClick"/>
+                    </ContextMenu>
+                </DataGrid.ContextMenu>
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Timestamp"
+                                        Width="130"
+                                        SortMemberPath="Timestamp"
+                                        Binding="{Binding Timestamp, StringFormat=HH:mm:ss.fff}">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource LogCellTextBlock}">
+                                <Setter Property="Foreground" Value="{StaticResource Brush.Text.Muted}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+
+                    <DataGridTextColumn Header="Type"
+                                        Width="90"
+                                        SortMemberPath="Level"
+                                        Binding="{Binding Level}">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource LogCellTextBlock}">
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                <Setter Property="Foreground"
+                                        Value="{Binding Level, Converter={StaticResource LevelToBrush}}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+
+                    <DataGridTextColumn Header="Message"
+                                        Width="700"
+                                        SortMemberPath="Message"
+                                        Binding="{Binding Message}">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource LogCellTextBlock}">
+                                <Setter Property="TextWrapping" Value="NoWrap"/>
+                                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                <Setter Property="ToolTip" Value="{Binding Message}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+
+                    <DataGridTextColumn Header="Class"
+                                        Width="240"
+                                        SortMemberPath="Category"
+                                        Binding="{Binding Category}">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource LogCellTextBlock}">
+                                <Setter Property="Foreground" Value="{StaticResource Brush.Text.Muted}"/>
+                                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                <Setter Property="ToolTip" Value="{Binding Category}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Border>
+
+        <Button Grid.Row="3"
+                Content="Close"
+                Width="90"
+                HorizontalAlignment="Right"
+                Margin="0,10,0,0"
+                Click="CloseClick"
+                IsCancel="True"/>
+    </Grid>
+</Window>

@@ -1,0 +1,181 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, without the leading 'v' (e.g. 1.2.3)
+        required: true
+
+permissions:
+  contents: write       # for creating the GitHub Release
+  id-token: write       # for attest-build-provenance
+  attestations: write   # for attest-build-provenance
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so SourceLink can embed commit metadata
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $env:GITHUB_REF -replace 'refs/tags/v', ''
+          } else {
+            '${{ github.event.inputs.version }}'
+          }
+          if (-not $v) { Write-Error 'Could not resolve version'; exit 1 }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "Resolved version: $v" | Write-Host
+
+      - name: Restore
+        run: dotnet restore AzureTray.sln
+
+      - name: Build
+        run: >
+          dotnet build AzureTray.sln
+          --configuration Release
+          --no-restore
+          /p:Version=${{ steps.ver.outputs.version }}
+
+      - name: Test
+        run: >
+          dotnet test AzureTray.sln
+          --configuration Release
+          --no-build
+          --logger "trx;LogFileName=test-results.trx"
+          --results-directory TestResults
+
+      # --- NuGet: pack + push plugin contracts and the in-repo plugins ----
+      # Plugins are tagged "proxylayer.azuretray-plugin" (set in each
+      # plugin's <PackageTags>) so the host's in-app plugin browser can
+      # discover them via the nuget.org search API.
+      # NUGET_API_KEY is the only secret required for publishing. If
+      # absent (fork without the secret, draft of a tag, etc.) the
+      # push step is skipped automatically — the package still gets
+      # produced and uploaded as a build artifact.
+      - name: Check NuGet config
+        id: nugetcfg
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          $enabled = -not [string]::IsNullOrWhiteSpace($env:NUGET_API_KEY)
+          "enabled=$($enabled.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          Write-Host "Push to nuget.org enabled: $enabled"
+
+      - name: Pack NuGet packages
+        run: >
+          dotnet pack AzureTray.sln
+          --configuration Release
+          --no-build
+          --output NuGet
+          /p:Version=${{ steps.ver.outputs.version }}
+
+      - name: Upload NuGet packages as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages
+          path: NuGet/*.nupkg
+          if-no-files-found: error
+
+      - name: Push to nuget.org
+        if: steps.nugetcfg.outputs.enabled == 'true'
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          $packages = Get-ChildItem NuGet\*.nupkg | Where-Object { $_.Name -notlike '*.symbols.nupkg' }
+          foreach ($pkg in $packages) {
+            Write-Host "Pushing $($pkg.Name)…"
+            # --skip-duplicate keeps re-runs idempotent when a previous
+            # publish already landed (or when a tag is re-built).
+            dotnet nuget push $pkg.FullName `
+              --api-key $env:NUGET_API_KEY `
+              --source https://api.nuget.org/v3/index.json `
+              --skip-duplicate
+            if ($LASTEXITCODE -ne 0) { throw "nuget push failed for $($pkg.Name)" }
+          }
+
+      # --- Velopack pack of the self-contained tray app ------------------
+      - name: Publish self-contained win-x64
+        run: >
+          dotnet publish src/AzureTray/AzureTray.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained
+          --output publish
+          /p:Version=${{ steps.ver.outputs.version }}
+
+      - name: Install Velopack CLI
+        run: dotnet tool install --global vpk
+
+      - name: Pack with Velopack
+        shell: pwsh
+        run: |
+          vpk pack `
+            --packId AzureTray `
+            --packVersion ${{ steps.ver.outputs.version }} `
+            --packAuthors "ProxyLayer" `
+            --packTitle "AzureTray" `
+            --packDir publish `
+            --mainExe AzureTray.exe `
+            --outputDir Releases
+
+      - name: Install CycloneDX
+        run: dotnet tool install --global CycloneDX
+
+      - name: Generate SBOM
+        run: >
+          dotnet CycloneDX AzureTray.sln
+          --output Releases
+          --filename sbom.json
+          --json
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            Releases/*.exe
+            Releases/*.nupkg
+            NuGet/*.nupkg
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults/**/*.trx
+          if-no-files-found: ignore
+
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
+          draft: true
+          generate_release_notes: true
+          files: |
+            Releases/*.exe
+            Releases/*.nupkg
+            Releases/RELEASES
+            Releases/sbom.json
