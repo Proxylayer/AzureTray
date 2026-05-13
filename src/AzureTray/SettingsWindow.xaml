@@ -89,11 +89,25 @@
         <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel>
 
+        <!-- General app-level toggles. Today this is just the launch-at-startup
+             checkbox; add new host-wide preferences here rather than wedging
+             them into the Tenants or Plugins cards. -->
+        <Border Style="{StaticResource Card}">
+            <StackPanel>
+                <TextBlock Text="General"
+                           Style="{StaticResource Text.Subheading}"
+                           Margin="0,0,0,8"/>
+                <CheckBox Content="Launch at Windows sign-in"
+                          IsChecked="{Binding LaunchAtStartup, Mode=TwoWay}"
+                          ToolTip="Adds AzureTray to HKCU\Software\Microsoft\Windows\CurrentVersion\Run so it starts automatically when you sign in to Windows."/>
+            </StackPanel>
+        </Border>
+
         <!-- Combined Tenants card: existing tenants list + add-tenant action.
              The list renders only when there are tenants; otherwise an
              empty-state hint takes its place so first-launch users see the
              section and understand what to do. -->
-        <Border Style="{StaticResource Card}">
+        <Border Style="{StaticResource Card}" Margin="{StaticResource Margin.CardGap}">
             <StackPanel>
                 <TextBlock Text="Tenants"
                            Style="{StaticResource Text.Subheading}"
