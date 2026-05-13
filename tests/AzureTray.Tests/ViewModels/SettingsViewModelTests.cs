@@ -530,6 +530,7 @@ public sealed class SettingsViewModelTests
         readiness ??= new TenantReadinessTracker();
         var windowsSignIn = Substitute.For<IWindowsAccountSignInService>();
         var organizationInfo = Substitute.For<IGraphOrganizationClient>();
+        var startupManager = Substitute.For<IStartupManager>();
         authOptions ??= new AuthOptions();
         pluginOptions ??= new PluginOptions();
         if (signatureVerifier is null)
@@ -563,6 +564,7 @@ public sealed class SettingsViewModelTests
             readiness,
             windowsSignIn,
             organizationInfo,
+            startupManager,
             Options.Create(authOptions),
             Options.Create(pluginOptions),
             NullLogger<SettingsViewModel>.Instance);

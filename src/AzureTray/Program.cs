@@ -144,6 +144,7 @@ internal static class Program
         builder.Services.AddSingleton<IFileDialogService, FileDialogService>();
         builder.Services.AddSingleton<INotifier, NotificationService>();
         builder.Services.AddSingleton<IClipboard, HostClipboard>();
+        builder.Services.AddSingleton<IStartupManager, RegistryStartupManager>();
         builder.Services.AddSingleton<ITenantReadinessTracker, TenantReadinessTracker>();
         builder.Services.AddSingleton<IPluginConfigStore, PluginConfigStore>();
         builder.Services.AddSingleton<PluginLoader>();

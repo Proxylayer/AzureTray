@@ -45,8 +45,13 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly ITenantReadinessTracker _readiness;
     private readonly IWindowsAccountSignInService _windowsSignIn;
     private readonly IGraphOrganizationClient _organizationInfo;
+    private readonly IStartupManager _startupManager;
     private readonly AuthOptions _authOptions;
     private readonly ILogger<SettingsViewModel> _logger;
+
+    // Guard so flipping LaunchAtStartup from the ctor (initial sync of the
+    // checkbox to the registry value) doesn't re-enter the registry write.
+    private bool _suppressLaunchAtStartupCommit;
 
     private CancellationTokenSource? _addTenantCts;
 
@@ -261,6 +266,28 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public string WindowTitle => IsAdminMode ? "Settings — Administrator" : "Settings";
 
+    // Two-way bound to the "Launch at Windows sign-in" checkbox. Persists
+    // by writing HKCU\…\Run via IStartupManager whenever the user toggles
+    // it. Initial value is read from the registry in the ctor (see the
+    // _suppressLaunchAtStartupCommit guard for why the first set doesn't
+    // round-trip back through Enable/Disable).
+    [ObservableProperty]
+    private bool _launchAtStartup;
+
+    partial void OnLaunchAtStartupChanged(bool value)
+    {
+        if (_suppressLaunchAtStartupCommit) return;
+        try
+        {
+            if (value) _startupManager.Enable();
+            else _startupManager.Disable();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to {Op} launch-at-startup registration.", value ? "enable" : "disable");
+        }
+    }
+
     // Holds the just-added tenant when its Add Tenant flow couldn't find
     // an app registration matching AppRegistrationName, so the UI can
     // offer a one-click "Create app registration" follow-up. Cleared
@@ -306,6 +333,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         ITenantReadinessTracker readiness,
         IWindowsAccountSignInService windowsSignIn,
         IGraphOrganizationClient organizationInfo,
+        IStartupManager startupManager,
         IOptions<AuthOptions> authOptions,
         IOptions<PluginOptions> pluginOptions,
         ILogger<SettingsViewModel> logger)
@@ -329,6 +357,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _readiness = readiness;
         _windowsSignIn = windowsSignIn;
         _organizationInfo = organizationInfo;
+        _startupManager = startupManager;
         _authOptions = authOptions.Value;
         _pluginOptions = pluginOptions.Value;
         _logger = logger;
@@ -352,6 +381,23 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         RefreshInstalledExtensions();
         RefreshPluginConfigs();
+
+        // Seed the checkbox from the registry without triggering a write-back.
+        // A read failure (locked-down user hive, etc.) leaves the box
+        // unchecked rather than crashing the Settings window.
+        try
+        {
+            _suppressLaunchAtStartupCommit = true;
+            LaunchAtStartup = _startupManager.IsEnabled();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to read launch-at-startup state from registry.");
+        }
+        finally
+        {
+            _suppressLaunchAtStartupCommit = false;
+        }
     }
 
     private void OnUpdateAvailable(string version)

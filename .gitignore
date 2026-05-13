@@ -56,6 +56,10 @@ project.fragment.lock.json
 src/AzureTray/appsettings.Development.json
 src/AzureTray/appsettings.Local.json
 
+# Personal scratch notes / worklogs — never committed
+WORKLOG.md
+*.local.md
+
 # Secrets — never commit
 *.pfx
 *.p12
