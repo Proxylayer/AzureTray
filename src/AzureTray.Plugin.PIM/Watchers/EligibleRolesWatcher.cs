@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -342,7 +343,7 @@ internal sealed class EligibleRolesWatcher
                         _context.Logger.LogError(
                             "ARM role {RoleName} on tenant {TenantId} has no scope; cannot activate.",
                             role.RoleName, _tenant.TenantId);
-                        await NotifyActivationErrorAsync(role, $"Cannot activate — the role has no ARM scope to act on.", cancellationToken).ConfigureAwait(false);
+                        await NotifyActivationErrorAsync(role, $"Cannot activate — the role has no ARM scope to act on.", ex: null, cancellationToken).ConfigureAwait(false);
                         return;
                     }
                     if (string.IsNullOrWhiteSpace(role.EligibilityId))
@@ -350,7 +351,7 @@ internal sealed class EligibleRolesWatcher
                         _context.Logger.LogError(
                             "ARM role {RoleName} on tenant {TenantId} has no eligibility id; cannot activate.",
                             role.RoleName, _tenant.TenantId);
-                        await NotifyActivationErrorAsync(role, $"Cannot activate — the role has no eligibility id.", cancellationToken).ConfigureAwait(false);
+                        await NotifyActivationErrorAsync(role, $"Cannot activate — the role has no eligibility id.", ex: null, cancellationToken).ConfigureAwait(false);
                         return;
                     }
                     await _arm.ActivateRoleAsync(
@@ -383,39 +384,79 @@ internal sealed class EligibleRolesWatcher
                 ex,
                 "Activation failed for {RoleName} on tenant {TenantId}.",
                 role.RoleName, _tenant.TenantId);
-            await NotifyActivationErrorAsync(role, ExtractReason(ex), cancellationToken).ConfigureAwait(false);
+            await NotifyActivationErrorAsync(role, ExtractHeadline(ex), ex, cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private async Task NotifyActivationErrorAsync(UnifiedEligibleRole role, string reason, CancellationToken cancellationToken)
+    private async Task NotifyActivationErrorAsync(
+        UnifiedEligibleRole role,
+        string reason,
+        Exception? ex,
+        CancellationToken cancellationToken)
     {
-        // Error-severity InformationRequest = red accent stripe, auto-dismiss
-        // after a few seconds. Most "what went wrong" the user needs to know
-        // is the Graph/ARM error message, which now flows through the
-        // exception thanks to EnsureSuccessOrThrowWithBodyAsync.
+        // Error-severity InformationRequest = red accent stripe. Message is
+        // kept terse on purpose — the verbose context (response body, stack
+        // trace, request URI, status code) flows into Details and stays
+        // collapsed by default so the toast doesn't dwarf the screen.
         await _context.Notifier.ShowAsync(
             new InformationRequest(
                 Title: $"Activation failed: {role.RoleName}",
                 Message: reason)
             {
                 Severity = NotificationSeverity.Error,
+                Details = ex is null ? null : BuildExceptionDetails(ex),
             },
             cancellationToken).ConfigureAwait(false);
     }
 
-    private static string ExtractReason(Exception ex)
+    // Single-line summary surfaced in the notification's Message slot. For
+    // Graph/ARM HTTP failures the exception message is
+    //   "Graph POST {uri} returned {code} {reason}. Body: {body}"
+    // so we strip the trailing ". Body: …" and keep just the headline; the
+    // body is rendered separately under Details.
+    private static string ExtractHeadline(Exception ex)
     {
-        // Strip our wrapper prefix so the user sees the underlying service
-        // error first. Body comes from EnsureSuccessOrThrowWithBodyAsync.
-        var message = ex.Message;
-        var bodyIdx = message.IndexOf("Body: ", StringComparison.Ordinal);
-        if (bodyIdx > 0)
+        var message = ex.Message ?? string.Empty;
+        var bodyIdx = message.IndexOf(". Body: ", StringComparison.Ordinal);
+        return bodyIdx > 0
+            ? message[..bodyIdx]
+            : message;
+    }
+
+    // Builds the collapsible Details rows shown beneath Message. Order
+    // matters — the most actionable fields (status, body) come first; the
+    // diagnostic fields (stack trace, inner) come last so they don't push
+    // the useful info off-screen on smaller notifications.
+    private static List<NotificationDetail> BuildExceptionDetails(Exception ex)
+    {
+        var rows = new List<NotificationDetail>();
+        var fullMessage = ex.Message ?? string.Empty;
+
+        if (ex is HttpRequestException http && http.StatusCode is { } status)
         {
-            var prefix = message[..bodyIdx].TrimEnd('.', ' ');
-            var body = message[(bodyIdx + "Body: ".Length)..];
-            return $"{prefix}\n\n{body}";
+            rows.Add(new NotificationDetail("Status", $"{(int)status} {status}"));
         }
-        return message;
+
+        var bodyIdx = fullMessage.IndexOf("Body: ", StringComparison.Ordinal);
+        if (bodyIdx >= 0)
+        {
+            var body = fullMessage[(bodyIdx + "Body: ".Length)..];
+            rows.Add(new NotificationDetail("Response body", body));
+        }
+
+        rows.Add(new NotificationDetail("Type", ex.GetType().FullName ?? ex.GetType().Name));
+
+        if (ex.InnerException is { } inner)
+        {
+            rows.Add(new NotificationDetail("Inner", $"{inner.GetType().Name}: {inner.Message}"));
+        }
+
+        if (!string.IsNullOrWhiteSpace(ex.StackTrace))
+        {
+            rows.Add(new NotificationDetail("Stack trace", ex.StackTrace!));
+        }
+
+        return rows;
     }
 
     private static string FormatDuration(TimeSpan d)

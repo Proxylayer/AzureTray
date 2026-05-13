@@ -35,6 +35,12 @@ public sealed partial class NotificationViewModel : ObservableObject
     // notification card. Mapped to brushes in NotificationWindow.xaml.
     public NotificationSeverity Severity => Request.Severity;
 
+    // Pass-through of NotificationRequest.Details. The XAML renders these
+    // inside a collapsed Expander beneath Message so verbose error context
+    // doesn't bloat the default toast size.
+    public IReadOnlyList<NotificationDetail>? Details => Request.Details;
+    public bool HasDetails => Request.Details is { Count: > 0 };
+
     public IReadOnlyList<string>? Choices { get; }
     public bool AllowOther { get; }
     public string? Placeholder { get; }

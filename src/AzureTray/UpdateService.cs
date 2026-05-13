@@ -21,7 +21,16 @@ public sealed class UpdateService : IUpdateService
 
         if (!string.IsNullOrWhiteSpace(_options.FeedUrl))
         {
-            _manager = new UpdateManager(new SimpleWebSource(_options.FeedUrl));
+            // GithubSource talks to api.github.com to find the latest published
+            // release and its attached RELEASES + .nupkg assets. SimpleWebSource
+            // was wrong here — it expects a flat-file directory URL, but the
+            // /releases/latest/download alias only resolves when an asset name
+            // is appended, not as a directory listing.
+            _manager = new UpdateManager(
+                new GithubSource(
+                    repoUrl: _options.FeedUrl,
+                    accessToken: null,
+                    prerelease: false));
         }
         else
         {
@@ -45,8 +54,18 @@ public sealed class UpdateService : IUpdateService
             var info = await _manager.CheckForUpdatesAsync();
             if (info is null) return;
 
-            await _manager.DownloadUpdatesAsync(info);
             var version = info.TargetFullRelease.Version.ToString();
+
+            // Re-detection guard: the periodic poll calls this same method,
+            // so once a version has been surfaced we don't re-download it
+            // or re-fire the toast on every interval tick. The Settings
+            // banner stays lit via PendingUpdateVersion either way.
+            if (string.Equals(PendingUpdateVersion, version, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            await _manager.DownloadUpdatesAsync(info);
             _logger.LogInformation("Update {Version} downloaded; will apply when the user accepts.", version);
 
             PendingUpdateVersion = version;
@@ -56,7 +75,7 @@ public sealed class UpdateService : IUpdateService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Velopack startup check failed");
+            _logger.LogWarning(ex, "Velopack update check failed");
         }
     }
 

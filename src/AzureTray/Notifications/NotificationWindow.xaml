@@ -6,7 +6,7 @@
         Width="360"
         SizeToContent="Height"
         MinHeight="140"
-        MaxHeight="360"
+        MaxHeight="600"
         WindowStyle="None"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
@@ -39,6 +39,7 @@
         <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="3"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -78,8 +79,48 @@
                        Foreground="{DynamicResource Brush.Text.Secondary}"
                        Margin="14,8,14,8"/>
 
+            <!-- Optional collapsible Details block. Stays closed by default
+                 so the notification renders compact; expanding it reveals
+                 a scrollable ItemsControl of Name/Value rows (exception
+                 type, HResult, response body, stack trace, etc.). The
+                 Expander itself is hidden when Details is empty/null. -->
+            <Expander Grid.Row="3"
+                      Header="Details"
+                      Margin="14,0,14,8"
+                      Foreground="{DynamicResource Brush.Text.Muted}"
+                      Visibility="{Binding HasDetails, Converter={StaticResource BoolToVis}}">
+                <Border BorderBrush="{DynamicResource Brush.Border.Default}"
+                        BorderThickness="1"
+                        Background="{DynamicResource Brush.Surface.Input}"
+                        CornerRadius="{DynamicResource Radius.Small}"
+                        Padding="8,6"
+                        Margin="0,6,0,0">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  MaxHeight="240">
+                        <ItemsControl ItemsSource="{Binding Details}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="0,0,0,6">
+                                        <TextBlock Text="{Binding Name}"
+                                                   FontWeight="SemiBold"
+                                                   FontSize="11"
+                                                   Foreground="{DynamicResource Brush.Text.Muted}"/>
+                                        <TextBlock Text="{Binding Value}"
+                                                   TextWrapping="Wrap"
+                                                   FontFamily="Consolas, Cascadia Mono, Courier New"
+                                                   FontSize="11"
+                                                   Foreground="{DynamicResource Brush.Text.Primary}"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Border>
+            </Expander>
+
             <!-- Choice input -->
-            <StackPanel Grid.Row="3"
+            <StackPanel Grid.Row="4"
                         Margin="14,0,14,0"
                         Visibility="{Binding IsChoice, Converter={StaticResource BoolToVis}}">
                 <ListBox ItemsSource="{Binding Choices}"
@@ -103,14 +144,14 @@
             </StackPanel>
 
             <!-- TextInput input -->
-            <TextBox Grid.Row="3"
+            <TextBox Grid.Row="4"
                      Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
                      Padding="6,4"
                      Margin="14,0,14,0"
                      Visibility="{Binding IsTextInput, Converter={StaticResource BoolToVis}}"/>
 
             <!-- Action buttons -->
-            <Grid Grid.Row="4" Margin="14,12,14,14">
+            <Grid Grid.Row="5" Margin="14,12,14,14">
                 <StackPanel Orientation="Horizontal"
                             HorizontalAlignment="Right"
                             Visibility="{Binding IsYesNo, Converter={StaticResource BoolToVis}}">

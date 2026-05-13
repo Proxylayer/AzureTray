@@ -9,7 +9,18 @@ namespace AzureTray.Plugin.Contracts;
 public abstract record NotificationRequest(string Title, string Message)
 {
     public NotificationSeverity Severity { get; init; } = NotificationSeverity.Info;
+
+    // Optional structured key/value rows surfaced beneath Message inside a
+    // collapsed Expander. Intended for verbose context that shouldn't bloat
+    // the default notification size — exception type, HResult, response
+    // body, stack trace, request-id headers, etc. Order is preserved.
+    public IReadOnlyList<NotificationDetail>? Details { get; init; }
 }
+
+// A single labelled row inside a notification's Details block. Value is
+// rendered as wrapping monospace text so long payloads (response bodies,
+// stack traces) read cleanly.
+public sealed record NotificationDetail(string Name, string Value);
 
 public enum NotificationSeverity
 {

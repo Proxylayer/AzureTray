@@ -13,7 +13,7 @@
          the host's <Version> in Directory.Build.props. The host can ship
          many releases without changing this; we only bump when the
          contracts surface itself changes. Bump when adding members. -->
-    <Version>0.2.1</Version>
+    <Version>0.2.2</Version>
 
     <IsPackable>true</IsPackable>
     <PackageId>AzureTray.Plugin.Contracts</PackageId>

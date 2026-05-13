@@ -251,6 +251,10 @@ internal static class Program
         // Surfaces an ActionRequest notification with a blue "Update now"
         // button as soon as UpdateService detects + downloads a release.
         builder.Services.AddHostedService<Notifications.UpdateAvailableNotifier>();
+        // Background loop that re-runs the startup check every
+        // UpdateFeedOptions.CheckIntervalHours so a long-running tray
+        // session still catches new releases without a restart.
+        builder.Services.AddHostedService<UpdatePollingService>();
         builder.Services.AddSingleton<IGraphMeClient, GraphMeClient>();
         builder.Services.AddSingleton<IGraphOrganizationClient, GraphOrganizationClient>();
         builder.Services.AddTransient<SettingsViewModel>();

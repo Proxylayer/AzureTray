@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-05-12
+
+### Added
+
+- **Periodic update check.** A new `UpdatePollingService` (`BackgroundService`) re-runs `IUpdateService.CheckOnStartupAsync` every `App:Update:CheckIntervalHours` (default `1`, set to `0` to disable the loop — startup check still runs). Long-running tray sessions now see new releases without a process restart. `UpdateService` deduplicates by version so the toast doesn't re-pop on every tick.
+- **Collapsible Details on notifications.** `NotificationRequest` gained an optional `Details: IReadOnlyList<NotificationDetail>?` init-only property; the new `NotificationDetail(Name, Value)` record is the row type. The notification window renders these inside a collapsed `Expander` beneath `Message` so verbose error context (response body, status code, stack trace, inner exception) stays out of the default toast size. PIM activation failures (`EligibleRolesWatcher.NotifyActivationErrorAsync`) now populate Details from the originating exception and keep `Message` terse — Status (from `HttpRequestException.StatusCode`), Response body (parsed out of `EnsureSuccessOrThrowWithBodyAsync`'s tail), Type, Inner, Stack trace. `AzureTray.Plugin.Contracts` bumped to `0.2.2`.
+
+### Fixed
+
+- **Update feed URL.** Velopack was configured with `SimpleWebSource("…/releases/latest/download")`, which 404s as a directory listing (the alias only resolves when an asset filename is appended). Switched to `GithubSource(repoUrl, accessToken: null, prerelease: false)`, which talks to the GitHub API to discover the latest published release and its `RELEASES`/`.nupkg` assets. `appsettings.json` `App:Update:FeedUrl` is now the bare repo URL `https://github.com/Proxylayer/AzureTray`.
+
 ## [0.2.2] — 2026-05-12
 
 ### Changed
