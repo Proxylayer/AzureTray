@@ -373,7 +373,7 @@ internal sealed class EligibleRolesWatcher
                     Title: $"Activated {role.RoleName}",
                     Message: $"on {role.ScopeDisplay} for {FormatDuration(duration)}.")
                 {
-                    Severity = NotificationSeverity.Info,
+                    Severity = NotificationSeverity.Success,
                 },
                 CancellationToken.None);
         }

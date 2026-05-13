@@ -1,4 +1,4 @@
-﻿<Window x:Class="AzureTray.Notifications.NotificationWindow"
+<Window x:Class="AzureTray.Notifications.NotificationWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:notif="clr-namespace:AzureTray.Notifications"
@@ -24,9 +24,13 @@
         <notif:SeverityToBrushConverter x:Key="SeverityToBrush"/>
     </Window.Resources>
 
-    <Border Background="{DynamicResource Brush.Surface.Panel}"
-            BorderBrush="{DynamicResource Brush.Border.Default}"
-            BorderThickness="1"
+    <!-- Severity drives both the perimeter colour AND a darker tinted fill,
+         matching the stacked-card mockup. Drop the ConverterParameter to
+         get the accent (border, title, glyph); pass "fill" to get the
+         tinted background. -->
+    <Border Background="{Binding Severity, Converter={StaticResource SeverityToBrush}, ConverterParameter=fill}"
+            BorderBrush="{Binding Severity, Converter={StaticResource SeverityToBrush}}"
+            BorderThickness="1.5"
             CornerRadius="{DynamicResource Radius.Large}"
             Padding="0"
             Margin="12">
@@ -38,7 +42,6 @@
         </Border.Effect>
         <Grid>
             <Grid.RowDefinitions>
-                <RowDefinition Height="3"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -46,15 +49,29 @@
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
-            <!-- Severity-tinted accent stripe across the top of the card.
-                 Blue for Update, amber for Warning, coral for Error, muted
-                 grey for Info. -->
-            <Rectangle Grid.Row="0"
-                       Fill="{Binding Severity, Converter={StaticResource SeverityToBrush}}"
-                       RadiusX="6" RadiusY="6"/>
-
-            <DockPanel Grid.Row="1" Margin="14,12,14,0">
-                <Button DockPanel.Dock="Right"
+            <!-- Title row: status glyph + title + dismiss. The glyph shares
+                 the severity brush so the eye lands on the same accent
+                 colour as the border. -->
+            <Grid Grid.Row="0" Margin="14,12,10,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0"
+                           Text="{Binding SeverityIcon}"
+                           FontSize="18"
+                           Margin="0,0,10,0"
+                           VerticalAlignment="Center"
+                           Foreground="{Binding Severity, Converter={StaticResource SeverityToBrush}}"/>
+                <TextBlock Grid.Column="1"
+                           Text="{Binding Title}"
+                           FontSize="14"
+                           FontWeight="SemiBold"
+                           Foreground="{Binding Severity, Converter={StaticResource SeverityToBrush}}"
+                           VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"/>
+                <Button Grid.Column="2"
                         Content="×"
                         FontSize="16"
                         Width="22" Height="22"
@@ -65,26 +82,22 @@
                         Cursor="Hand"
                         Command="{Binding DismissCommand}"
                         ToolTip="Dismiss"/>
-                <TextBlock Text="{Binding Title}"
-                           FontSize="14"
-                           FontWeight="SemiBold"
-                           Foreground="{Binding Severity, Converter={StaticResource SeverityToBrush}}"
-                           VerticalAlignment="Center"
-                           TextTrimming="CharacterEllipsis"/>
-            </DockPanel>
+            </Grid>
 
-            <TextBlock Grid.Row="2"
+            <!-- Body indents under the glyph so the message aligns with
+                 the title text. -->
+            <TextBlock Grid.Row="1"
                        Text="{Binding Message}"
                        TextWrapping="Wrap"
                        Foreground="{DynamicResource Brush.Text.Secondary}"
-                       Margin="14,8,14,8"/>
+                       Margin="42,6,14,8"/>
 
             <!-- Optional collapsible Details block. Stays closed by default
                  so the notification renders compact; expanding it reveals
                  a scrollable ItemsControl of Name/Value rows (exception
                  type, HResult, response body, stack trace, etc.). The
                  Expander itself is hidden when Details is empty/null. -->
-            <Expander Grid.Row="3"
+            <Expander Grid.Row="2"
                       Header="Details"
                       Margin="14,0,14,8"
                       Foreground="{DynamicResource Brush.Text.Muted}"
@@ -120,7 +133,7 @@
             </Expander>
 
             <!-- Choice input -->
-            <StackPanel Grid.Row="4"
+            <StackPanel Grid.Row="3"
                         Margin="14,0,14,0"
                         Visibility="{Binding IsChoice, Converter={StaticResource BoolToVis}}">
                 <ListBox ItemsSource="{Binding Choices}"
@@ -144,14 +157,14 @@
             </StackPanel>
 
             <!-- TextInput input -->
-            <TextBox Grid.Row="4"
+            <TextBox Grid.Row="3"
                      Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
                      Padding="6,4"
                      Margin="14,0,14,0"
                      Visibility="{Binding IsTextInput, Converter={StaticResource BoolToVis}}"/>
 
             <!-- Action buttons -->
-            <Grid Grid.Row="5" Margin="14,12,14,14">
+            <Grid Grid.Row="4" Margin="14,12,14,14">
                 <StackPanel Orientation="Horizontal"
                             HorizontalAlignment="Right"
                             Visibility="{Binding IsYesNo, Converter={StaticResource BoolToVis}}">

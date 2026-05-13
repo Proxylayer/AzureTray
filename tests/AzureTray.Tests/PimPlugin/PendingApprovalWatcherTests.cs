@@ -209,6 +209,55 @@ public sealed class PendingApprovalWatcherTests
     }
 
     [Fact]
+    public async Task PollAsync_DropsApproval_WhenRequestorIsSignedInUser()
+    {
+        // Two graph approvals — one authored by the signed-in user, one by
+        // somebody else. Only the someone-else approval should reach the
+        // notifier and the snapshot.
+        var graph = Substitute.For<IGraphPimClient>();
+        graph.GetSignedInUserIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns("me-objectid");
+        graph.ListPendingApprovalsAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new[]
+            {
+                GraphPendingFor("approval-self", "me-objectid", "Self", "Owner"),
+                GraphPendingFor("approval-other", "other-objectid", "Alice", "Reader"),
+            });
+        var arm = NewArm();
+        var notifier = NewNotifier();
+        var watcher = NewWatcher(graph, arm, notifier);
+
+        await watcher.PollAsync(CancellationToken.None);
+        await Settle();
+
+        await notifier.Received(1).ShowAsync(
+            Arg.Is<NotificationRequest>(r => r is ChoiceRequest),
+            Arg.Any<CancellationToken>());
+        Assert.DoesNotContain(watcher.CurrentApprovals, a => a.ApprovalId == "approval-self");
+        Assert.Contains(watcher.CurrentApprovals, a => a.ApprovalId == "approval-other");
+    }
+
+    [Fact]
+    public async Task PollAsync_WhenSignedInUserUnknown_DoesNotFilter()
+    {
+        // Graph /me fails or returns null — fall back to legacy behaviour:
+        // surface every approval, including ones the user authored.
+        var graph = Substitute.For<IGraphPimClient>();
+        graph.GetSignedInUserIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((string?)null);
+        graph.ListPendingApprovalsAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new[] { GraphPendingFor("approval-self", "me-objectid", "Self", "Owner") });
+        var arm = NewArm();
+        var notifier = NewNotifier();
+        var watcher = NewWatcher(graph, arm, notifier);
+
+        await watcher.PollAsync(CancellationToken.None);
+        await Settle();
+
+        await notifier.Received(1).ShowAsync(
+            Arg.Is<NotificationRequest>(r => r is ChoiceRequest),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task PollAsync_WhenArmFails_StillProcessesGraph()
     {
         var graph = NewGraph(approvals: new[] { GraphPending("approval-1", "Alice", "Owner") });
@@ -230,18 +279,22 @@ public sealed class PendingApprovalWatcherTests
     // ---- builders ---------------------------------------------------------
 
     private static EntraScheduleRequest GraphPending(string approvalId, string principalDisplayName, string roleDisplayName)
+        => GraphPendingFor(approvalId, principalId: null, principalDisplayName, roleDisplayName);
+
+    private static EntraScheduleRequest GraphPendingFor(
+        string approvalId, string? principalId, string principalDisplayName, string roleDisplayName)
         => new(
             Id: $"req-{approvalId}",
             Status: "PendingApproval",
             Action: "selfActivate",
-            PrincipalId: null,
+            PrincipalId: principalId,
             RoleDefinitionId: null,
             DirectoryScopeId: "/",
             Justification: null,
             CreatedDateTime: DateTimeOffset.UtcNow,
             ApprovalId: approvalId,
             RequestType: null,
-            Principal: new EntraPrincipal(null, principalDisplayName, null),
+            Principal: new EntraPrincipal(principalId, principalDisplayName, null),
             RoleDefinition: new EntraRoleDefinition(null, roleDisplayName, null),
             ScheduleInfo: null);
 

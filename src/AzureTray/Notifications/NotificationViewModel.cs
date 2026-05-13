@@ -35,6 +35,18 @@ public sealed partial class NotificationViewModel : ObservableObject
     // notification card. Mapped to brushes in NotificationWindow.xaml.
     public NotificationSeverity Severity => Request.Severity;
 
+    // Glyph rendered next to the title, tinted with the same severity brush.
+    // Plain Unicode keeps the binding font-agnostic — Segoe UI on Win10/11
+    // renders all glyphs cleanly without Segoe MDL2 Assets.
+    public string SeverityIcon => Request.Severity switch
+    {
+        NotificationSeverity.Success => "✓",   // ✓
+        NotificationSeverity.Error => "✕",     // ✕
+        NotificationSeverity.Warning => "⚠",   // ⚠
+        NotificationSeverity.Update => "⬆",    // ⬆
+        _ => "ⓘ",                              // ⓘ (Info default)
+    };
+
     // Pass-through of NotificationRequest.Details. The XAML renders these
     // inside a collapsed Expander beneath Message so verbose error context
     // doesn't bloat the default toast size.

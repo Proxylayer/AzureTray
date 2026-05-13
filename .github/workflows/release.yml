@@ -96,6 +96,20 @@ jobs:
             --mainExe AzureTray.exe `
             --outputDir Releases
 
+      # vpk emits the installer as AzureTraySetup.exe (or AzureTray-win-Setup.exe
+      # on newer vpk). Rename it to include the version so the GitHub Release
+      # asset is unambiguous when users download an older one. The internal
+      # AzureTray.exe inside the .nupkg is NOT touched — the Velopack manifest
+      # references that exact filename.
+      - name: Stamp version into Setup EXE filename
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem Releases -Filter '*Setup*.exe' | Select-Object -First 1
+          if (-not $setup) { Write-Error 'Setup exe not found in Releases/'; exit 1 }
+          $newName = "AzureTraySetup-${{ steps.ver.outputs.version }}.exe"
+          Rename-Item -LiteralPath $setup.FullName -NewName $newName
+          Write-Host "Renamed $($setup.Name) -> $newName"
+
       - name: Install CycloneDX
         run: dotnet tool install --global CycloneDX
 

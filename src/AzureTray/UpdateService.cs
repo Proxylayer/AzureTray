@@ -31,6 +31,9 @@ public sealed class UpdateService : IUpdateService
                     repoUrl: _options.FeedUrl,
                     accessToken: null,
                     prerelease: false));
+            _logger.LogInformation(
+                "Update feed configured: {FeedUrl}; installed={IsInstalled}, currentVersion={Version}.",
+                _options.FeedUrl, _manager.IsInstalled, _manager.CurrentVersion);
         }
         else
         {
@@ -52,7 +55,13 @@ public sealed class UpdateService : IUpdateService
         try
         {
             var info = await _manager.CheckForUpdatesAsync();
-            if (info is null) return;
+            if (info is null)
+            {
+                _logger.LogDebug(
+                    "Startup update check: no newer release. Feed={FeedUrl}, currentVersion={Version}.",
+                    _options.FeedUrl, _manager.CurrentVersion);
+                return;
+            }
 
             var version = info.TargetFullRelease.Version.ToString();
 
@@ -92,9 +101,15 @@ public sealed class UpdateService : IUpdateService
                 // No new update — clear any stale pending state so the
                 // banner / notification stops surfacing.
                 PendingUpdateVersion = null;
+                _logger.LogInformation(
+                    "Update check returned no newer release. Feed={FeedUrl}, currentVersion={Version}.",
+                    _options.FeedUrl, _manager.CurrentVersion);
                 return "Up to date.";
             }
 
+            _logger.LogInformation(
+                "Update available: {Target} (current {Current}). Downloading.",
+                info.TargetFullRelease.Version, _manager.CurrentVersion);
             await _manager.DownloadUpdatesAsync(info);
             _logger.LogInformation("Applying update {Version} and restarting.", info.TargetFullRelease.Version);
             _manager.ApplyUpdatesAndRestart(info);

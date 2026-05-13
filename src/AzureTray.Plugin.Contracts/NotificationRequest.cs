@@ -4,8 +4,9 @@ namespace AzureTray.Plugin.Contracts;
 
 // Inputs to INotifier.ShowAsync. Use the concrete records — the host renders
 // different controls based on the runtime type. Severity is a host hint for
-// the accent stripe colour (info / update / warning / error); plugins may
-// omit it and inherit Info.
+// the colour class — info (blue) / success (green) / warning (yellow) /
+// error (red) / update (blue, with the ⬆ glyph); plugins may omit it and
+// inherit Info.
 public abstract record NotificationRequest(string Title, string Message)
 {
     public NotificationSeverity Severity { get; init; } = NotificationSeverity.Info;
@@ -22,19 +23,24 @@ public abstract record NotificationRequest(string Title, string Message)
 // stack traces) read cleanly.
 public sealed record NotificationDetail(string Name, string Value);
 
+// Notification colour classes. Maps to a "Bootstrap-style" alert palette in
+// the host renderer:
+//   Info     → blue   (default; passive informational message)
+//   Success  → green  (positive confirmation — "activation succeeded")
+//   Warning  → yellow (caution-but-not-failed)
+//   Error    → red    (failure / blocking issue)
+//   Update   → blue   (update-available; same hue as Info, but the host
+//                      pairs it with an upload-arrow glyph)
+//
+// New enum values may be appended; existing values keep their ordinal so
+// old plugins compiled against an earlier contracts version keep working.
 public enum NotificationSeverity
 {
-    // Default. Neutral grey accent stripe.
     Info,
-
-    // Update-available / call-to-action. Blue accent stripe.
     Update,
-
-    // Caution-but-not-failed. Amber accent stripe.
     Warning,
-
-    // Failure / blocking issue. Red accent stripe.
     Error,
+    Success,
 }
 
 // Two-button confirmation. Returns YesNoResult.

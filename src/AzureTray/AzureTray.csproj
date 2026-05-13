@@ -12,6 +12,11 @@
     <StartupObject>AzureTray.Program</StartupObject>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- Embedded as the EXE's primary icon resource. WPF Window.Icon falls
+         back to this when no explicit Icon="…" is set, so the file picks
+         up the titlebar and taskbar for every window automatically.
+         Regenerate with: tools/generate-app-icon.ps1 -->
+    <ApplicationIcon>AzureTray.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

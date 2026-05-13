@@ -33,6 +33,14 @@ internal sealed class PendingApprovalWatcher
     private CancellationTokenSource? _cts;
     private IReadOnlyList<UnifiedPendingApproval> _lastSnapshot = Array.Empty<UnifiedPendingApproval>();
 
+    // Cached lazily on first poll. The signed-in user's objectId in this tenant
+    // is stable for the lifetime of the install, so a single Graph /me call
+    // per watcher is enough. Null means "not resolved yet" OR "resolved but
+    // Graph returned nothing" — both cases fall through to "don't filter",
+    // i.e. the original behavior of surfacing every approval.
+    private string? _signedInUserId;
+    private bool _signedInUserIdResolved;
+
     public PendingApprovalWatcher(
         IGraphPimClient graph,
         IArmPimClient arm,
@@ -114,13 +122,24 @@ internal sealed class PendingApprovalWatcher
         PollStarted?.Invoke();
         try
         {
+            await EnsureSignedInUserIdAsync(cancellationToken).ConfigureAwait(false);
+
             var graphTask = FetchGraphAsync(cancellationToken);
             var armTask = FetchArmAsync(cancellationToken);
 
             var graphPending = await graphTask.ConfigureAwait(false);
             var armPending = await armTask.ConfigureAwait(false);
 
-            var all = graphPending.Concat(armPending).ToArray();
+            // Drop self-authored requests before they ever enter the snapshot
+            // or the seen-set — surfacing "approve your own request" is
+            // confusing and the PIM policy won't accept a self-review anyway.
+            // When _signedInUserId is null (Graph /me failed or hasn't been
+            // resolved yet) we fall through to the legacy behaviour of
+            // showing everything, so a transient Graph hiccup never silently
+            // hides approvals from other requestors.
+            var all = graphPending.Concat(armPending)
+                .Where(a => !IsSelfAuthored(a))
+                .ToArray();
             _lastSnapshot = all;
 
             var currentKeys = new HashSet<string>(all.Select(a => a.DedupKey), StringComparer.OrdinalIgnoreCase);
@@ -142,6 +161,40 @@ internal sealed class PendingApprovalWatcher
         }
     }
 
+    private async Task EnsureSignedInUserIdAsync(CancellationToken ct)
+    {
+        if (_signedInUserIdResolved) return;
+        try
+        {
+            _signedInUserId = await _graph.GetSignedInUserIdAsync(_tenant.TenantId, ct).ConfigureAwait(false);
+            _signedInUserIdResolved = true;
+            if (string.IsNullOrWhiteSpace(_signedInUserId))
+            {
+                _context.Logger.LogDebug(
+                    "PIM self-approval filter disabled for tenant {TenantId}: Graph /me returned no id.",
+                    _tenant.TenantId);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { /* shutdown */ }
+        catch (Exception ex)
+        {
+            // Leave _signedInUserIdResolved=false so the next poll retries.
+            // A persistent failure just keeps the legacy "show everything"
+            // behaviour, which is the safer default.
+            _context.Logger.LogDebug(
+                ex,
+                "PIM self-approval filter could not resolve signed-in user for tenant {TenantId}; will retry.",
+                _tenant.TenantId);
+        }
+    }
+
+    private bool IsSelfAuthored(UnifiedPendingApproval approval)
+    {
+        if (string.IsNullOrWhiteSpace(_signedInUserId)) return false;
+        if (string.IsNullOrWhiteSpace(approval.RequestorPrincipalId)) return false;
+        return string.Equals(approval.RequestorPrincipalId, _signedInUserId, StringComparison.OrdinalIgnoreCase);
+    }
+
     private async Task<List<UnifiedPendingApproval>> FetchGraphAsync(CancellationToken ct)
     {
         try
@@ -155,7 +208,8 @@ internal sealed class PendingApprovalWatcher
                     PrincipalDisplay: r.Principal?.DisplayName ?? r.Principal?.UserPrincipalName ?? "(unknown user)",
                     RoleDisplay: r.RoleDefinition?.DisplayName ?? "(unknown role)",
                     ScopeDisplay: "Entra ID directory",
-                    ArmScope: null))
+                    ArmScope: null,
+                    RequestorPrincipalId: r.Principal?.Id ?? r.PrincipalId))
                 .ToList();
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
@@ -197,7 +251,8 @@ internal sealed class PendingApprovalWatcher
                     PrincipalDisplay: r.Properties.ExpandedProperties?.Principal?.DisplayName ?? "(unknown user)",
                     RoleDisplay: r.Properties.ExpandedProperties?.RoleDefinition?.DisplayName ?? "(unknown role)",
                     ScopeDisplay: r.Properties.ExpandedProperties?.Scope?.DisplayName ?? r.Properties.Scope ?? "(unknown scope)",
-                    ArmScope: r.Properties.Scope))
+                    ArmScope: r.Properties.Scope,
+                    RequestorPrincipalId: r.Properties.ExpandedProperties?.Principal?.Id ?? r.Properties.PrincipalId))
                 .ToList();
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
