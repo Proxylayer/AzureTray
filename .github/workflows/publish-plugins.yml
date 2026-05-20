@@ -147,7 +147,7 @@ jobs:
 
           "selected=$($selected -join ',')" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
-          "any=$([bool]($selected.Count -gt 0)).ToString().ToLower()" >> $env:GITHUB_OUTPUT
+          "any=$(($selected.Count -gt 0).ToString().ToLower())" >> $env:GITHUB_OUTPUT
 
       # Everything below is a no-op when nothing was selected — saves
       # restore/build time on branch pushes that didn't touch a plugin.
