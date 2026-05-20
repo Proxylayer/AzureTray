@@ -3,24 +3,35 @@ using System.Collections.Generic;
 
 namespace AzureTray.Plugin.Contracts;
 
-// A single entry the plugin contributes to the host's tray context menu.
-//
-// - Set Invoke for a clickable leaf item.
-// - Set Children for a submenu; in that case Invoke is ignored.
-// - Leave Invoke null and Children null to render a disabled header / label.
-// - Use the static Separator instance to insert a horizontal divider.
-//
-// The host rebuilds the menu on every right-click, so GetMenuItems is allowed
-// to return fresh state. Keep it fast — it runs on the UI thread.
-//
-// When IsBusy is true, the host swaps the leading glyph for a rotating spinner
-// frame and animates it in place — no menu rebuild per frame, so the rest of
-// the menu stays still. Plugins set this true while a background refresh is
-// running and fire MenuChanged once at the transition.
-//
-// When KeepMenuOpen is true, clicking the item still fires Invoke but does
-// NOT dismiss the menu chain. Use for refresh-style actions where the user
-// expects to see the result land in the visible menu without reopening it.
+/// <summary>
+/// A single entry the plugin contributes to the host's tray context menu.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <strong>Leaf item:</strong> set <see cref="Invoke"/> only.<br/>
+/// <strong>Submenu:</strong> set <see cref="Children"/> only (Invoke is ignored).<br/>
+/// <strong>Searchable submenu:</strong> set <see cref="SearchProvider"/>; Children
+/// is ignored and the initial items come from <c>SearchProvider("")</c>.<br/>
+/// <strong>Disabled label:</strong> set neither Invoke nor Children.<br/>
+/// <strong>Separator:</strong> use the static <see cref="Separator"/> instance.
+/// </para>
+/// <para>
+/// The host rebuilds the menu on every right-click, so
+/// <see cref="ITrayPlugin.GetMenuItems"/> may return fresh state freely.
+/// Keep it fast — it runs on the UI thread.
+/// </para>
+/// <para>
+/// When <see cref="IsBusy"/> is <c>true</c>, the host swaps the leading glyph
+/// for a rotating spinner and animates it in place without a full menu rebuild.
+/// Set this while a background request is in flight and fire
+/// <see cref="IMenuChangeNotifier.MenuChanged"/> once at the transition.
+/// </para>
+/// <para>
+/// When <see cref="KeepMenuOpen"/> is <c>true</c>, clicking still fires
+/// <see cref="Invoke"/> but does not dismiss the menu. Use for refresh-style
+/// actions where the user expects to see the result land in the visible menu.
+/// </para>
+/// </remarks>
 public sealed record PluginMenuItem(
     string Text,
     Action? Invoke = null,
@@ -30,18 +41,15 @@ public sealed record PluginMenuItem(
     bool IsBusy = false,
     bool KeepMenuOpen = false,
     string? Icon = null,
-    // When SearchProvider is set, opening this submenu shows a search box
-    // at the top of the flyout. As the user types, SearchProvider is
-    // called and the items list refreshes. The initial items come from
-    // SearchProvider("") — Children is ignored for searchable submenus.
     Func<string, IReadOnlyList<PluginMenuItem>>? SearchProvider = null,
     string? SearchPlaceholder = null)
 {
+    /// <summary>A pre-built horizontal divider. Use instead of constructing manually.</summary>
     public static PluginMenuItem Separator { get; } = new(string.Empty, IsSeparator: true);
 
-    // Convenience for XAML data binding so the host doesn't need a
-    // null-or-empty-list converter for chevron visibility. A searchable
-    // submenu counts as having children even when the initial Children
-    // list is empty — opening it shows the search box + provider results.
+    /// <summary>
+    /// <c>true</c> when this item has children or a search provider.
+    /// Convenience for XAML data binding (chevron visibility).
+    /// </summary>
     public bool HasChildren => Children is { Count: > 0 } || SearchProvider is not null;
 }
