@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using AzureTray.AppRegistration;
 using AzureTray.Auth;
 using AzureTray.AzureCloud;
@@ -147,7 +148,19 @@ internal static class Program
         builder.Services.AddSingleton<IStartupManager, RegistryStartupManager>();
         builder.Services.AddSingleton<ITenantReadinessTracker, TenantReadinessTracker>();
         builder.Services.AddSingleton<IPluginConfigStore, PluginConfigStore>();
-        builder.Services.AddSingleton<PluginLoader>();
+        builder.Services.AddSingleton<PluginLoader>(sp => new PluginLoader(
+            sp.GetRequiredService<IAppPaths>(),
+            sp.GetRequiredService<IPluginSignatureVerifier>(),
+            sp.GetRequiredService<IOptions<PluginOptions>>(),
+            sp.GetRequiredService<IPluginHttpClientCore>(),
+            sp.GetRequiredService<INotifier>(),
+            sp.GetRequiredService<IClipboard>(),
+            sp.GetRequiredService<ITenantStore>(),
+            sp.GetRequiredService<IAzureCloudConfig>(),
+            sp.GetRequiredService<IExtensionInstaller>(),
+            sp.GetRequiredService<ITenantReadinessTracker>(),
+            sp.GetRequiredService<IPluginConfigStore>(),
+            sp.GetRequiredService<ILoggerFactory>()));
         builder.Services.AddSingleton<IPluginLoader>(sp => sp.GetRequiredService<PluginLoader>());
         builder.Services.AddHostedService(sp => sp.GetRequiredService<PluginLoader>());
         // Probe must register AFTER PluginLoader so plugins subscribe to
