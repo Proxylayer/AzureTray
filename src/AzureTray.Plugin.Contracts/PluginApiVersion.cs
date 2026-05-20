@@ -9,5 +9,5 @@
 public static class PluginApiVersion
 {
     /// <summary>The current contract version. Declare this in <see cref="ITrayPlugin.ApiVersion"/>.</summary>
-    public const int Current = 1;
+    public const int Current = 2;
 }
