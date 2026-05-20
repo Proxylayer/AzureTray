@@ -16,10 +16,22 @@ public interface IPluginContext
     ILogger Logger { get; }
 
     /// <summary>
-    /// Authenticated HTTP egress. The host owns the named clients and credentials.
-    /// See <see cref="IPluginHttpClient"/> and <see cref="PluginHttpClientNames"/>.
+    /// Returns a tenant-scoped HTTP client for the given tenant. The client's
+    /// <see cref="IPluginHttpClient.SendAsync"/> will only ever acquire tokens
+    /// for <paramref name="tenantId"/> — the tenant is baked in at acquisition
+    /// time and cannot be overridden per-call.
     /// </summary>
-    IPluginHttpClient Http { get; }
+    /// <remarks>
+    /// Call this once per tenant (or cache the result) and hold the reference
+    /// for the lifetime of your per-tenant component. Prefer obtaining the
+    /// client in <see cref="ITrayPlugin.InitializeAsync"/> or when handling a
+    /// <see cref="TenantReady"/> event rather than on every request.
+    /// </remarks>
+    /// <param name="tenantId">
+    /// The tenant to scope this client to. Must correspond to a tenant enabled
+    /// for this plugin; the host throws <see cref="ArgumentException"/> otherwise.
+    /// </param>
+    IPluginHttpClient GetHttpClient(string tenantId);
 
     /// <summary>
     /// Interactive notifications surfaced near the tray icon.

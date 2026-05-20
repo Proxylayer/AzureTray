@@ -29,42 +29,42 @@ internal sealed class ArmPimClient : IArmPimClient
 
     private readonly IPluginContext _ctx;
     private readonly ILogger _logger;
+    private readonly string _tenantId;
 
-    public ArmPimClient(IPluginContext ctx)
+    public ArmPimClient(IPluginContext ctx, string tenantId)
     {
         _ctx = ctx;
         _logger = ctx.Logger;
+        _tenantId = tenantId;
     }
 
     public async Task<IReadOnlyList<ArmSubscription>> ListSubscriptionsAsync(
-        string tenantId, CancellationToken cancellationToken)
+        CancellationToken cancellationToken)
     {
         var url = $"subscriptions?api-version={SubscriptionsApi}";
-        return await GetAllPagesAsync<ArmSubscription>(tenantId, url, cancellationToken);
+        return await GetAllPagesAsync<ArmSubscription>(url, cancellationToken);
     }
 
     public Task<IReadOnlyList<ArmRoleAssignmentScheduleRequest>> ListPendingApprovalsAsync(
-        string tenantId, IEnumerable<string> scopes, CancellationToken cancellationToken)
+        IEnumerable<string> scopes, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(scopes);
         return FanOutScopesAsync<ArmRoleAssignmentScheduleRequest>(
-            tenantId,
             scopes,
             prefix =>
                 $"{prefix}providers/Microsoft.Authorization/roleAssignmentScheduleRequests" +
                 $"?api-version={AuthorizationApi}" +
-                "&$filter=status eq 'PendingApproval'" +
+                "&$filter=asApprover()" +
                 "&$expand=expandedProperties",
             cancellationToken);
     }
 
     public Task<IReadOnlyList<ArmEligibilitySchedule>> ListEligibleRolesAsync(
-        string tenantId, string principalId, IEnumerable<string> scopes, CancellationToken cancellationToken)
+        string principalId, IEnumerable<string> scopes, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(principalId);
         ArgumentNullException.ThrowIfNull(scopes);
         return FanOutScopesAsync<ArmEligibilitySchedule>(
-            tenantId,
             scopes,
             prefix =>
                 $"{prefix}providers/Microsoft.Authorization/roleEligibilitySchedules" +
@@ -74,7 +74,7 @@ internal sealed class ArmPimClient : IArmPimClient
     }
 
     public async Task<bool?> CheckApprovalRequiredAsync(
-        string tenantId, string scope, string roleDefinitionId, CancellationToken cancellationToken)
+        string scope, string roleDefinitionId, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(scope);
         ArgumentException.ThrowIfNullOrWhiteSpace(roleDefinitionId);
@@ -84,7 +84,7 @@ internal sealed class ArmPimClient : IArmPimClient
             $"{prefix}providers/Microsoft.Authorization/roleManagementPolicyAssignments" +
             $"?api-version={AuthorizationApi}";
 
-        var assignments = await GetAllPagesAsync<ArmPolicyAssignment>(tenantId, assignmentsUrl, cancellationToken);
+        var assignments = await GetAllPagesAsync<ArmPolicyAssignment>(assignmentsUrl, cancellationToken);
         var match = assignments.FirstOrDefault(a =>
             string.Equals(a.Properties?.RoleDefinitionId, roleDefinitionId, StringComparison.OrdinalIgnoreCase));
 
@@ -93,12 +93,12 @@ internal sealed class ArmPimClient : IArmPimClient
         {
             _logger.LogDebug(
                 "No ARM policy assignment found for role {RoleId} at {Scope} (tenant {TenantId}).",
-                roleDefinitionId, scope, tenantId);
+                roleDefinitionId, scope, _tenantId);
             return null;
         }
 
         var policyUrl = $"{policyId!.TrimStart('/')}?api-version={AuthorizationApi}";
-        var policy = await GetJsonAsync<ArmPolicyResponse>(tenantId, policyUrl, cancellationToken);
+        var policy = await GetJsonAsync<ArmPolicyResponse>(policyUrl, cancellationToken);
 
         var approvalRule = policy?.Properties?.Rules?
             .FirstOrDefault(r => string.Equals(r.RuleType, "RoleManagementPolicyApprovalRule", StringComparison.OrdinalIgnoreCase));
@@ -107,7 +107,6 @@ internal sealed class ArmPimClient : IArmPimClient
     }
 
     public async Task<ArmRoleAssignmentScheduleRequest> ActivateRoleAsync(
-        string tenantId,
         string scope,
         string principalId,
         string roleDefinitionId,
@@ -163,7 +162,7 @@ internal sealed class ArmPimClient : IArmPimClient
         {
             Content = JsonContent.Create(body, options: JsonOptions),
         };
-        using var response = await SendAsync(tenantId, request, cancellationToken);
+        using var response = await SendAsync(request, cancellationToken);
         await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
 
         var created = await response.Content.ReadFromJsonAsync<ArmRoleAssignmentScheduleRequest>(JsonOptions, cancellationToken);
@@ -174,13 +173,12 @@ internal sealed class ArmPimClient : IArmPimClient
 
         _logger.LogInformation(
             "Submitted ARM self-activation {RequestId} for role {RoleId} at {Scope} (tenant {TenantId}, status {Status}).",
-            requestId, roleDefinitionId, scope, tenantId, created.Properties?.Status);
+            requestId, roleDefinitionId, scope, _tenantId, created.Properties?.Status);
 
         return created;
     }
 
     public async Task ReviewAsync(
-        string tenantId,
         string scope,
         string approvalId,
         ApprovalDecision decision,
@@ -196,7 +194,7 @@ internal sealed class ArmPimClient : IArmPimClient
         var approvalUrl =
             $"{prefix}providers/Microsoft.Authorization/roleAssignmentApprovals/{approvalId}" +
             $"?api-version={ApprovalApi}";
-        var approval = await GetJsonAsync<ArmApproval>(tenantId, approvalUrl, cancellationToken)
+        var approval = await GetJsonAsync<ArmApproval>(approvalUrl, cancellationToken)
             ?? throw new InvalidOperationException($"ARM approval {approvalId} not found at scope {scope}.");
 
         var openStage = approval.Properties?.Stages?
@@ -225,16 +223,16 @@ internal sealed class ArmPimClient : IArmPimClient
         {
             Content = JsonContent.Create(body, options: JsonOptions),
         };
-        using var response = await SendAsync(tenantId, request, cancellationToken);
+        using var response = await SendAsync(request, cancellationToken);
         await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
             "{Decision} ARM approval {ApprovalId} stage {StageId} at {Scope} (tenant {TenantId}).",
-            decision, approvalId, openStage.Name, scope, tenantId);
+            decision, approvalId, openStage.Name, scope, _tenantId);
     }
 
     public async Task<string?> GetActivationStatusAsync(
-        string tenantId, string scope, string requestId, CancellationToken cancellationToken)
+        string scope, string requestId, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(scope);
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
@@ -244,7 +242,7 @@ internal sealed class ArmPimClient : IArmPimClient
             $"{prefix}providers/Microsoft.Authorization/roleAssignmentScheduleRequests/{requestId}" +
             $"?api-version={AuthorizationApi}";
 
-        var status = await GetJsonAsync<ArmScheduleRequestStatus>(tenantId, url, cancellationToken);
+        var status = await GetJsonAsync<ArmScheduleRequestStatus>(url, cancellationToken);
         return status?.Properties?.Status;
     }
 
@@ -257,7 +255,6 @@ internal sealed class ArmPimClient : IArmPimClient
     private static readonly TimeSpan FanOutBatchPause = TimeSpan.FromMilliseconds(500);
 
     private async Task<IReadOnlyList<T>> FanOutScopesAsync<T>(
-        string tenantId,
         IEnumerable<string> scopes,
         Func<string, string> urlForScope,
         CancellationToken cancellationToken)
@@ -274,7 +271,7 @@ internal sealed class ArmPimClient : IArmPimClient
             var tasks = batch.Select(scope =>
             {
                 var url = urlForScope(NormalizeScope(scope));
-                return GetAllPagesAsync<T>(tenantId, url, cancellationToken);
+                return GetAllPagesAsync<T>(url, cancellationToken);
             });
             foreach (var page in await Task.WhenAll(tasks).ConfigureAwait(false))
             {
@@ -289,32 +286,31 @@ internal sealed class ArmPimClient : IArmPimClient
         return combined;
     }
 
-    private async Task<T?> GetJsonAsync<T>(string tenantId, string url, CancellationToken cancellationToken)
+    private async Task<T?> GetJsonAsync<T>(string url, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        using var response = await SendAsync(tenantId, request, cancellationToken);
+        using var response = await SendAsync(request, cancellationToken);
         await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken);
     }
 
-    private async Task<List<T>> GetAllPagesAsync<T>(string tenantId, string firstUrl, CancellationToken cancellationToken)
+    private async Task<List<T>> GetAllPagesAsync<T>(string firstUrl, CancellationToken cancellationToken)
     {
         var results = new List<T>();
         string? next = firstUrl;
         while (!string.IsNullOrEmpty(next))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var page = await GetJsonAsync<ArmCollection<T>>(tenantId, next, cancellationToken);
+            var page = await GetJsonAsync<ArmCollection<T>>(next, cancellationToken);
             if (page?.Value is not null) results.AddRange(page.Value);
             next = NormalizeNextLink(page?.NextLink);
         }
         return results;
     }
 
-    private Task<HttpResponseMessage> SendAsync(string tenantId, HttpRequestMessage request, CancellationToken cancellationToken)
-        => _ctx.Http.SendAsync(
+    private Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        => _ctx.GetHttpClient(_tenantId).SendAsync(
             PluginHttpClientNames.Arm,
-            tenantId,
             _ctx.ArmScope,
             request,
             cancellationToken);

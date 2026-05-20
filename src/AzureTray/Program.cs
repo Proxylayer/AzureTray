@@ -137,7 +137,7 @@ internal static class Program
         builder.Services.AddSingleton<IWindowsAccountSignInService, WindowsAccountSignInService>();
 
         builder.Services.AddSingleton<IPluginSignatureVerifier, AuthenticodePluginSignatureVerifier>();
-        builder.Services.AddSingleton<IPluginHttpClient, HostPluginHttpClient>();
+        builder.Services.AddSingleton<IPluginHttpClientCore, HostPluginHttpClient>();
         builder.Services.AddSingleton<INuGetPluginFeed, NuGetPluginFeed>();
         builder.Services.AddSingleton<IPackageSecurityScanner, GhsaPackageSecurityScanner>();
         builder.Services.AddSingleton<IExtensionInstaller, ExtensionInstaller>();

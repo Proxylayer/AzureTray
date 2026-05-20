@@ -15,19 +15,18 @@ namespace AzureTray.Plugin.PIM.Arm;
 internal interface IArmPimClient
 {
     Task<IReadOnlyList<ArmSubscription>> ListSubscriptionsAsync(
-        string tenantId, CancellationToken cancellationToken);
+        CancellationToken cancellationToken);
 
     Task<IReadOnlyList<ArmRoleAssignmentScheduleRequest>> ListPendingApprovalsAsync(
-        string tenantId, IEnumerable<string> scopes, CancellationToken cancellationToken);
+        IEnumerable<string> scopes, CancellationToken cancellationToken);
 
     Task<IReadOnlyList<ArmEligibilitySchedule>> ListEligibleRolesAsync(
-        string tenantId, string principalId, IEnumerable<string> scopes, CancellationToken cancellationToken);
+        string principalId, IEnumerable<string> scopes, CancellationToken cancellationToken);
 
     Task<bool?> CheckApprovalRequiredAsync(
-        string tenantId, string scope, string roleDefinitionId, CancellationToken cancellationToken);
+        string scope, string roleDefinitionId, CancellationToken cancellationToken);
 
     Task<ArmRoleAssignmentScheduleRequest> ActivateRoleAsync(
-        string tenantId,
         string scope,
         string principalId,
         string roleDefinitionId,
@@ -37,7 +36,6 @@ internal interface IArmPimClient
         CancellationToken cancellationToken);
 
     Task ReviewAsync(
-        string tenantId,
         string scope,
         string approvalId,
         ApprovalDecision decision,
@@ -45,5 +43,5 @@ internal interface IArmPimClient
         CancellationToken cancellationToken);
 
     Task<string?> GetActivationStatusAsync(
-        string tenantId, string scope, string requestId, CancellationToken cancellationToken);
+        string scope, string requestId, CancellationToken cancellationToken);
 }

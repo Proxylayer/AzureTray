@@ -26,7 +26,7 @@ public sealed class PluginLoader : IPluginLoader, IHostedService
     private readonly IAppPaths _paths;
     private readonly IPluginSignatureVerifier _verifier;
     private readonly PluginOptions _options;
-    private readonly IPluginHttpClient _http;
+    private readonly IPluginHttpClientCore _http;
     private readonly INotifier _notifier;
     private readonly IClipboard _clipboard;
     private readonly ITenantStore _tenantStore;
@@ -39,11 +39,11 @@ public sealed class PluginLoader : IPluginLoader, IHostedService
     private readonly List<LoadedPluginEntry> _entries = new();
     private readonly Lock _entriesGate = new();
 
-    public PluginLoader(
+    internal PluginLoader(
         IAppPaths paths,
         IPluginSignatureVerifier verifier,
         IOptions<PluginOptions> options,
-        IPluginHttpClient http,
+        IPluginHttpClientCore http,
         INotifier notifier,
         IClipboard clipboard,
         ITenantStore tenantStore,

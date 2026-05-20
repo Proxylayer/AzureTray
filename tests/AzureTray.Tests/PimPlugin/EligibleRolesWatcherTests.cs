@@ -20,10 +20,10 @@ public sealed class EligibleRolesWatcherTests
     public async Task PollAsync_PopulatesActiveRoleNames_FromGraph()
     {
         var graph = Substitute.For<IGraphPimClient>();
-        graph.GetSignedInUserIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns("prin-1");
-        graph.ListEligibleRolesAsync("tenant-1", "prin-1", Arg.Any<CancellationToken>())
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
+        graph.ListEligibleRolesAsync("prin-1", Arg.Any<CancellationToken>())
             .Returns(new[] { GraphEligible("Owner", "graph-role-owner") });
-        graph.ListActiveRoleAssignmentsAsync("tenant-1", "prin-1", Arg.Any<CancellationToken>())
+        graph.ListActiveRoleAssignmentsAsync("prin-1", Arg.Any<CancellationToken>())
             .Returns(new[]
             {
                 GraphEligible("Owner", "graph-role-owner"),
@@ -46,10 +46,10 @@ public sealed class EligibleRolesWatcherTests
     public async Task PollAsync_ActiveRoleLookupIsCaseInsensitive()
     {
         var graph = Substitute.For<IGraphPimClient>();
-        graph.GetSignedInUserIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns("prin-1");
-        graph.ListEligibleRolesAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
+        graph.ListEligibleRolesAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(Array.Empty<EntraEligibilitySchedule>());
-        graph.ListActiveRoleAssignmentsAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        graph.ListActiveRoleAssignmentsAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(new[] { GraphEligible("Owner", "graph-role-owner") });
 
         var arm = NewArm();
@@ -65,7 +65,7 @@ public sealed class EligibleRolesWatcherTests
     public async Task PollAsync_NoPrincipal_ProducesEmptySnapshot()
     {
         var graph = Substitute.For<IGraphPimClient>();
-        graph.GetSignedInUserIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((string?)null);
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns((string?)null);
 
         var arm = NewArm();
         var watcher = NewWatcher(graph, arm);
@@ -74,22 +74,21 @@ public sealed class EligibleRolesWatcherTests
 
         Assert.Empty(watcher.CurrentEligibleRoles);
         await graph.DidNotReceive().ListEligibleRolesAsync(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+            Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task PollAsync_PopulatesSnapshotFromBothSources()
     {
         var graph = Substitute.For<IGraphPimClient>();
-        graph.GetSignedInUserIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns("prin-1");
-        graph.ListEligibleRolesAsync("tenant-1", "prin-1", Arg.Any<CancellationToken>())
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
+        graph.ListEligibleRolesAsync("prin-1", Arg.Any<CancellationToken>())
             .Returns(new[] { GraphEligible("Owner", "graph-role-owner") });
 
         var arm = Substitute.For<IArmPimClient>();
-        arm.ListSubscriptionsAsync("tenant-1", Arg.Any<CancellationToken>())
+        arm.ListSubscriptionsAsync(Arg.Any<CancellationToken>())
             .Returns(new[] { ArmSub("sub-1", "Dev") });
         arm.ListEligibleRolesAsync(
-            "tenant-1",
             "prin-1",
             Arg.Any<IEnumerable<string>>(),
             Arg.Any<CancellationToken>())
@@ -110,7 +109,7 @@ public sealed class EligibleRolesWatcherTests
     public async Task HandleActivationAsync_Entra_PromptsAndCallsGraphActivate()
     {
         var graph = Substitute.For<IGraphPimClient>();
-        graph.GetSignedInUserIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns("prin-1");
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
         var arm = NewArm();
         var notifier = Substitute.For<INotifier>();
         notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
@@ -132,7 +131,6 @@ public sealed class EligibleRolesWatcherTests
         await watcher.HandleActivationAsync(role, CancellationToken.None);
 
         await graph.Received(1).ActivateRoleAsync(
-            "tenant-1",
             "prin-1",
             "graph-role-owner",
             TimeSpan.FromHours(4),
@@ -140,7 +138,7 @@ public sealed class EligibleRolesWatcherTests
             Arg.Any<CancellationToken>());
         await arm.DidNotReceive().ActivateRoleAsync(
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<TimeSpan>(),
+            Arg.Any<string>(), Arg.Any<TimeSpan>(),
             Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
@@ -148,7 +146,7 @@ public sealed class EligibleRolesWatcherTests
     public async Task HandleActivationAsync_Arm_PromptsAndCallsArmActivateWithScopeAndEligibilityId()
     {
         var graph = Substitute.For<IGraphPimClient>();
-        graph.GetSignedInUserIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns("prin-1");
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
         var arm = NewArm();
         var notifier = Substitute.For<INotifier>();
         notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
@@ -170,7 +168,6 @@ public sealed class EligibleRolesWatcherTests
         await watcher.HandleActivationAsync(role, CancellationToken.None);
 
         await arm.Received(1).ActivateRoleAsync(
-            "tenant-1",
             "/subscriptions/sub-1",
             "prin-1",
             "arm-role-contributor",
@@ -184,7 +181,7 @@ public sealed class EligibleRolesWatcherTests
     public async Task HandleActivationAsync_DismissedAtDuration_DoesNotActivate()
     {
         var graph = Substitute.For<IGraphPimClient>();
-        graph.GetSignedInUserIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns("prin-1");
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
         var arm = NewArm();
         var notifier = Substitute.For<INotifier>();
         notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
@@ -204,7 +201,7 @@ public sealed class EligibleRolesWatcherTests
         await watcher.HandleActivationAsync(role, CancellationToken.None);
 
         await graph.DidNotReceive().ActivateRoleAsync(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<TimeSpan>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
@@ -212,7 +209,7 @@ public sealed class EligibleRolesWatcherTests
     public async Task HandleActivationAsync_BlankJustification_DoesNotActivate()
     {
         var graph = Substitute.For<IGraphPimClient>();
-        graph.GetSignedInUserIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns("prin-1");
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
         var arm = NewArm();
         var notifier = Substitute.For<INotifier>();
         notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
@@ -234,7 +231,7 @@ public sealed class EligibleRolesWatcherTests
         await watcher.HandleActivationAsync(role, CancellationToken.None);
 
         await graph.DidNotReceive().ActivateRoleAsync(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<TimeSpan>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
@@ -277,9 +274,9 @@ public sealed class EligibleRolesWatcherTests
         IReadOnlyList<ArmEligibilitySchedule>? roles = null)
     {
         var arm = Substitute.For<IArmPimClient>();
-        arm.ListSubscriptionsAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+        arm.ListSubscriptionsAsync(Arg.Any<CancellationToken>())
             .Returns(subscriptions ?? Array.Empty<ArmSubscription>());
-        arm.ListEligibleRolesAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
+        arm.ListEligibleRolesAsync(Arg.Any<string>(), Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
             .Returns(roles ?? Array.Empty<ArmEligibilitySchedule>());
         return arm;
     }

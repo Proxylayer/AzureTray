@@ -12,7 +12,7 @@ using AzureTray.Plugin.Contracts;
 
 namespace AzureTray.Plugins;
 
-public sealed class HostPluginHttpClient : IPluginHttpClient
+public sealed class HostPluginHttpClient : IPluginHttpClientCore
 {
     private readonly IHttpClientFactory _httpFactory;
     private readonly ICredentialFactory _credentials;
@@ -28,7 +28,7 @@ public sealed class HostPluginHttpClient : IPluginHttpClient
         _logger = logger;
     }
 
-    public async Task<HttpResponseMessage> SendAsync(
+    public async Task<HttpResponseMessage> SendCoreAsync(
         string clientName,
         string tenantId,
         string scope,

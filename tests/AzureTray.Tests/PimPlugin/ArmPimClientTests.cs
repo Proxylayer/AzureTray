@@ -28,9 +28,9 @@ public sealed class ArmPimClientTests
             ] }
             """));
 
-        var client = new ArmPimClient(NewContext(routes));
+        var client = new ArmPimClient(NewContext(routes), "tenant-1");
 
-        var subs = await client.ListSubscriptionsAsync("tenant-1", CancellationToken.None);
+        var subs = await client.ListSubscriptionsAsync(CancellationToken.None);
 
         Assert.Equal(2, subs.Count);
         Assert.Equal("sub-1", subs[0].SubscriptionId);
@@ -41,7 +41,8 @@ public sealed class ArmPimClientTests
     public async Task ListPendingApprovalsAsync_QueriesEachScope_AndConcatenates()
     {
         var routes = new RoutedPluginHttp();
-        routes.OnGet(r => r.RequestUri!.PathAndQuery.StartsWith("/subscriptions/sub-1/providers/Microsoft.Authorization/roleAssignmentScheduleRequests", StringComparison.Ordinal),
+        routes.OnGet(r => r.RequestUri!.PathAndQuery.StartsWith("/subscriptions/sub-1/providers/Microsoft.Authorization/roleAssignmentScheduleRequests", StringComparison.Ordinal)
+                       && r.RequestUri.Query.Contains("asApprover()", StringComparison.Ordinal),
             _ => Json("""
                 { "value": [{
                     "id": "/.../req-1",
@@ -49,7 +50,8 @@ public sealed class ArmPimClientTests
                     "properties": { "status": "PendingApproval", "approvalId": "approval-1" }
                 }] }
                 """));
-        routes.OnGet(r => r.RequestUri!.PathAndQuery.StartsWith("/subscriptions/sub-2/providers/Microsoft.Authorization/roleAssignmentScheduleRequests", StringComparison.Ordinal),
+        routes.OnGet(r => r.RequestUri!.PathAndQuery.StartsWith("/subscriptions/sub-2/providers/Microsoft.Authorization/roleAssignmentScheduleRequests", StringComparison.Ordinal)
+                       && r.RequestUri.Query.Contains("asApprover()", StringComparison.Ordinal),
             _ => Json("""
                 { "value": [{
                     "id": "/.../req-2",
@@ -58,10 +60,9 @@ public sealed class ArmPimClientTests
                 }] }
                 """));
 
-        var client = new ArmPimClient(NewContext(routes));
+        var client = new ArmPimClient(NewContext(routes), "tenant-1");
 
         var pending = await client.ListPendingApprovalsAsync(
-            "tenant-1",
             new[] { "/subscriptions/sub-1", "/subscriptions/sub-2" },
             CancellationToken.None);
 
@@ -94,10 +95,9 @@ public sealed class ArmPimClientTests
                 """);
         });
 
-        var client = new ArmPimClient(NewContext(routes));
+        var client = new ArmPimClient(NewContext(routes), "tenant-1");
 
         var result = await client.ActivateRoleAsync(
-            tenantId: "tenant-1",
             scope: "/subscriptions/sub-1",
             principalId: "prin-1",
             roleDefinitionId: "/subscriptions/sub-1/providers/Microsoft.Authorization/roleDefinitions/role-a",
@@ -147,10 +147,9 @@ public sealed class ArmPimClientTests
                 return new HttpResponseMessage(HttpStatusCode.OK);
             });
 
-        var client = new ArmPimClient(NewContext(routes));
+        var client = new ArmPimClient(NewContext(routes), "tenant-1");
 
         await client.ReviewAsync(
-            "tenant-1",
             "/subscriptions/sub-1",
             "approval-1",
             ApprovalDecision.Deny,
@@ -174,10 +173,9 @@ public sealed class ArmPimClientTests
             }
             """));
 
-        var client = new ArmPimClient(NewContext(routes));
+        var client = new ArmPimClient(NewContext(routes), "tenant-1");
 
         var status = await client.GetActivationStatusAsync(
-            "tenant-1",
             "/subscriptions/sub-1",
             "req-1",
             CancellationToken.None);
@@ -188,7 +186,7 @@ public sealed class ArmPimClientTests
     private static IPluginContext NewContext(IPluginHttpClient http)
     {
         var ctx = Substitute.For<IPluginContext>();
-        ctx.Http.Returns(http);
+        ctx.GetHttpClient(Arg.Any<string>()).Returns(http);
         ctx.Logger.Returns(NullLogger<ArmPimClientTests>.Instance);
         ctx.ArmScope.Returns("https://management.azure.com/.default");
         ctx.GraphScope.Returns("https://graph.microsoft.com/.default");
@@ -220,7 +218,7 @@ public sealed class ArmPimClientTests
             => _routes.Add((HttpMethod.Get, match, reply));
 
         public Task<HttpResponseMessage> SendAsync(
-            string clientName, string tenantId, string scope,
+            string clientName, string scope,
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
             if (request.RequestUri is { IsAbsoluteUri: false })

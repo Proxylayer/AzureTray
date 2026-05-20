@@ -19,4 +19,4 @@ internal sealed record ArmApprovalStageProperties(
     string? Status,
     string? ReviewResult,
     string? Justification,
-    string? AssignedToMe);
+    bool? AssignedToMe);

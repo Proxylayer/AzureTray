@@ -85,7 +85,7 @@ public sealed class PluginLoaderTests : IDisposable
         var verifier = new AuthenticodePluginSignatureVerifier(
             NullLogger<AuthenticodePluginSignatureVerifier>.Instance);
 
-        var http = Substitute.For<IPluginHttpClient>();
+        var http = Substitute.For<IPluginHttpClientCore>();
         var notifier = Substitute.For<INotifier>();
         var clipboard = Substitute.For<IClipboard>();
         var tenantStore = Substitute.For<ITenantStore>();

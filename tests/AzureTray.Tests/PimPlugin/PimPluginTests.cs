@@ -96,7 +96,7 @@ public sealed class PimPluginTests
         ctx.ReadyTenants.Returns(tenants);
 
         var http = Substitute.For<IPluginHttpClient>();
-        ctx.Http.Returns(http);
+        ctx.GetHttpClient(Arg.Any<string>()).Returns(http);
 
         var notifier = Substitute.For<INotifier>();
         ctx.Notifier.Returns(notifier);

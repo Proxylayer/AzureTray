@@ -44,9 +44,8 @@ internal sealed class LapsGraphClient
             cancellationToken.ThrowIfCancellationRequested();
 
             using var request = new HttpRequestMessage(HttpMethod.Get, next);
-            using var response = await _context.Http.SendAsync(
+            using var response = await _context.GetHttpClient(tenantId).SendAsync(
                 PluginHttpClientNames.Graph,
-                tenantId,
                 _context.GraphScope,
                 request,
                 cancellationToken).ConfigureAwait(false);
@@ -99,9 +98,8 @@ internal sealed class LapsGraphClient
     {
         var url = $"v1.0/directory/deviceLocalCredentials/{directoryRecordId}?$select=credentials";
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        using var response = await _context.Http.SendAsync(
+        using var response = await _context.GetHttpClient(tenantId).SendAsync(
             PluginHttpClientNames.Graph,
-            tenantId,
             _context.GraphScope,
             request,
             cancellationToken).ConfigureAwait(false);

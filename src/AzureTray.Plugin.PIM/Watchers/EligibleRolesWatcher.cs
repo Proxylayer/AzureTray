@@ -254,7 +254,7 @@ internal sealed class EligibleRolesWatcher
     {
         try
         {
-            var actives = await _graph.ListActiveRoleAssignmentsAsync(_tenant.TenantId, principalId, ct).ConfigureAwait(false);
+            var actives = await _graph.ListActiveRoleAssignmentsAsync(principalId, ct).ConfigureAwait(false);
             var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var item in actives)
             {
@@ -329,7 +329,6 @@ internal sealed class EligibleRolesWatcher
             {
                 case PimSource.EntraId:
                     await _graph.ActivateRoleAsync(
-                        _tenant.TenantId,
                         principalId,
                         role.RoleDefinitionId,
                         duration,
@@ -355,7 +354,6 @@ internal sealed class EligibleRolesWatcher
                         return;
                     }
                     await _arm.ActivateRoleAsync(
-                        _tenant.TenantId,
                         role.ArmScope,
                         principalId,
                         role.RoleDefinitionId,
@@ -471,7 +469,7 @@ internal sealed class EligibleRolesWatcher
         if (!string.IsNullOrWhiteSpace(_cachedPrincipalId)) return _cachedPrincipalId;
         try
         {
-            _cachedPrincipalId = await _graph.GetSignedInUserIdAsync(_tenant.TenantId, ct).ConfigureAwait(false);
+            _cachedPrincipalId = await _graph.GetSignedInUserIdAsync(ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return null; }
         catch (Exception ex)
@@ -488,7 +486,7 @@ internal sealed class EligibleRolesWatcher
     {
         try
         {
-            var schedules = await _graph.ListEligibleRolesAsync(_tenant.TenantId, principalId, ct).ConfigureAwait(false);
+            var schedules = await _graph.ListEligibleRolesAsync(principalId, ct).ConfigureAwait(false);
             return schedules
                 .Where(s => !string.IsNullOrWhiteSpace(s.RoleDefinitionId))
                 .Select(s => new UnifiedEligibleRole(
@@ -515,7 +513,7 @@ internal sealed class EligibleRolesWatcher
     {
         try
         {
-            var subs = await _arm.ListSubscriptionsAsync(_tenant.TenantId, ct).ConfigureAwait(false);
+            var subs = await _arm.ListSubscriptionsAsync(ct).ConfigureAwait(false);
             if (subs.Count == 0) return new();
 
             var scopes = subs
@@ -524,7 +522,7 @@ internal sealed class EligibleRolesWatcher
                 .ToList();
             if (scopes.Count == 0) return new();
 
-            var schedules = await _arm.ListEligibleRolesAsync(_tenant.TenantId, principalId, scopes, ct).ConfigureAwait(false);
+            var schedules = await _arm.ListEligibleRolesAsync(principalId, scopes, ct).ConfigureAwait(false);
 
             return schedules
                 .Where(s => !string.IsNullOrWhiteSpace(s.Properties?.RoleDefinitionId))

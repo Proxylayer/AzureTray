@@ -42,8 +42,6 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _watcherLock = new();
     private IPluginContext? _context;
-    private IGraphPimClient? _graphPim;
-    private IArmPimClient? _armPim;
     private CancellationTokenSource? _lifetimeCts;
 
     // Iteration helpers used by menu builders. Snapshots under the lock so the
@@ -257,8 +255,6 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
     public Task InitializeAsync(IPluginContext context, CancellationToken cancellationToken)
     {
         _context = context;
-        _graphPim = new GraphPimClient(context);
-        _armPim = new ArmPimClient(context);
         _lifetimeCts = new CancellationTokenSource();
 
         // Subscribe before backfill so we don't miss a tenant that becomes
@@ -286,21 +282,26 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
 
     private void StartWatchersFor(PluginTenant tenant)
     {
-        if (_graphPim is null || _armPim is null || _lifetimeCts is null || _context is null) return;
+        if (_lifetimeCts is null || _context is null) return;
 
         lock (_watcherLock)
         {
             if (_watchersByTenant.ContainsKey(tenant.TenantId)) return;
 
+            // Each tenant gets its own client instances so token acquisition
+            // is scoped to that specific tenant — no cross-tenant leakage.
+            var graph = new GraphPimClient(_context, tenant.TenantId);
+            var arm = new ArmPimClient(_context, tenant.TenantId);
+
             // Eligibility runs first so its subscription set is available to
             // the pending watcher's relevant-subs filter (captured by Func).
-            var eligible = new EligibleRolesWatcher(_graphPim, _armPim, _context, tenant, EligiblePollInterval);
+            var eligible = new EligibleRolesWatcher(graph, arm, _context, tenant, EligiblePollInterval);
             eligible.PollStarted += OnWatcherPollStarted;
             eligible.PollCompleted += OnWatcherPollCompleted;
             eligible.Start(_lifetimeCts.Token);
 
             var pending = new PendingApprovalWatcher(
-                _graphPim, _armPim, _context, tenant, PendingPollInterval,
+                graph, arm, _context, tenant, PendingPollInterval,
                 relevantSubscriptions: () => eligible.RelevantSubscriptionIds);
             pending.PollStarted += OnWatcherPollStarted;
             pending.PollCompleted += OnWatcherPollCompleted;
@@ -373,8 +374,6 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             await entry.Eligible.StopAsync().ConfigureAwait(false);
         }
 
-        _armPim = null;
-        _graphPim = null;
         _context = null;
         _lifetimeCts?.Dispose();
         _lifetimeCts = null;

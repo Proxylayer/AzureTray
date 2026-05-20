@@ -26,21 +26,23 @@ internal sealed class GraphPimClient : IGraphPimClient
 
     private readonly IPluginContext _ctx;
     private readonly ILogger _logger;
+    private readonly string _tenantId;
 
-    public GraphPimClient(IPluginContext ctx)
+    public GraphPimClient(IPluginContext ctx, string tenantId)
     {
         _ctx = ctx;
         _logger = ctx.Logger;
+        _tenantId = tenantId;
     }
 
-    public async Task<string?> GetSignedInUserIdAsync(string tenantId, CancellationToken cancellationToken)
+    public async Task<string?> GetSignedInUserIdAsync(CancellationToken cancellationToken)
     {
-        var me = await GetJsonAsync<EntraMe>(tenantId, "v1.0/me?$select=id", cancellationToken);
+        var me = await GetJsonAsync<EntraMe>("v1.0/me?$select=id", cancellationToken);
         return me?.Id;
     }
 
     public async Task<IReadOnlyList<EntraEligibilitySchedule>> ListActiveRoleAssignmentsAsync(
-        string tenantId, string principalId, CancellationToken cancellationToken)
+        string principalId, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(principalId);
 
@@ -49,11 +51,11 @@ internal sealed class GraphPimClient : IGraphPimClient
             $"?$filter=principalId eq '{principalId}'" +
             "&$expand=roleDefinition";
 
-        return await GetAllPagesAsync<EntraEligibilitySchedule>(tenantId, url, cancellationToken);
+        return await GetAllPagesAsync<EntraEligibilitySchedule>(url, cancellationToken);
     }
 
     public async Task<IReadOnlyList<EntraEligibilitySchedule>> ListEligibleRolesAsync(
-        string tenantId, string principalId, CancellationToken cancellationToken)
+        string principalId, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(principalId);
 
@@ -62,22 +64,22 @@ internal sealed class GraphPimClient : IGraphPimClient
             $"?$filter=principalId eq '{principalId}'" +
             "&$expand=roleDefinition,principal";
 
-        return await GetAllPagesAsync<EntraEligibilitySchedule>(tenantId, url, cancellationToken);
+        return await GetAllPagesAsync<EntraEligibilitySchedule>(url, cancellationToken);
     }
 
     public async Task<IReadOnlyList<EntraScheduleRequest>> ListPendingApprovalsAsync(
-        string tenantId, CancellationToken cancellationToken)
+        CancellationToken cancellationToken)
     {
         var url =
             "v1.0/roleManagement/directory/roleAssignmentScheduleRequests" +
             "?$filter=status eq 'PendingApproval'" +
             "&$expand=principal,roleDefinition";
 
-        return await GetAllPagesAsync<EntraScheduleRequest>(tenantId, url, cancellationToken);
+        return await GetAllPagesAsync<EntraScheduleRequest>(url, cancellationToken);
     }
 
     public async Task<bool?> CheckApprovalRequiredAsync(
-        string tenantId, string roleDefinitionId, CancellationToken cancellationToken)
+        string roleDefinitionId, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(roleDefinitionId);
 
@@ -85,21 +87,20 @@ internal sealed class GraphPimClient : IGraphPimClient
             "v1.0/policies/roleManagementPolicyAssignments" +
             $"?$filter=scopeId eq '/' and scopeType eq 'Directory' and roleDefinitionId eq '{roleDefinitionId}'";
 
-        var assignments = await GetAllPagesAsync<EntraPolicyAssignment>(tenantId, assignmentUrl, cancellationToken);
+        var assignments = await GetAllPagesAsync<EntraPolicyAssignment>(assignmentUrl, cancellationToken);
         var policyId = assignments.FirstOrDefault()?.PolicyId;
         if (string.IsNullOrWhiteSpace(policyId))
         {
-            _logger.LogDebug("No policy assignment found for role {RoleId} in tenant {TenantId}.", roleDefinitionId, tenantId);
+            _logger.LogDebug("No policy assignment found for role {RoleId} in tenant {TenantId}.", roleDefinitionId, _tenantId);
             return null;
         }
 
         var ruleUrl = $"v1.0/policies/roleManagementPolicies/{policyId}/rules/Approval_EndUser_Assignment";
-        var rule = await GetJsonAsync<EntraApprovalRule>(tenantId, ruleUrl, cancellationToken);
+        var rule = await GetJsonAsync<EntraApprovalRule>(ruleUrl, cancellationToken);
         return rule?.Setting?.IsApprovalRequired;
     }
 
     public async Task<EntraScheduleRequest> ActivateRoleAsync(
-        string tenantId,
         string principalId,
         string roleDefinitionId,
         TimeSpan duration,
@@ -139,7 +140,6 @@ internal sealed class GraphPimClient : IGraphPimClient
         };
 
         var created = await PostJsonAsync<EntraScheduleRequest>(
-            tenantId,
             "v1.0/roleManagement/directory/roleAssignmentScheduleRequests",
             body,
             cancellationToken);
@@ -151,13 +151,12 @@ internal sealed class GraphPimClient : IGraphPimClient
 
         _logger.LogInformation(
             "Submitted self-activation {RequestId} for role {RoleId} on tenant {TenantId} ({Status}).",
-            created.Id, roleDefinitionId, tenantId, created.Status);
+            created.Id, roleDefinitionId, _tenantId, created.Status);
 
         return created;
     }
 
     public async Task ReviewAsync(
-        string tenantId,
         string approvalId,
         ApprovalDecision decision,
         string justification,
@@ -167,7 +166,7 @@ internal sealed class GraphPimClient : IGraphPimClient
         ArgumentException.ThrowIfNullOrWhiteSpace(justification);
 
         var getUrl = $"beta/roleManagement/directory/roleAssignmentApprovals/{approvalId}?$expand=steps";
-        var approval = await GetJsonAsync<EntraApproval>(tenantId, getUrl, cancellationToken)
+        var approval = await GetJsonAsync<EntraApproval>(getUrl, cancellationToken)
             ?? throw new InvalidOperationException($"Approval {approvalId} not found.");
 
         var openStep = approval.Steps?
@@ -180,52 +179,52 @@ internal sealed class GraphPimClient : IGraphPimClient
 
         var reviewResult = decision == ApprovalDecision.Approve ? "Approve" : "Deny";
         var patchUrl = $"beta/roleManagement/directory/roleAssignmentApprovals/{approvalId}/steps/{openStep.Id}";
-        await PatchJsonAsync(tenantId, patchUrl, new { reviewResult, justification }, cancellationToken);
+        await PatchJsonAsync(patchUrl, new { reviewResult, justification }, cancellationToken);
 
         _logger.LogInformation(
             "{Decision} approval {ApprovalId} step {StepId} on tenant {TenantId}.",
-            decision, approvalId, openStep.Id, tenantId);
+            decision, approvalId, openStep.Id, _tenantId);
     }
 
     public async Task<string?> GetActivationStatusAsync(
-        string tenantId, string requestId, CancellationToken cancellationToken)
+        string requestId, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
         var url = $"v1.0/roleManagement/directory/roleAssignmentScheduleRequests/{requestId}?$select=id,status";
-        var status = await GetJsonAsync<EntraScheduleRequestStatus>(tenantId, url, cancellationToken);
+        var status = await GetJsonAsync<EntraScheduleRequestStatus>(url, cancellationToken);
         return status?.Status;
     }
 
-    private async Task<T?> GetJsonAsync<T>(string tenantId, string url, CancellationToken cancellationToken)
+    private async Task<T?> GetJsonAsync<T>(string url, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        using var response = await SendAsync(tenantId, request, cancellationToken);
+        using var response = await SendAsync(request, cancellationToken);
         await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken);
     }
 
-    private async Task<T?> PostJsonAsync<T>(string tenantId, string url, object body, CancellationToken cancellationToken)
+    private async Task<T?> PostJsonAsync<T>(string url, object body, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, url)
         {
             Content = JsonContent.Create(body, options: JsonOptions),
         };
-        using var response = await SendAsync(tenantId, request, cancellationToken);
+        using var response = await SendAsync(request, cancellationToken);
         await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
         return await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken);
     }
 
-    private async Task PatchJsonAsync(string tenantId, string url, object body, CancellationToken cancellationToken)
+    private async Task PatchJsonAsync(string url, object body, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Patch, url)
         {
             Content = JsonContent.Create(body, options: JsonOptions),
         };
-        using var response = await SendAsync(tenantId, request, cancellationToken);
+        using var response = await SendAsync(request, cancellationToken);
         await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<List<T>> GetAllPagesAsync<T>(string tenantId, string firstUrl, CancellationToken cancellationToken)
+    private async Task<List<T>> GetAllPagesAsync<T>(string firstUrl, CancellationToken cancellationToken)
     {
         var results = new List<T>();
         string? next = firstUrl;
@@ -233,7 +232,7 @@ internal sealed class GraphPimClient : IGraphPimClient
         {
             cancellationToken.ThrowIfCancellationRequested();
             using var request = new HttpRequestMessage(HttpMethod.Get, next);
-            using var response = await SendAsync(tenantId, request, cancellationToken);
+            using var response = await SendAsync(request, cancellationToken);
             await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
             var page = await response.Content.ReadFromJsonAsync<ODataPage<T>>(JsonOptions, cancellationToken);
             if (page?.Value is not null)
@@ -274,10 +273,9 @@ internal sealed class GraphPimClient : IGraphPimClient
             statusCode: response.StatusCode);
     }
 
-    private Task<HttpResponseMessage> SendAsync(string tenantId, HttpRequestMessage request, CancellationToken cancellationToken)
-        => _ctx.Http.SendAsync(
+    private Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        => _ctx.GetHttpClient(_tenantId).SendAsync(
             PluginHttpClientNames.Graph,
-            tenantId,
             _ctx.GraphScope,
             request,
             cancellationToken);

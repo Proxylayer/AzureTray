@@ -25,16 +25,15 @@ public interface IPluginHttpClient
 {
     /// <summary>
     /// Sends an authenticated HTTP request using a host-managed named client.
+    /// The tenant this client is scoped to is fixed at the time it is obtained
+    /// from <see cref="IPluginContext.GetHttpClient"/> — you cannot override it
+    /// here. This is intentional: a per-tenant client can only acquire tokens
+    /// for its own tenant.
     /// </summary>
     /// <param name="clientName">
     /// Named client registered in the host.
     /// Use <see cref="PluginHttpClientNames.Graph"/> or
     /// <see cref="PluginHttpClientNames.Arm"/> for standard Microsoft APIs.
-    /// </param>
-    /// <param name="tenantId">
-    /// Tenant the call is scoped to. The host fetches the matching credential.
-    /// Verify the tenant is ready first with
-    /// <see cref="IPluginContext.IsTenantReady"/>.
     /// </param>
     /// <param name="scope">
     /// OAuth scope for token acquisition, e.g.
@@ -53,7 +52,6 @@ public interface IPluginHttpClient
     /// </returns>
     Task<System.Net.Http.HttpResponseMessage> SendAsync(
         string clientName,
-        string tenantId,
         string scope,
         System.Net.Http.HttpRequestMessage request,
         CancellationToken cancellationToken);

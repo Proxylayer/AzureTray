@@ -48,10 +48,10 @@ public sealed class PendingApprovalWatcherTests
         await Settle();
 
         await graph.Received(1).ReviewAsync(
-            "tenant-1", "approval-1", ApprovalDecision.Approve,
+            "approval-1", ApprovalDecision.Approve,
             "Needed for incident #42", Arg.Any<CancellationToken>());
         await arm.DidNotReceive().ReviewAsync(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<ApprovalDecision>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
@@ -72,14 +72,13 @@ public sealed class PendingApprovalWatcherTests
         await Settle();
 
         await arm.Received(1).ReviewAsync(
-            "tenant-1",
             "/subscriptions/sub-1",
             "approval-arm-1",
             ApprovalDecision.Approve,
             "operations",
             Arg.Any<CancellationToken>());
         await graph.DidNotReceive().ReviewAsync(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<ApprovalDecision>(),
+            Arg.Any<string>(), Arg.Any<ApprovalDecision>(),
             Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
@@ -100,7 +99,6 @@ public sealed class PendingApprovalWatcherTests
         await Settle();
 
         await arm.Received(1).ReviewAsync(
-            "tenant-1",
             "/subscriptions/sub-1",
             "approval-arm-1",
             ApprovalDecision.Deny,
@@ -139,7 +137,7 @@ public sealed class PendingApprovalWatcherTests
         await Settle();
 
         await graph.DidNotReceive().ReviewAsync(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<ApprovalDecision>(),
+            Arg.Any<string>(), Arg.Any<ApprovalDecision>(),
             Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
@@ -158,7 +156,7 @@ public sealed class PendingApprovalWatcherTests
         await Settle();
 
         await graph.DidNotReceive().ReviewAsync(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<ApprovalDecision>(),
+            Arg.Any<string>(), Arg.Any<ApprovalDecision>(),
             Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
@@ -166,7 +164,7 @@ public sealed class PendingApprovalWatcherTests
     public async Task PollAsync_DropsSeenId_WhenApprovalNoLongerListed()
     {
         var graph = Substitute.For<IGraphPimClient>();
-        graph.ListPendingApprovalsAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+        graph.ListPendingApprovalsAsync(Arg.Any<CancellationToken>())
             .Returns(
                 new[] { GraphPending("approval-1", "Alice", "Owner") },
                 Array.Empty<EntraScheduleRequest>(),
@@ -215,8 +213,8 @@ public sealed class PendingApprovalWatcherTests
         // somebody else. Only the someone-else approval should reach the
         // notifier and the snapshot.
         var graph = Substitute.For<IGraphPimClient>();
-        graph.GetSignedInUserIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns("me-objectid");
-        graph.ListPendingApprovalsAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("me-objectid");
+        graph.ListPendingApprovalsAsync(Arg.Any<CancellationToken>())
             .Returns(new[]
             {
                 GraphPendingFor("approval-self", "me-objectid", "Self", "Owner"),
@@ -242,8 +240,8 @@ public sealed class PendingApprovalWatcherTests
         // Graph /me fails or returns null — fall back to legacy behaviour:
         // surface every approval, including ones the user authored.
         var graph = Substitute.For<IGraphPimClient>();
-        graph.GetSignedInUserIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((string?)null);
-        graph.ListPendingApprovalsAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns((string?)null);
+        graph.ListPendingApprovalsAsync(Arg.Any<CancellationToken>())
             .Returns(new[] { GraphPendingFor("approval-self", "me-objectid", "Self", "Owner") });
         var arm = NewArm();
         var notifier = NewNotifier();
@@ -262,7 +260,7 @@ public sealed class PendingApprovalWatcherTests
     {
         var graph = NewGraph(approvals: new[] { GraphPending("approval-1", "Alice", "Owner") });
         var arm = Substitute.For<IArmPimClient>();
-        arm.ListSubscriptionsAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+        arm.ListSubscriptionsAsync(Arg.Any<CancellationToken>())
             .Returns<Task<IReadOnlyList<ArmSubscription>>>(_ => throw new InvalidOperationException("ARM down"));
         var notifier = NewNotifier();
 
@@ -326,7 +324,7 @@ public sealed class PendingApprovalWatcherTests
     private static IGraphPimClient NewGraph(IReadOnlyList<EntraScheduleRequest>? approvals = null)
     {
         var graph = Substitute.For<IGraphPimClient>();
-        graph.ListPendingApprovalsAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+        graph.ListPendingApprovalsAsync(Arg.Any<CancellationToken>())
             .Returns(approvals ?? Array.Empty<EntraScheduleRequest>());
         return graph;
     }
@@ -336,9 +334,9 @@ public sealed class PendingApprovalWatcherTests
         IReadOnlyList<ArmRoleAssignmentScheduleRequest>? approvals = null)
     {
         var arm = Substitute.For<IArmPimClient>();
-        arm.ListSubscriptionsAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+        arm.ListSubscriptionsAsync(Arg.Any<CancellationToken>())
             .Returns(subscriptions ?? Array.Empty<ArmSubscription>());
-        arm.ListPendingApprovalsAsync(Arg.Any<string>(), Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
+        arm.ListPendingApprovalsAsync(Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
             .Returns(approvals ?? Array.Empty<ArmRoleAssignmentScheduleRequest>());
         return arm;
     }

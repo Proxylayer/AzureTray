@@ -166,7 +166,7 @@ internal sealed class PendingApprovalWatcher
         if (_signedInUserIdResolved) return;
         try
         {
-            _signedInUserId = await _graph.GetSignedInUserIdAsync(_tenant.TenantId, ct).ConfigureAwait(false);
+            _signedInUserId = await _graph.GetSignedInUserIdAsync(ct).ConfigureAwait(false);
             _signedInUserIdResolved = true;
             if (string.IsNullOrWhiteSpace(_signedInUserId))
             {
@@ -199,7 +199,7 @@ internal sealed class PendingApprovalWatcher
     {
         try
         {
-            var requests = await _graph.ListPendingApprovalsAsync(_tenant.TenantId, ct).ConfigureAwait(false);
+            var requests = await _graph.ListPendingApprovalsAsync(ct).ConfigureAwait(false);
             return requests
                 .Where(r => !string.IsNullOrWhiteSpace(r.ApprovalId))
                 .Select(r => new UnifiedPendingApproval(
@@ -227,7 +227,7 @@ internal sealed class PendingApprovalWatcher
     {
         try
         {
-            var subs = await _arm.ListSubscriptionsAsync(_tenant.TenantId, ct).ConfigureAwait(false);
+            var subs = await _arm.ListSubscriptionsAsync(ct).ConfigureAwait(false);
             if (subs.Count == 0) return new();
 
             var relevant = _relevantSubscriptions?.Invoke();
@@ -241,13 +241,13 @@ internal sealed class PendingApprovalWatcher
                 .ToList();
             if (scopes.Count == 0) return new();
 
-            var requests = await _arm.ListPendingApprovalsAsync(_tenant.TenantId, scopes, ct).ConfigureAwait(false);
+            var requests = await _arm.ListPendingApprovalsAsync(scopes, ct).ConfigureAwait(false);
 
             return requests
                 .Where(r => !string.IsNullOrWhiteSpace(r.Properties?.ApprovalId))
                 .Select(r => new UnifiedPendingApproval(
                     Source: PimSource.AzureRbac,
-                    ApprovalId: r.Properties!.ApprovalId!,
+                    ApprovalId: ParseArmApprovalId(r.Properties!.ApprovalId!),
                     PrincipalDisplay: r.Properties.ExpandedProperties?.Principal?.DisplayName ?? "(unknown user)",
                     RoleDisplay: r.Properties.ExpandedProperties?.RoleDefinition?.DisplayName ?? "(unknown role)",
                     ScopeDisplay: r.Properties.ExpandedProperties?.Scope?.DisplayName ?? r.Properties.Scope ?? "(unknown scope)",
@@ -312,7 +312,6 @@ internal sealed class PendingApprovalWatcher
             {
                 case PimSource.EntraId:
                     await _graph.ReviewAsync(
-                        _tenant.TenantId,
                         approval.ApprovalId,
                         decision.Value,
                         justText,
@@ -328,7 +327,6 @@ internal sealed class PendingApprovalWatcher
                         return;
                     }
                     await _arm.ReviewAsync(
-                        _tenant.TenantId,
                         approval.ArmScope,
                         approval.ApprovalId,
                         decision.Value,
@@ -345,5 +343,17 @@ internal sealed class PendingApprovalWatcher
                 "Failed to handle {Source} approval {ApprovalId} on tenant {TenantId}.",
                 approval.Source, approval.ApprovalId, _tenant.TenantId);
         }
+    }
+
+    // ARM returns approvalId as a scope-relative resource path such as
+    // "/providers/Microsoft.Authorization/roleAssignmentApprovals/{guid}".
+    // Extract the trailing GUID segment so URL construction in ReviewAsync
+    // doesn't double-up the provider path.
+    private static string ParseArmApprovalId(string approvalId)
+    {
+        var last = approvalId.LastIndexOf('/');
+        return last >= 0 && last < approvalId.Length - 1
+            ? approvalId[(last + 1)..]
+            : approvalId;
     }
 }

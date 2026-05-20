@@ -109,23 +109,44 @@ public sealed class WindowsAccountSignInService : IWindowsAccountSignInService
 
     private async Task<WindowsAccount> SignInWithBrokerPickerAsync(string? loginHint, CancellationToken cancellationToken)
     {
-        var clientId = !string.IsNullOrWhiteSpace(_auth.ClientId)
-            ? _auth.ClientId
-            : AuthDefaults.PublicClientId;
+        var configuredClientId = !string.IsNullOrWhiteSpace(_auth.ClientId) ? _auth.ClientId : null;
+        var clientId = configuredClientId ?? AuthDefaults.PublicClientId;
 
-        var options = new InteractiveBrowserCredentialBrokerOptions(GetParentWindowHandle())
+        // WAM broker requires ms-appx-web://microsoft.aad.brokerplugin/{clientId}
+        // registered on the app. The Azure CLI fallback doesn't have that URI, so
+        // only use the WAM broker path when a dedicated client ID is configured.
+        InteractiveBrowserCredential credential;
+        if (configuredClientId is not null)
         {
-            TenantId = "organizations",
-            ClientId = clientId,
-            UseDefaultBrokerAccount = false,
-            LoginHint = string.IsNullOrWhiteSpace(loginHint) ? null : loginHint,
-            TokenCachePersistenceOptions = new TokenCachePersistenceOptions
+            var brokerOptions = new InteractiveBrowserCredentialBrokerOptions(GetParentWindowHandle())
             {
-                Name = "AzureTray-broker-bootstrap",
-            },
-        };
-
-        var credential = new InteractiveBrowserCredential(options);
+                TenantId = "organizations",
+                ClientId = clientId,
+                UseDefaultBrokerAccount = false,
+                LoginHint = string.IsNullOrWhiteSpace(loginHint) ? null : loginHint,
+                TokenCachePersistenceOptions = new TokenCachePersistenceOptions
+                {
+                    Name = "AzureTray-broker-bootstrap",
+                },
+            };
+            credential = new InteractiveBrowserCredential(brokerOptions);
+        }
+        else
+        {
+            _logger.LogDebug(
+                "No ClientId configured; using browser-based sign-in (WAM broker requires a registered redirect URI).");
+            var browserOptions = new InteractiveBrowserCredentialOptions
+            {
+                TenantId = "organizations",
+                ClientId = clientId,
+                LoginHint = string.IsNullOrWhiteSpace(loginHint) ? null : loginHint,
+                TokenCachePersistenceOptions = new TokenCachePersistenceOptions
+                {
+                    Name = "AzureTray-broker-bootstrap",
+                },
+            };
+            credential = new InteractiveBrowserCredential(browserOptions);
+        }
         var token = await credential.GetTokenAsync(
             new TokenRequestContext(new[] { _cloud.GraphScope }),
             cancellationToken).ConfigureAwait(false);

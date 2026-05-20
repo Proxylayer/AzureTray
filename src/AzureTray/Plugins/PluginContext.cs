@@ -15,6 +15,7 @@ internal sealed class PluginContext : IPluginContext, IDisposable
     private readonly string _pluginId;
     private readonly ITenantReadinessTracker _readiness;
     private readonly IPluginConfigStore _configStore;
+    private readonly IPluginHttpClientCore _httpCore;
     private readonly object _handlersLock = new();
     private readonly List<Action<PluginTenant>> _readyHandlers = new();
     private readonly List<Action<string>> _removedHandlers = new();
@@ -24,7 +25,7 @@ internal sealed class PluginContext : IPluginContext, IDisposable
     public PluginContext(
         string pluginId,
         ILogger logger,
-        IPluginHttpClient http,
+        IPluginHttpClientCore httpCore,
         INotifier notifier,
         IClipboard clipboard,
         IReadOnlyList<PluginTenant> tenants,
@@ -41,7 +42,7 @@ internal sealed class PluginContext : IPluginContext, IDisposable
         _readiness = readiness;
         _configStore = configStore;
         Logger = logger;
-        Http = http;
+        _httpCore = httpCore;
         Notifier = notifier;
         Clipboard = clipboard;
         Tenants = tenants.Where(t => IsEnabled(t.TenantId)).ToArray();
@@ -56,7 +57,6 @@ internal sealed class PluginContext : IPluginContext, IDisposable
     }
 
     public ILogger Logger { get; }
-    public IPluginHttpClient Http { get; }
     public INotifier Notifier { get; }
     public IClipboard Clipboard { get; }
     public IReadOnlyList<PluginTenant> Tenants { get; private set; }
@@ -64,6 +64,18 @@ internal sealed class PluginContext : IPluginContext, IDisposable
     public string ArmScope { get; }
     public string DataDir { get; }
     public string? HostVersion { get; }
+
+    public IPluginHttpClient GetHttpClient(string tenantId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(tenantId);
+        if (!IsEnabled(tenantId))
+        {
+            throw new ArgumentException(
+                $"Tenant '{tenantId}' is not enabled for plugin '{_pluginId}'.",
+                nameof(tenantId));
+        }
+        return new TenantScopedPluginHttpClient(_httpCore, tenantId);
+    }
 
     public IReadOnlyList<PluginTenant> ReadyTenants =>
         _readiness.ReadyTenants.Where(t => IsEnabled(t.TenantId)).ToArray();
