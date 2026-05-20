@@ -50,7 +50,11 @@ public sealed class UpdateService : IUpdateService
 
     public async Task CheckOnStartupAsync()
     {
-        if (_manager is null || !_manager.IsInstalled) return;
+        if (_manager is null || !_manager.IsInstalled)
+        {
+            _logger.LogDebug("Update check skipped: not running as an installed Velopack app.");
+            return;
+        }
 
         try
         {

@@ -146,4 +146,4 @@ jobs:
             Releases/*.exe
             Releases/*.nupkg
             Releases/RELEASES
-            Releases/sbom.json
+            Releases/*.json
