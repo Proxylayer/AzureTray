@@ -12,7 +12,7 @@
     <!-- Plugin version is tracked independently of the host. Bump when the
          plugin's behaviour changes; host releases don't affect this value.
          Publish via the workflow_dispatch trigger on publish-plugins.yml. -->
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
 
     <!-- Bundle every transitive NuGet dependency into the build output
          (and therefore into lib/net8.0/ of the .nupkg). The host's

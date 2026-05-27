@@ -12,7 +12,7 @@
     <!-- Plugin version is tracked independently of the host. Bump when the
          plugin's behaviour changes; host releases don't affect this value.
          Publish via the workflow_dispatch trigger on publish-plugins.yml. -->
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
 
     <!-- See AzureTray.Plugin.PIM for rationale. Bundles transitive
          NuGet deps into the build output so they ship inside the

@@ -269,6 +269,8 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         _context = context;
         _lifetimeCts = new CancellationTokenSource();
 
+        LogHostCompatibility(context);
+
         // Subscribe before backfill so we don't miss a tenant that becomes
         // ready in the same instant the plugin loads.
         context.TenantReady += OnTenantReady;
@@ -286,6 +288,38 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             EligiblePollInterval.TotalSeconds);
 
         return Task.CompletedTask;
+    }
+
+    // Host build this plugin was developed and validated against. The hard ABI
+    // gate is ITrayPlugin.ApiVersion / PluginApiVersion; this is soft, forward-
+    // looking capability detection via IPluginContext.HostVersion. When the host
+    // gains a feature this plugin wants to use conditionally, bump this and gate
+    // the feature on `host >= ValidatedAgainstHost` (or a feature-specific
+    // minimum) right where you'd call it.
+    private static readonly System.Version ValidatedAgainstHost = new(0, 5, 0);
+
+    private static void LogHostCompatibility(IPluginContext context)
+    {
+        if (!System.Version.TryParse(context.HostVersion, out var host))
+        {
+            // Pre-capability hosts (and the contract's default) report no version.
+            context.Logger.LogInformation(
+                "Host did not report a version; assuming the baseline contract surface (plugin validated against host {Validated}).",
+                ValidatedAgainstHost);
+            return;
+        }
+
+        if (host < ValidatedAgainstHost)
+        {
+            context.Logger.LogWarning(
+                "Running on host {Host}, older than the {Validated} this plugin build was validated against. Core features work; newer host capabilities are skipped.",
+                host, ValidatedAgainstHost);
+        }
+        else
+        {
+            context.Logger.LogInformation(
+                "Host {Host} meets the validated baseline {Validated}.", host, ValidatedAgainstHost);
+        }
     }
 
     private void OnTenantReady(PluginTenant tenant) => StartWatchersFor(tenant);
