@@ -63,6 +63,7 @@
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
                     <!-- Icon slot. Width auto so items without an icon
                          don't waste column space; the gap is achieved via
@@ -79,8 +80,25 @@
                                VerticalAlignment="Center"
                                TextTrimming="CharacterEllipsis"
                                Foreground="{DynamicResource Brush.Text.Primary}"/>
-                    <TextBlock x:Name="Chevron"
+                    <!-- Favorite star. Own hit target (Background=Transparent
+                         + padding) so the code-behind can detect a click on it
+                         by name and toggle without firing the row's primary
+                         action. Empty ☆ by default; the DataTrigger below
+                         swaps to a filled ★ when IsFavorite is true. Hidden
+                         entirely on rows where IsFavorite is null. -->
+                    <TextBlock x:Name="FavoriteStar"
                                Grid.Column="2"
+                               Text="&#x2606;"
+                               FontSize="15"
+                               Padding="6,0"
+                               Margin="10,0,0,0"
+                               Cursor="Hand"
+                               Background="Transparent"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource Brush.Text.Muted}"
+                               Visibility="{Binding ShowFavorite, Converter={StaticResource BoolToVisibility}}"/>
+                    <TextBlock x:Name="Chevron"
+                               Grid.Column="3"
                                Text="&#x25B6;"
                                FontSize="10"
                                Margin="12,0,0,0"
@@ -99,6 +117,14 @@
                 <DataTrigger Binding="{Binding IsEnabled}" Value="False">
                     <Setter TargetName="Root" Property="Cursor" Value="Arrow"/>
                     <Setter TargetName="Root" Property="Opacity" Value="0.55"/>
+                </DataTrigger>
+
+                <!-- Favorited rows: filled star in the accent color. The
+                     default (false / unfavorited) state keeps the muted ☆
+                     from the TextBlock declaration above. -->
+                <DataTrigger Binding="{Binding IsFavorite}" Value="True">
+                    <Setter TargetName="FavoriteStar" Property="Text" Value="&#x2605;"/>
+                    <Setter TargetName="FavoriteStar" Property="Foreground" Value="{DynamicResource Brush.Accent}"/>
                 </DataTrigger>
 
                 <!-- IsBusy: cycle the icon glyph through ◐ ◓ ◑ ◒ on a

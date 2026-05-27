@@ -22,6 +22,16 @@ public interface IPluginLoader
     // Returns true if the plugin was found and shut down.
     Task<bool> UnloadOneAsync(string pluginId, CancellationToken cancellationToken);
 
+    // Hot-swap a loaded plugin (by id) to the new bytes now at dllPath: shut
+    // the running instance down, load the replacement, re-run InitializeAsync.
+    // Use after the file on disk has been overwritten with a new version.
+    Task<LoadedPlugin?> ReloadOneAsync(string pluginId, string dllPath, CancellationToken cancellationToken);
+
+    // Load dllPath, or reload it in place if a plugin is already loaded from
+    // that exact path. The install/update commands and the folder watcher call
+    // this so a new version flushes the old instance with no app restart.
+    Task<LoadedPlugin?> LoadOrReloadAsync(string dllPath, CancellationToken cancellationToken);
+
     // Raised after LoadedPlugins changes (load / unload). Consumers refresh
     // any view of the loaded set — TrayIcon re-wires menu-change subscriptions,
     // Settings refreshes the per-plugin config UI.

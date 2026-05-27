@@ -28,8 +28,10 @@ public interface ITrayPlugin
 
     /// <summary>
     /// The <see cref="PluginApiVersion.Current"/> value the plugin was compiled
-    /// against. The host rejects any plugin whose declared value does not match
-    /// its own — keeps ABI mismatches loud and visible.
+    /// against. The host loads the plugin when this falls within its supported
+    /// range [<see cref="PluginApiVersion.MinSupported"/>,
+    /// <see cref="PluginApiVersion.Current"/>] and rejects it (with a logged
+    /// message naming the range) otherwise — keeps ABI mismatches loud and visible.
     /// </summary>
     int ApiVersion { get; }
 

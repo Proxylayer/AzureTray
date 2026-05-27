@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.Reflection;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -65,7 +66,18 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
 
     public string DisplayName => "LAPS Passwords";
 
-    public string Version => "0.1.0";
+    public string Version { get; } = ResolveVersion();
+    private static string ResolveVersion()
+    {
+        var asm = typeof(LapsPlugin).Assembly;
+        var v = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrEmpty(v))
+        {
+            var plus = v.IndexOf('+', StringComparison.Ordinal);
+            return plus >= 0 ? v[..plus] : v;
+        }
+        return asm.GetName().Version?.ToString() ?? "0.0.0";
+    }
 
     public int ApiVersion => PluginApiVersion.Current;
 

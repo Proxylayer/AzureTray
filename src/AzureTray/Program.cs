@@ -147,6 +147,12 @@ internal static class Program
         builder.Services.AddSingleton<IClipboard, HostClipboard>();
         builder.Services.AddSingleton<IStartupManager, RegistryStartupManager>();
         builder.Services.AddSingleton<ITenantReadinessTracker, TenantReadinessTracker>();
+        // Runtime token-renewal health: detection (reactive via HostPluginHttpClient
+        // + the hosted background monitor), the persistent re-auth popup, and the
+        // shared resolve path. One instance serves the interface and the hosted service.
+        builder.Services.AddSingleton<TenantAuthHealthService>();
+        builder.Services.AddSingleton<ITenantAuthHealth>(sp => sp.GetRequiredService<TenantAuthHealthService>());
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<TenantAuthHealthService>());
         builder.Services.AddSingleton<IPluginConfigStore, PluginConfigStore>();
         builder.Services.AddSingleton<PluginLoader>(sp => new PluginLoader(
             sp.GetRequiredService<IAppPaths>(),

@@ -143,10 +143,25 @@
                                                    Style="{StaticResource Text.Muted}"
                                                    VerticalAlignment="Center"
                                                    Visibility="{Binding ProbeDisabled, Converter={StaticResource BoolToVisibility}}"/>
+                                        <TextBlock Text="  (sign-in expired)"
+                                                   FontStyle="Italic"
+                                                   Foreground="#C0392B"
+                                                   VerticalAlignment="Center"
+                                                   Visibility="{Binding NeedsReauth, Converter={StaticResource BoolToVisibility}}"/>
                                     </StackPanel>
                                     <TextBlock Text="{Binding TenantId}" Style="{StaticResource Text.Muted}"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                    <!-- "Fix sign-in" appears only when this tenant's
+                                         token failed to renew at runtime (NeedsReauth).
+                                         Resolving it runs the broker and clears the
+                                         state, collapsing the button on its own. -->
+                                    <Button Content="Fix sign-in"
+                                            Margin="0,0,8,0"
+                                            ToolTip="This tenant's sign-in expired and could not be renewed. Click to re-authenticate via the broker; plugins resume once sign-in succeeds."
+                                            Visibility="{Binding NeedsReauth, Converter={StaticResource BoolToVisibility}}"
+                                            Command="{Binding DataContext.ResolveSignInCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                            CommandParameter="{Binding}"/>
                                     <!-- "Sign in" appears only for disabled tenants.
                                          Successful sign-in clears ProbeDisabled and
                                          the button collapses on its own. -->

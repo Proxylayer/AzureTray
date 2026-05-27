@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -62,7 +63,18 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
 
     public string DisplayName => "Azure PIM";
 
-    public string Version => "0.1.0";
+    public string Version { get; } = ResolveVersion();
+    private static string ResolveVersion()
+    {
+        var asm = typeof(PimPlugin).Assembly;
+        var v = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrEmpty(v))
+        {
+            var plus = v.IndexOf('+', StringComparison.Ordinal);
+            return plus >= 0 ? v[..plus] : v;
+        }
+        return asm.GetName().Version?.ToString() ?? "0.0.0";
+    }
 
     public int ApiVersion => PluginApiVersion.Current;
 

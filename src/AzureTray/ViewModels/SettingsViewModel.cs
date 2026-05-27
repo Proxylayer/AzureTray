@@ -43,6 +43,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly IAppRegistrationProvisioning _appRegistrationProvisioning;
     private readonly INotifier _notifier;
     private readonly ITenantReadinessTracker _readiness;
+    private readonly ITenantAuthHealth _authHealth;
     private readonly IWindowsAccountSignInService _windowsSignIn;
     private readonly IGraphOrganizationClient _organizationInfo;
     private readonly IStartupManager _startupManager;
@@ -253,6 +254,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(FixPermissionsCommand))]
     [NotifyCanExecuteChangedFor(nameof(CreateAppRegistrationCommand))]
     [NotifyCanExecuteChangedFor(nameof(SignInToTenantCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ResolveSignInCommand))]
     private bool _isPerformingTenantAction;
 
     // Set true by TrayIcon when Settings is opened from the admin menu;
@@ -331,6 +333,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         IAppRegistrationProvisioning appRegistrationProvisioning,
         INotifier notifier,
         ITenantReadinessTracker readiness,
+        ITenantAuthHealth authHealth,
         IWindowsAccountSignInService windowsSignIn,
         IGraphOrganizationClient organizationInfo,
         IStartupManager startupManager,
@@ -355,6 +358,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _appRegistrationProvisioning = appRegistrationProvisioning;
         _notifier = notifier;
         _readiness = readiness;
+        _authHealth = authHealth;
         _windowsSignIn = windowsSignIn;
         _organizationInfo = organizationInfo;
         _startupManager = startupManager;
@@ -376,8 +380,12 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         foreach (var tenant in _tenantStore.GetAll())
         {
-            Tenants.Add(tenant);
+            // Reflect any runtime token failure that happened before this
+            // window was opened so the "Fix sign-in" button is correct on load.
+            Tenants.Add(tenant with { NeedsReauth = _authHealth.NeedsReauth(tenant.TenantId) });
         }
+
+        _authHealth.AuthStateChanged += OnTenantAuthStateChanged;
 
         RefreshInstalledExtensions();
         RefreshPluginConfigs();
@@ -418,6 +426,49 @@ public sealed partial class SettingsViewModel : ObservableObject
                 IsUpdateAvailable = true;
             }));
         }
+    }
+
+    // Fired by ITenantAuthHealth when a tenant enters/leaves the needs-reauth
+    // state. Replaces the row with a copy carrying the new NeedsReauth flag so
+    // the "Fix sign-in" button (and the "(sign-in expired)" label) appear or
+    // collapse. Marshalled to the WPF thread for the binding update.
+    private void OnTenantAuthStateChanged(string tenantId)
+    {
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess())
+        {
+            ApplyTenantAuthState(tenantId);
+        }
+        else
+        {
+            dispatcher.BeginInvoke(new Action(() => ApplyTenantAuthState(tenantId)));
+        }
+    }
+
+    private void ApplyTenantAuthState(string tenantId)
+    {
+        var needsReauth = _authHealth.NeedsReauth(tenantId);
+        for (var i = 0; i < Tenants.Count; i++)
+        {
+            if (!string.Equals(Tenants[i].TenantId, tenantId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (Tenants[i].NeedsReauth != needsReauth)
+            {
+                Tenants[i] = Tenants[i] with { NeedsReauth = needsReauth };
+            }
+            break;
+        }
+    }
+
+    // Unsubscribes from singleton events. Called from SettingsWindow.Closed —
+    // the window/VM is cached and reused by TrayIcon, so without this a closed
+    // window's VM would keep receiving callbacks.
+    public void Cleanup()
+    {
+        _authHealth.AuthStateChanged -= OnTenantAuthStateChanged;
+        _updateService.UpdateAvailable -= OnUpdateAvailable;
     }
 
     private void RefreshPluginConfigs()
@@ -1150,6 +1201,43 @@ public sealed partial class SettingsViewModel : ObservableObject
     private bool CanSignInToTenant(Tenant? tenant)
         => !IsPerformingTenantAction && tenant is not null;
 
+    // "Fix sign-in" button on a tenant whose token expired mid-session. Routes
+    // through ITenantAuthHealth so the broker sign-in, state clear, and popup
+    // dismissal all happen in one place; the AuthStateChanged event then flips
+    // the row's NeedsReauth flag (collapsing the button) via OnTenantAuthStateChanged.
+    [RelayCommand(CanExecute = nameof(CanResolveSignIn))]
+    private async Task ResolveSignInAsync(Tenant? tenant)
+    {
+        if (tenant is null) return;
+
+        try
+        {
+            IsPerformingTenantAction = true;
+            TenantActionStatus = $"Signing in to \"{tenant.DisplayName}\"… (broker dialog may open)";
+
+            using var cts = new CancellationTokenSource(SignInTimeout);
+            var ok = await _authHealth.TryResolveAsync(tenant.TenantId, cts.Token);
+
+            TenantActionStatus = ok
+                ? $"Signed in to \"{tenant.DisplayName}\" — plugins will resume."
+                : $"Sign-in did not complete for \"{tenant.DisplayName}\".";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Re-auth sign-in failed for tenant {TenantId} ({DisplayName}).",
+                tenant.TenantId, tenant.DisplayName);
+            TenantActionStatus = $"Sign-in failed for \"{tenant.DisplayName}\": {ex.Message}";
+        }
+        finally
+        {
+            IsPerformingTenantAction = false;
+        }
+    }
+
+    private bool CanResolveSignIn(Tenant? tenant)
+        => !IsPerformingTenantAction && tenant is not null;
+
     // Pre-populates the manual add-tenant panel with the selected tenant's
     // values and flips the form into "Edit" mode so the primary button
     // becomes Save changes. Domain lookup, app-reg search, etc. all remain
@@ -1519,14 +1607,15 @@ public sealed partial class SettingsViewModel : ObservableObject
                 return;
             }
 
-            // Hot-load every produced DLL. The loader rejects anything
-            // that isn't an ITrayPlugin (bundled transitive deps), so we
-            // only count successful loads in the status message.
+            // Hot-load (or hot-reload, if this is a version bump over an
+            // already-loaded plugin) every produced DLL. The loader rejects
+            // anything that isn't an ITrayPlugin (bundled transitive deps), so
+            // we only count successful loads in the status message.
             string? loadedName = null;
             string? loadedVersion = null;
             foreach (var dllPath in installed)
             {
-                var loaded = await _pluginLoader.LoadOneAsync(dllPath, CancellationToken.None);
+                var loaded = await _pluginLoader.LoadOrReloadAsync(dllPath, CancellationToken.None);
                 if (loaded is not null)
                 {
                     loadedName = loaded.Plugin.DisplayName;
@@ -1852,14 +1941,15 @@ public sealed partial class SettingsViewModel : ObservableObject
                 return;
             }
 
-            // Hot-load each newly-installed DLL through the plugin
+            // Hot-load (or hot-reload, for a version bump over an already-
+            // loaded plugin) each newly-installed DLL through the plugin
             // loader. Packages typically have one plugin assembly + zero
             // or more transitive dep DLLs — TryLoadAsync rejects anything
             // that doesn't implement ITrayPlugin.
             var loadedCount = 0;
             foreach (var dllPath in installed)
             {
-                var loaded = await _pluginLoader.LoadOneAsync(dllPath, CancellationToken.None);
+                var loaded = await _pluginLoader.LoadOrReloadAsync(dllPath, CancellationToken.None);
                 if (loaded is not null) loadedCount++;
             }
 

@@ -6,6 +6,7 @@ using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
 using Azure.Core;
+using Azure.Identity;
 using Microsoft.Extensions.Logging;
 using AzureTray.Auth;
 using AzureTray.Plugin.Contracts;
@@ -16,15 +17,18 @@ public sealed class HostPluginHttpClient : IPluginHttpClientCore
 {
     private readonly IHttpClientFactory _httpFactory;
     private readonly ICredentialFactory _credentials;
+    private readonly ITenantAuthHealth _authHealth;
     private readonly ILogger<HostPluginHttpClient> _logger;
 
     public HostPluginHttpClient(
         IHttpClientFactory httpFactory,
         ICredentialFactory credentials,
+        ITenantAuthHealth authHealth,
         ILogger<HostPluginHttpClient> logger)
     {
         _httpFactory = httpFactory;
         _credentials = credentials;
+        _authHealth = authHealth;
         _logger = logger;
     }
 
@@ -41,9 +45,25 @@ public sealed class HostPluginHttpClient : IPluginHttpClientCore
         ArgumentNullException.ThrowIfNull(request);
 
         var credential = _credentials.GetForTenant(tenantId);
-        var token = await credential.GetTokenAsync(
-            new TokenRequestContext([scope]),
-            cancellationToken);
+        AccessToken token;
+        try
+        {
+            token = await credential.GetTokenAsync(
+                new TokenRequestContext([scope]),
+                cancellationToken);
+        }
+        catch (AuthenticationRequiredException)
+        {
+            // Refresh token expired and the silent path can't recover — flag
+            // the tenant so the re-auth popup / Settings button appear, then
+            // let the plugin see the failure as before.
+            _authHealth.ReportFailure(tenantId);
+            throw;
+        }
+
+        // A token came back: clear any lingering needs-reauth state for this
+        // tenant the moment a real call succeeds. Idempotent / cheap.
+        _authHealth.ReportRecovered(tenantId);
 
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
 

@@ -528,6 +528,7 @@ public sealed class SettingsViewModelTests
         appRegistrationProvisioning ??= Substitute.For<IAppRegistrationProvisioning>();
         notifier ??= Substitute.For<INotifier>();
         readiness ??= new TenantReadinessTracker();
+        var authHealth = Substitute.For<ITenantAuthHealth>();
         var windowsSignIn = Substitute.For<IWindowsAccountSignInService>();
         var organizationInfo = Substitute.For<IGraphOrganizationClient>();
         var startupManager = Substitute.For<IStartupManager>();
@@ -562,6 +563,7 @@ public sealed class SettingsViewModelTests
             appRegistrationProvisioning,
             notifier,
             readiness,
+            authHealth,
             windowsSignIn,
             organizationInfo,
             startupManager,

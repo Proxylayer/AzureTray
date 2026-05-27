@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -14,9 +15,13 @@ using AzureTray.Extensions;
 using AzureTray.Plugin.Contracts;
 using AzureTray.Tenants;
 
+// Disambiguate from System.Windows.Forms.Timer, which is in scope in this
+// WinForms-hosting assembly. The watcher debounce uses threadpool timers.
+using Timer = System.Threading.Timer;
+
 namespace AzureTray.Plugins;
 
-public sealed class PluginLoader : IPluginLoader, IHostedService
+public sealed class PluginLoader : IPluginLoader, IHostedService, IDisposable
 {
     // Resolved once from the host assembly. Strips any '+build' metadata
     // suffix so plugins can pass it straight into System.Version.Parse
@@ -38,6 +43,24 @@ public sealed class PluginLoader : IPluginLoader, IHostedService
     private readonly ILogger<PluginLoader> _logger;
     private readonly List<LoadedPluginEntry> _entries = new();
     private readonly Lock _entriesGate = new();
+
+    // ─── Live reload (plugins-folder watcher) ────────────────────────────
+    //
+    // Watches PluginsDir so that dropping a new plugin .nupkg's DLLs over an
+    // existing install hot-swaps the running instance with no app restart.
+    // Copying a package fires a burst of Changed events (the plugin DLL plus
+    // each transitive dep, often more than once), so reloads are debounced
+    // per reload-target until the folder goes quiet. Host-initiated loads
+    // (the Settings install commands) briefly suppress the watcher for the
+    // affected folder so they don't double-reload on their own file writes.
+    private static readonly TimeSpan WatcherDebounce = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan HostReloadSuppression = TimeSpan.FromSeconds(5);
+
+    private FileSystemWatcher? _watcher;
+    private readonly ConcurrentDictionary<string, Timer> _reloadDebounce =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTime> _suppressedTargets =
+        new(StringComparer.OrdinalIgnoreCase);
 
     internal PluginLoader(
         IAppPaths paths,
@@ -95,6 +118,7 @@ public sealed class PluginLoader : IPluginLoader, IHostedService
             try
             {
                 await LoadAllAsync(cancellationToken).ConfigureAwait(false);
+                StartWatcher();
             }
             catch (OperationCanceledException) { /* host shutting down */ }
             catch (Exception ex)
@@ -105,7 +129,15 @@ public sealed class PluginLoader : IPluginLoader, IHostedService
         return Task.CompletedTask;
     }
 
-    public Task StopAsync(CancellationToken cancellationToken) => UnloadAllAsync(cancellationToken);
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        StopWatcher();
+        await UnloadAllAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    // The folder watcher and its debounce timers are disposable; StopWatcher
+    // is idempotent so disposing after StopAsync is harmless.
+    public void Dispose() => StopWatcher();
 
     public event Action? PluginsChanged;
 
@@ -183,6 +215,10 @@ public sealed class PluginLoader : IPluginLoader, IHostedService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dllPath);
 
+        // A host-initiated load owns this target's file writes; keep the
+        // watcher from reacting to them.
+        SuppressWatcher(dllPath);
+
         // Idempotent: if a plugin from this file is already loaded, return it.
         lock (_entriesGate)
         {
@@ -209,6 +245,20 @@ public sealed class PluginLoader : IPluginLoader, IHostedService
             _entries.Remove(entry);
         }
 
+        await UnloadEntryAsync(entry, pluginId, cancellationToken).ConfigureAwait(false);
+
+        PluginsChanged?.Invoke();
+        return true;
+    }
+
+    // Tears a single entry down: ShutdownAsync → dispose host context →
+    // unload the collectible ALC → force a GC so the context releases its
+    // (memory-mapped only if some dep used LoadFromAssemblyPath) handles and
+    // any disposable plugin state is finalized. Does NOT touch _entries or
+    // raise PluginsChanged — callers own list mutation + eventing so a reload
+    // emits a single change notification.
+    private async Task UnloadEntryAsync(LoadedPluginEntry entry, string pluginId, CancellationToken cancellationToken)
+    {
         try { await entry.Loaded.Plugin.ShutdownAsync(cancellationToken).ConfigureAwait(false); }
         catch (Exception ex)
         {
@@ -229,9 +279,60 @@ public sealed class PluginLoader : IPluginLoader, IHostedService
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
+    }
 
+    // Hot-swap to a new version: shut down the running instance (by id), then
+    // load the DLL now sitting at dllPath into a fresh collectible context and
+    // re-run InitializeAsync. Use after the file on disk has been replaced.
+    // Raises a single PluginsChanged after the swap. Returns the new
+    // LoadedPlugin, or null if the new bytes failed to load (in which case the
+    // plugin ends up unloaded — the old version is already gone).
+    public async Task<LoadedPlugin?> ReloadOneAsync(string pluginId, string dllPath, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pluginId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(dllPath);
+
+        // Suppress the watcher for this target before we touch files/state so
+        // the install's own writes (or this reload's) don't bounce back in.
+        SuppressWatcher(dllPath);
+
+        LoadedPluginEntry? entry;
+        lock (_entriesGate)
+        {
+            entry = _entries.FirstOrDefault(e =>
+                string.Equals(e.Loaded.Plugin.Id, pluginId, StringComparison.OrdinalIgnoreCase));
+            if (entry is not null) _entries.Remove(entry);
+        }
+
+        if (entry is not null)
+        {
+            await UnloadEntryAsync(entry, pluginId, cancellationToken).ConfigureAwait(false);
+        }
+
+        var loaded = await TryLoadAsync(dllPath, cancellationToken).ConfigureAwait(false);
         PluginsChanged?.Invoke();
-        return true;
+        return loaded;
+    }
+
+    // Load dllPath, or — if a plugin is already loaded from that exact path —
+    // reload it (hot-swap to the new bytes). This is what the install/update
+    // commands and the folder watcher call: it does the right thing whether
+    // the plugin is brand-new or an in-place version bump.
+    public async Task<LoadedPlugin?> LoadOrReloadAsync(string dllPath, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(dllPath);
+
+        string? loadedId;
+        lock (_entriesGate)
+        {
+            loadedId = _entries.FirstOrDefault(e =>
+                string.Equals(e.Loaded.AssemblyPath, dllPath, StringComparison.OrdinalIgnoreCase))
+                ?.Loaded.Plugin.Id;
+        }
+
+        return loadedId is not null
+            ? await ReloadOneAsync(loadedId, dllPath, cancellationToken).ConfigureAwait(false)
+            : await LoadOneAsync(dllPath, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task UnloadAllAsync(CancellationToken cancellationToken)
@@ -316,11 +417,11 @@ public sealed class PluginLoader : IPluginLoader, IHostedService
                 return null;
             }
 
-            if (plugin.ApiVersion != PluginApiVersion.Current)
+            if (!PluginApiVersion.IsSupported(plugin.ApiVersion))
             {
                 _logger.LogWarning(
-                    "Plugin {Id} declares ApiVersion {Declared}; host supports {Supported}. Skipping.",
-                    plugin.Id, plugin.ApiVersion, PluginApiVersion.Current);
+                    "Plugin {Id} declares ApiVersion {Declared}; host supports [{Min}, {Max}]. Skipping.",
+                    plugin.Id, plugin.ApiVersion, PluginApiVersion.MinSupported, PluginApiVersion.Current);
                 loadContext.Unload();
                 return null;
             }
@@ -464,6 +565,204 @@ public sealed class PluginLoader : IPluginLoader, IHostedService
             return plus >= 0 ? informational[..plus] : informational;
         }
         return asm.GetName().Version?.ToString();
+    }
+
+    // ─── Folder watcher ───────────────────────────────────────────────────
+
+    private void StartWatcher()
+    {
+        if (_watcher is not null) return;
+        try
+        {
+            Directory.CreateDirectory(_paths.PluginsDir);
+            _watcher = new FileSystemWatcher(_paths.PluginsDir, "*.dll")
+            {
+                IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size,
+                // Big packages drop many DLLs at once; a generous buffer
+                // avoids InternalBufferOverflow dropping events.
+                InternalBufferSize = 64 * 1024,
+            };
+            _watcher.Changed += OnPluginFileChanged;
+            _watcher.Created += OnPluginFileChanged;
+            _watcher.Renamed += (s, e) => OnPluginFileChanged(s, e);
+            _watcher.Error += (_, e) =>
+                _logger.LogWarning(e.GetException(), "Plugin folder watcher error; live reload may miss a change.");
+            _watcher.EnableRaisingEvents = true;
+            _logger.LogInformation("Watching {Dir} for plugin updates (live reload enabled).", _paths.PluginsDir);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not start the plugin folder watcher; live reload on file change is disabled.");
+        }
+    }
+
+    private void StopWatcher()
+    {
+        try
+        {
+            if (_watcher is not null)
+            {
+                _watcher.EnableRaisingEvents = false;
+                _watcher.Dispose();
+                _watcher = null;
+            }
+        }
+        catch { /* best effort on shutdown */ }
+
+        foreach (var kvp in _reloadDebounce)
+        {
+            kvp.Value.Dispose();
+        }
+        _reloadDebounce.Clear();
+    }
+
+    private void OnPluginFileChanged(object sender, FileSystemEventArgs e)
+    {
+        var target = ResolveReloadTarget(e.FullPath);
+        if (target is null) return;
+        if (IsSuppressed(target)) return;
+
+        // Coalesce the burst of writes from a package copy into one reload,
+        // fired once the target has been quiet for WatcherDebounce.
+        var timer = _reloadDebounce.GetOrAdd(target, key =>
+            new Timer(OnDebounceElapsed, key, Timeout.Infinite, Timeout.Infinite));
+        try { timer.Change(WatcherDebounce, Timeout.InfiniteTimeSpan); }
+        catch (ObjectDisposedException) { /* racing shutdown */ }
+    }
+
+    private void OnDebounceElapsed(object? state)
+    {
+        var target = (string)state!;
+        if (_reloadDebounce.TryRemove(target, out var timer)) timer.Dispose();
+        if (IsSuppressed(target)) return;
+        _ = ReloadTargetAsync(target);
+    }
+
+    private async Task ReloadTargetAsync(string target)
+    {
+        try
+        {
+            var pluginsDir = Path.GetFullPath(_paths.PluginsDir).TrimEnd(Path.DirectorySeparatorChar);
+            var targetParent = Path.GetDirectoryName(target)?.TrimEnd(Path.DirectorySeparatorChar);
+
+            string? dllPath;
+            if (string.Equals(targetParent, pluginsDir, StringComparison.OrdinalIgnoreCase)
+                && target.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+            {
+                // Top-level legacy layout: the target IS the plugin DLL.
+                dllPath = File.Exists(target) ? target : null;
+            }
+            else
+            {
+                // Subfolder layout: prefer the exact assembly of a plugin
+                // already loaded from this folder — handles packages whose DLL
+                // name differs from the folder/package id. Fall back to the
+                // conventional <folder>/<folder>.dll for a brand-new drop.
+                lock (_entriesGate)
+                {
+                    dllPath = _entries
+                        .Select(en => en.Loaded.AssemblyPath)
+                        .FirstOrDefault(p => IsUnderFolder(p, target));
+                }
+                if (dllPath is null)
+                {
+                    var conventional = Path.Combine(target, Path.GetFileName(target) + ".dll");
+                    dllPath = File.Exists(conventional) ? conventional : null;
+                }
+            }
+
+            if (dllPath is null) return;
+
+            if (!await WaitForReadableAsync(dllPath, CancellationToken.None).ConfigureAwait(false))
+            {
+                _logger.LogWarning("Plugin file {Path} never became readable; skipping watch reload.", dllPath);
+                return;
+            }
+
+            _logger.LogInformation("Detected plugin change in {Target}; reloading.", Path.GetFileName(target));
+            await LoadOrReloadAsync(dllPath, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Watch-triggered reload failed for {Target}.", target);
+        }
+    }
+
+    // Maps any file path under PluginsDir to its "reload unit": the plugin's
+    // subfolder (modern layout) or the DLL itself (top-level legacy). Returns
+    // null for paths outside PluginsDir. Used both to key the debounce/
+    // suppression maps and to figure out what to reload.
+    private string? ResolveReloadTarget(string fullPath)
+    {
+        try
+        {
+            var pluginsDir = Path.GetFullPath(_paths.PluginsDir).TrimEnd(Path.DirectorySeparatorChar);
+            var dir = Path.GetDirectoryName(Path.GetFullPath(fullPath))?.TrimEnd(Path.DirectorySeparatorChar);
+            if (dir is null) return null;
+
+            if (string.Equals(dir, pluginsDir, StringComparison.OrdinalIgnoreCase))
+            {
+                return Path.GetFullPath(fullPath);   // top-level: the file is the unit
+            }
+
+            var folder = dir;
+            while (true)
+            {
+                var parent = Path.GetDirectoryName(folder)?.TrimEnd(Path.DirectorySeparatorChar);
+                if (parent is null) return null;     // not under PluginsDir
+                if (string.Equals(parent, pluginsDir, StringComparison.OrdinalIgnoreCase)) return folder;
+                folder = parent;
+            }
+        }
+        catch { return null; }
+    }
+
+    private static bool IsUnderFolder(string path, string folder)
+    {
+        try
+        {
+            var p = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+            var f = Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar);
+            return p.StartsWith(f + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    // A freshly-copied DLL may still be open for writing when the first
+    // Changed event fires. Poll until it opens for shared read, or give up.
+    private static async Task<bool> WaitForReadableAsync(string path, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 12; attempt++)
+        {
+            try
+            {
+                using var fs = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                await Task.Delay(150, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        return false;
+    }
+
+    private void SuppressWatcher(string anyPathInTarget)
+    {
+        var target = ResolveReloadTarget(anyPathInTarget);
+        if (target is null) return;
+        _suppressedTargets[target] = DateTime.UtcNow.Add(HostReloadSuppression);
+    }
+
+    private bool IsSuppressed(string target)
+    {
+        if (_suppressedTargets.TryGetValue(target, out var until))
+        {
+            if (DateTime.UtcNow < until) return true;
+            _suppressedTargets.TryRemove(target, out _);
+        }
+        return false;
     }
 
     private sealed record LoadedPluginEntry(

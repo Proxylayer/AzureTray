@@ -13,6 +13,10 @@ public partial class SettingsWindow : Window
         InitializeComponent();
         DataContext = viewModel;
         this.EnableDarkTitleBar();
+
+        // The window/VM is cached and reused by TrayIcon, so detach the VM's
+        // singleton event subscriptions when the window closes.
+        Closed += (_, _) => viewModel.Cleanup();
     }
 
     private void CloseClick(object sender, RoutedEventArgs e) => Close();

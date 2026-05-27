@@ -138,6 +138,23 @@ public sealed class NotificationService : INotifier
         var workArea = SystemParameters.WorkArea;
         window.Width = WindowWidth;
         window.Left = workArea.Right - WindowWidth - EdgeMargin;
+        // Initial estimate based on fixed slot height so the window doesn't
+        // flash at (0,0) before layout completes.
         window.Top = workArea.Bottom - (slot + 1) * (StackSlotHeight + StackSpacing) - EdgeMargin;
+
+        // Re-anchor from the slot's bottom edge once the real height is
+        // known, and again whenever the window resizes (e.g. the Details
+        // expander is opened). This prevents tall notifications from
+        // clipping off the top of the work area.
+        void Reanchor()
+        {
+            if (window.ActualHeight == 0) return;
+            var wa = SystemParameters.WorkArea;
+            var slotBottom = wa.Bottom - slot * (StackSlotHeight + StackSpacing) - EdgeMargin;
+            window.Top = Math.Max(wa.Top + EdgeMargin, slotBottom - window.ActualHeight);
+        }
+
+        window.ContentRendered += (_, _) => Reanchor();
+        window.SizeChanged += (_, _) => Reanchor();
     }
 }

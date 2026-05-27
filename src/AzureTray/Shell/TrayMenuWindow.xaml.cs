@@ -420,7 +420,21 @@ public partial class TrayMenuWindow : Window
         var element = e.OriginalSource as DependencyObject;
         var row = FindAncestor<ListBoxItem>(element);
         if (row?.DataContext is not PluginMenuItem item) return;
-        if (item.IsSeparator || !item.IsEnabled) return;
+        if (item.IsSeparator) return;
+
+        // Favorite star: a dedicated hit target on the right of the row.
+        // Clicking it toggles favorite state even on disabled (greyed/active)
+        // rows, never opens the submenu, and never dismisses the menu — the
+        // glyph just flips in place. Checked before the IsEnabled gate so an
+        // active grant's row is still favoritable.
+        if (item.OnToggleFavorite is not null && IsWithinNamedElement(element, row, "FavoriteStar"))
+        {
+            ToggleFavorite(item);
+            e.Handled = true;
+            return;
+        }
+
+        if (!item.IsEnabled) return;
 
         if (item.HasChildren)
         {
@@ -573,5 +587,47 @@ public partial class TrayMenuWindow : Window
             element = VisualTreeHelper.GetParent(element);
         }
         return null;
+    }
+
+    // Walks up from the clicked element toward (but not past) the row,
+    // returning true if it passes through a named element — used to tell a
+    // click on the favorite star apart from a click anywhere else on the row.
+    private static bool IsWithinNamedElement(DependencyObject? element, DependencyObject stopAt, string name)
+    {
+        while (element is not null && !ReferenceEquals(element, stopAt))
+        {
+            if (element is FrameworkElement fe && fe.Name == name) return true;
+            element = VisualTreeHelper.GetParent(element);
+        }
+        return false;
+    }
+
+    private void ToggleFavorite(PluginMenuItem item)
+    {
+        try { item.OnToggleFavorite?.Invoke(); }
+        catch (Exception ex)
+        {
+            // Same containment as InvokeAndDismiss: a plugin's toggle handler
+            // must never tear down the menu dispatcher.
+            Serilog.Log.Logger.Error(ex, "Favorite toggle for {Text} threw.", item.Text);
+        }
+
+        // PluginMenuItem is immutable, so reflect the new state by swapping in
+        // a copy with the flipped flag. This re-renders only this row's star —
+        // no reorder, no full rebuild. The plugin's own favorites store was
+        // updated by OnToggleFavorite, so the next menu open re-sorts. Match by
+        // reference (not IndexOf) so a value-equal twin row isn't picked.
+        for (var i = 0; i < Items.Count; i++)
+        {
+            if (ReferenceEquals(Items[i], item))
+            {
+                Items[i] = item with { IsFavorite = !(item.IsFavorite ?? false) };
+                break;
+            }
+        }
+
+        // A click can accumulate outside-ticks while the button is down; reset
+        // so the hover poll doesn't auto-dismiss right after the toggle.
+        ResetHoverState();
     }
 }

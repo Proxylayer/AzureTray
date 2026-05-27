@@ -31,6 +31,14 @@ namespace AzureTray.Plugin.Contracts;
 /// <see cref="Invoke"/> but does not dismiss the menu. Use for refresh-style
 /// actions where the user expects to see the result land in the visible menu.
 /// </para>
+/// <para>
+/// When <see cref="IsFavorite"/> is non-null the host renders a star at the
+/// right edge of the row (☆ for <c>false</c>, ★ for <c>true</c>). Clicking the
+/// star fires <see cref="OnToggleFavorite"/> and flips the glyph in place
+/// without dismissing the menu or triggering the row's primary
+/// <see cref="Invoke"/>/<see cref="Children"/> action. Leave it <c>null</c> on
+/// rows that aren't favoritable so no star is shown.
+/// </para>
 /// </remarks>
 public sealed record PluginMenuItem(
     string Text,
@@ -42,7 +50,9 @@ public sealed record PluginMenuItem(
     bool KeepMenuOpen = false,
     string? Icon = null,
     Func<string, IReadOnlyList<PluginMenuItem>>? SearchProvider = null,
-    string? SearchPlaceholder = null)
+    string? SearchPlaceholder = null,
+    bool? IsFavorite = null,
+    Action? OnToggleFavorite = null)
 {
     /// <summary>A pre-built horizontal divider. Use instead of constructing manually.</summary>
     public static PluginMenuItem Separator { get; } = new(string.Empty, IsSeparator: true);
@@ -52,4 +62,11 @@ public sealed record PluginMenuItem(
     /// Convenience for XAML data binding (chevron visibility).
     /// </summary>
     public bool HasChildren => Children is { Count: > 0 } || SearchProvider is not null;
+
+    /// <summary>
+    /// <c>true</c> when this row should display a favorite star. Convenience for
+    /// XAML data binding (star visibility); mirrors <see cref="IsFavorite"/>
+    /// having a value.
+    /// </summary>
+    public bool ShowFavorite => IsFavorite.HasValue;
 }

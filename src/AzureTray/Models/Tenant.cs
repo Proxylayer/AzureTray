@@ -18,4 +18,13 @@ public sealed record Tenant(
     string DisplayName,
     string? ClientId,
     string? SignInEmail = null,
-    bool ProbeDisabled = false);
+    bool ProbeDisabled = false)
+{
+    // Transient, runtime-only flag: set when the tenant's token failed to
+    // renew mid-session and interactive sign-in is required (see
+    // ITenantAuthHealth). Drives the "Fix sign-in" button on the Settings row.
+    // [JsonIgnore] keeps it out of the persisted store — it always loads false
+    // and is recomputed from ITenantAuthHealth when the Settings window opens.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool NeedsReauth { get; init; }
+}
