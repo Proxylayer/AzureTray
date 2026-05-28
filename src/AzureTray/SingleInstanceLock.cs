@@ -1,4 +1,7 @@
 using System;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 
 namespace AzureTray;
@@ -21,7 +24,7 @@ internal sealed class SingleInstanceLock : IDisposable
     // Reverse-DNS form keeps the name from colliding with another app's
     // mutex. Bumping the suffix on a breaking-rename is safe; existing
     // installs holding the old name won't block the new name's lock.
-    private const string MutexName = @"Local\Proxylayer.AzureTray.SingleInstance";
+    private const string BaseMutexName = @"Local\Proxylayer.AzureTray.SingleInstance";
 
     private readonly Mutex _mutex;
     private bool _disposed;
@@ -30,7 +33,7 @@ internal sealed class SingleInstanceLock : IDisposable
 
     public SingleInstanceLock()
     {
-        _mutex = new Mutex(initiallyOwned: false, name: MutexName);
+        _mutex = new Mutex(initiallyOwned: false, name: ResolveMutexName());
         try
         {
             Acquired = _mutex.WaitOne(TimeSpan.Zero, exitContext: false);
@@ -40,6 +43,19 @@ internal sealed class SingleInstanceLock : IDisposable
             // Previous holder crashed; ownership transfers to us.
             Acquired = true;
         }
+    }
+
+    // An isolated dev/test instance (AppPaths.DataRootOverrideEnvVar set) gets
+    // its own lock keyed to the override root, so it neither blocks nor is
+    // blocked by the real per-user install. Unset → the shared production name.
+    private static string ResolveMutexName()
+    {
+        var overrideRoot = Environment.GetEnvironmentVariable(AppPaths.DataRootOverrideEnvVar);
+        if (string.IsNullOrWhiteSpace(overrideRoot)) return BaseMutexName;
+
+        var key = Path.GetFullPath(overrideRoot).ToLowerInvariant();
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..16];
+        return $"{BaseMutexName}.{hash}";
     }
 
     public void Dispose()

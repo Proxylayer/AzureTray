@@ -39,6 +39,14 @@ namespace AzureTray.Plugin.Contracts;
 /// <see cref="Invoke"/>/<see cref="Children"/> action. Leave it <c>null</c> on
 /// rows that aren't favoritable so no star is shown.
 /// </para>
+/// <para>
+/// <see cref="ContextItems"/> are shown on <strong>right-click</strong> as a
+/// popup, independent of left-click. Unlike <see cref="Children"/> (a left-click
+/// submenu that shows a chevron and auto-opens on hover), context items are only
+/// revealed by right-clicking the row — use them for secondary actions on an
+/// otherwise non-expanding row (e.g. Copy / Revoke on an active item). They work
+/// even when <see cref="IsEnabled"/> is <c>false</c>.
+/// </para>
 /// </remarks>
 public sealed record PluginMenuItem(
     string Text,
@@ -52,7 +60,8 @@ public sealed record PluginMenuItem(
     Func<string, IReadOnlyList<PluginMenuItem>>? SearchProvider = null,
     string? SearchPlaceholder = null,
     bool? IsFavorite = null,
-    Action? OnToggleFavorite = null)
+    Action? OnToggleFavorite = null,
+    IReadOnlyList<PluginMenuItem>? ContextItems = null)
 {
     /// <summary>A pre-built horizontal divider. Use instead of constructing manually.</summary>
     public static PluginMenuItem Separator { get; } = new(string.Empty, IsSeparator: true);
@@ -69,4 +78,7 @@ public sealed record PluginMenuItem(
     /// having a value.
     /// </summary>
     public bool ShowFavorite => IsFavorite.HasValue;
+
+    /// <summary><c>true</c> when this row has a right-click context menu.</summary>
+    public bool HasContextItems => ContextItems is { Count: > 0 };
 }

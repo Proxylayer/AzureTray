@@ -34,6 +34,21 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         }
     }
 
+    // Authors the tray-tooltip line for this plugin so it reads "pending
+    // approvals" rather than the host's generic "pending". Null when nothing is
+    // pending, so the host falls back to its own summary (or omits PIM entirely
+    // when other providers have text).
+    public string? BadgeTooltip
+    {
+        get
+        {
+            var count = Count;
+            return count > 0
+                ? $"Azure PIM — {count} pending approval{(count == 1 ? "" : "s")}"
+                : null;
+        }
+    }
+
     // Pending approvals change fast; eligible roles change rarely. Match the
     // predecessor app's cadence.
     private static readonly TimeSpan PendingPollInterval = TimeSpan.FromSeconds(60);
@@ -200,7 +215,7 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         return new PluginMenuItem(Text: label, Children: children);
     }
 
-    private static void AppendSourceGroup(
+    private void AppendSourceGroup(
         List<PluginMenuItem> target,
         string sourceLabel,
         List<UnifiedEligibleRole> roles,
@@ -214,17 +229,34 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         foreach (var role in roles)
         {
             var r = role;
+
+            // Right-click "Copy role name" is offered on every row. Active rows
+            // are otherwise non-actionable (the left-click is disabled), so the
+            // context menu is the only place they can be acted on — context
+            // items fire even though the row is greyed (IsEnabled: false).
+            var copyName = new PluginMenuItem(
+                Text: "Copy role name",
+                Invoke: () => _context?.Clipboard.SetText(r.RoleName));
+
             if (activeNames.Contains(r.RoleName))
             {
                 target.Add(new PluginMenuItem(
                     Text: $"    {r.RoleName}  ({r.ScopeDisplay})  ✓ active",
-                    IsEnabled: false));
+                    IsEnabled: false,
+                    ContextItems: new[]
+                    {
+                        copyName,
+                        new PluginMenuItem(
+                            Text: "Deactivate",
+                            Invoke: () => _ = watcher.HandleDeactivationAsync(r, CancellationToken.None)),
+                    }));
             }
             else
             {
                 target.Add(new PluginMenuItem(
                     Text: $"    {r.RoleName}  ({r.ScopeDisplay})",
-                    Invoke: () => _ = watcher.HandleActivationAsync(r, CancellationToken.None)));
+                    Invoke: () => _ = watcher.HandleActivationAsync(r, CancellationToken.None),
+                    ContextItems: new[] { copyName }));
             }
         }
     }
@@ -296,7 +328,7 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
     // gains a feature this plugin wants to use conditionally, bump this and gate
     // the feature on `host >= ValidatedAgainstHost` (or a feature-specific
     // minimum) right where you'd call it.
-    private static readonly System.Version ValidatedAgainstHost = new(0, 5, 0);
+    private static readonly System.Version ValidatedAgainstHost = new(0, 6, 0);
 
     private static void LogHostCompatibility(IPluginContext context)
     {

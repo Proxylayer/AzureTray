@@ -16,4 +16,18 @@ public interface IClipboard
 {
     /// <summary>Writes <paramref name="text"/> to the system clipboard.</summary>
     void SetText(string text);
+
+    /// <summary>
+    /// Clears the system clipboard, but only if its current text still equals
+    /// <paramref name="expectedText"/> — so anything the user copied afterward is
+    /// left untouched. A no-op when the clipboard holds different content (or is
+    /// empty). Use to auto-expire a short-lived secret (e.g. a copied password)
+    /// after a timeout without clobbering the user's later clipboard activity.
+    /// </summary>
+    /// <remarks>
+    /// Default-implemented as a no-op so plugins built against this member keep
+    /// loading on hosts that predate it; the host overrides it with a real
+    /// implementation.
+    /// </remarks>
+    void ClearIfMatches(string expectedText) { }
 }

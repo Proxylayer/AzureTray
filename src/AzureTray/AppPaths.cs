@@ -26,11 +26,29 @@ public sealed class AppPaths : IAppPaths
     private const string ConfigFolderName = "AzureTray";
     private const string DataFolderName = "AzureTray.Data";
 
+    // Dev/test isolation hook. When set, ALL app state (plugins, plugin-data,
+    // config, tenants, logs, auth records) is rooted under this folder instead
+    // of the real %LOCALAPPDATA% / %APPDATA% install, so a throwaway instance
+    // never touches a production install. Unset in production: behaviour is
+    // exactly as before. SingleInstanceLock reads the same variable to scope
+    // its mutex, so an isolated instance can run alongside the real tray.
+    internal const string DataRootOverrideEnvVar = "AZURETRAY_DATA_ROOT";
+
     public AppPaths()
-        : this(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData))
+        : this(ResolveLocalRoot(), ResolveRoamingRoot())
     {
+    }
+
+    private static string ResolveLocalRoot()
+        => OverrideRoot() ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+
+    private static string ResolveRoamingRoot()
+        => OverrideRoot() ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+
+    private static string? OverrideRoot()
+    {
+        var root = Environment.GetEnvironmentVariable(DataRootOverrideEnvVar);
+        return string.IsNullOrWhiteSpace(root) ? null : root;
     }
 
     public AppPaths(string localAppDataRoot, string roamingAppDataRoot)

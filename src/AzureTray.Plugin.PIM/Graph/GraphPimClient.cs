@@ -156,6 +156,44 @@ internal sealed class GraphPimClient : IGraphPimClient
         return created;
     }
 
+    public async Task<EntraScheduleRequest> DeactivateRoleAsync(
+        string principalId,
+        string roleDefinitionId,
+        string justification,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(principalId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(roleDefinitionId);
+
+        // selfDeactivate is immediate — no scheduleInfo. Justification is
+        // optional for deactivation; omit it (WhenWritingNull drops the null)
+        // when the caller has none rather than sending an empty string.
+        var body = new
+        {
+            action = "selfDeactivate",
+            principalId,
+            roleDefinitionId,
+            directoryScopeId = DirectoryScope,
+            justification = string.IsNullOrWhiteSpace(justification) ? null : justification,
+        };
+
+        var created = await PostJsonAsync<EntraScheduleRequest>(
+            "v1.0/roleManagement/directory/roleAssignmentScheduleRequests",
+            body,
+            cancellationToken);
+
+        if (created is null)
+        {
+            throw new InvalidOperationException("Graph returned an empty body for self-deactivation.");
+        }
+
+        _logger.LogInformation(
+            "Submitted self-deactivation {RequestId} for role {RoleId} on tenant {TenantId} ({Status}).",
+            created.Id, roleDefinitionId, _tenantId, created.Status);
+
+        return created;
+    }
+
     public async Task ReviewAsync(
         string approvalId,
         ApprovalDecision decision,

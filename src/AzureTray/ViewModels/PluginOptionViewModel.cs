@@ -34,6 +34,18 @@ public sealed partial class PluginOptionViewModel : ObservableObject
     public bool IsText => Definition.Kind == PluginOptionKind.Text;
     public bool IsNumber => Definition.Kind == PluginOptionKind.Number;
 
+    // When this option is a Boolean master with another option targeting it via
+    // PluginOption.GroupWithKey, the follower's VM is attached here so the row
+    // can render both controls inline. The follower is NOT also added to the
+    // parent Options collection — it's owned by the master row.
+    public PluginOptionViewModel? Companion { get; internal set; }
+
+    public bool HasCompanion => Companion is not null;
+
+    // Visibility helper: the standalone Boolean check-box hides when this VM
+    // owns a Companion (the compound row renders both controls inline instead).
+    public bool ShowsPlainBooleanCheckbox => IsBoolean && Companion is null;
+
     [ObservableProperty]
     private object? _value;
 

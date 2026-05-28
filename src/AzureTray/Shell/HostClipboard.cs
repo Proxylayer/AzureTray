@@ -62,4 +62,46 @@ public sealed class HostClipboard : IClipboard
             _logger.LogWarning(ex, "Failed to write to the system clipboard.");
         }
     }
+
+    public void ClearIfMatches(string expectedText)
+    {
+        if (string.IsNullOrEmpty(expectedText)) return;
+
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null)
+        {
+            _logger.LogWarning("Clipboard clear skipped — WPF Application is not running.");
+            return;
+        }
+
+        if (dispatcher.CheckAccess())
+        {
+            TryClearIfMatches(expectedText);
+        }
+        else
+        {
+            dispatcher.Invoke(() => TryClearIfMatches(expectedText));
+        }
+    }
+
+    // Compare-then-clear must happen on a single STA hop so nothing can swap
+    // the clipboard out between the read and the clear. We only wipe when the
+    // current contents are still the exact value we were asked to expire — a
+    // value the user copied afterward is left alone.
+    private void TryClearIfMatches(string expectedText)
+    {
+        try
+        {
+            if (System.Windows.Clipboard.ContainsText() &&
+                string.Equals(System.Windows.Clipboard.GetText(), expectedText, StringComparison.Ordinal))
+            {
+                System.Windows.Clipboard.Clear();
+                _logger.LogDebug("Cleared an expired secret from the clipboard.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to clear the system clipboard.");
+        }
+    }
 }

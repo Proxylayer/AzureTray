@@ -29,6 +29,12 @@ internal interface IGraphPimClient
         string justification,
         CancellationToken cancellationToken);
 
+    Task<EntraScheduleRequest> DeactivateRoleAsync(
+        string principalId,
+        string roleDefinitionId,
+        string justification,
+        CancellationToken cancellationToken);
+
     Task ReviewAsync(
         string approvalId,
         ApprovalDecision decision,

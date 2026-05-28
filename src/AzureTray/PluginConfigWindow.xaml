@@ -89,7 +89,7 @@
                                                   IsChecked="{Binding BoolValue, Mode=TwoWay}"
                                                   VerticalAlignment="Center"
                                                   HorizontalAlignment="Right"
-                                                  Visibility="{Binding IsBoolean, Converter={StaticResource BoolToVisibility}}"/>
+                                                  Visibility="{Binding ShowsPlainBooleanCheckbox, Converter={StaticResource BoolToVisibility}}"/>
                                         <TextBox Grid.Column="1"
                                                  Text="{Binding TextValue, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                                  VerticalAlignment="Center"
@@ -98,6 +98,26 @@
                                                  Text="{Binding NumberValue, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                                  VerticalAlignment="Center"
                                                  Visibility="{Binding IsNumber, Converter={StaticResource BoolToVisibility}}"/>
+                                        <!-- Compound row: a Boolean checkbox that gates a companion option's
+                                             editor (e.g. "[x] Clear after [5] minutes"). Renders in place of
+                                             the standalone CheckBox when this option has a Companion. -->
+                                        <StackPanel Grid.Column="1"
+                                                    Orientation="Horizontal"
+                                                    VerticalAlignment="Center"
+                                                    HorizontalAlignment="Right"
+                                                    Visibility="{Binding HasCompanion, Converter={StaticResource BoolToVisibility}}">
+                                            <CheckBox IsChecked="{Binding BoolValue, Mode=TwoWay}"
+                                                      VerticalAlignment="Center"/>
+                                            <TextBox Text="{Binding Companion.NumberValue, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                     IsEnabled="{Binding BoolValue}"
+                                                     Width="56"
+                                                     Margin="8,0,4,0"
+                                                     VerticalAlignment="Center"
+                                                     HorizontalContentAlignment="Right"/>
+                                            <TextBlock Text="{Binding Companion.Label}"
+                                                       VerticalAlignment="Center"
+                                                       Style="{StaticResource Text.Muted}"/>
+                                        </StackPanel>
                                     </Grid>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>

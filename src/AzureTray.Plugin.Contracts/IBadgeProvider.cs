@@ -30,6 +30,15 @@ public interface IBadgeProvider
     /// </summary>
     int Count { get; }
 
+    /// <summary>
+    /// Optional plugin-authored text for the tray tooltip (e.g.
+    /// <c>"JIT Access — 1 expiring"</c>). When non-null/non-empty the host uses
+    /// it verbatim, joining multiple providers; when null the host falls back to
+    /// a generic count summary. Lets each plugin use its own noun ("expiring",
+    /// "pending approvals", …) instead of a single shared word.
+    /// </summary>
+    string? BadgeTooltip => null;
+
     /// <summary>Fired when <see cref="Count"/> or <see cref="State"/> changes.</summary>
     event Action? BadgeChanged;
 }

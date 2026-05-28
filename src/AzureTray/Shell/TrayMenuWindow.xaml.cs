@@ -343,14 +343,20 @@ public partial class TrayMenuWindow : Window
             }
             else
             {
-                // Cursor is over a LEAF row in this menu. If this menu still
-                // has an open submenu from a different row, the user has
-                // moved on — close it. Without this, hovering "Log Viewer"
-                // leaves "Pending Approvals" expanded next to it.
+                // Cursor is over a LEAF row in this menu. If the menu has an
+                // open submenu (or right-click context popup) anchored to a
+                // DIFFERENT row, the user has moved on — close it. The
+                // same-row guard is essential for right-click context popups:
+                // the originating row is a leaf and is still under the cursor
+                // when the next poll tick fires, so without it the popup would
+                // be torn down ~60 ms after appearing ("vanishes instantly").
                 _hoveredSubmenuRow = null;
                 _hoveredSubmenuParent = null;
                 _onSubmenuRowTicks = 0;
-                menu._activeSubmenu?.CloseChain();
+                if (!ReferenceEquals(menu._activeSubmenuFor, item))
+                {
+                    menu._activeSubmenu?.CloseChain();
+                }
             }
         }
         else
@@ -375,8 +381,15 @@ public partial class TrayMenuWindow : Window
     private static (TrayMenuWindow? menu, System.Windows.Controls.ListBoxItem? row) HitTestCursor()
     {
         var cursor = System.Windows.Forms.Cursor.Position;
-        foreach (var m in OpenMenus)
+        // Iterate most-recently-opened first so a child menu wins when it
+        // visually overlaps its parent — right-click context popups open AT
+        // the cursor (inside the parent's bounds), so without this reverse
+        // order the parent would claim the overlap and the hit-test would
+        // resolve to a different parent row, prompting the leaf-row branch
+        // to close the popup the moment the user moved into it.
+        for (var i = OpenMenus.Count - 1; i >= 0; i--)
         {
+            var m = OpenMenus[i];
             if (!m.IsVisible) continue;
             var dpi = VisualTreeHelper.GetDpi(m);
             // The drop shadow consumes 12 DIPs of transparent margin
@@ -457,6 +470,32 @@ public partial class TrayMenuWindow : Window
         {
             InvokeAndDismiss(item);
         }
+    }
+
+    // Right-click opens the row's ContextItems as a popup anchored at the
+    // cursor — independent of the left-click action and available even on
+    // disabled (greyed) rows. Used for secondary actions like Copy / Revoke on
+    // an active item without making the row a hover-expanding submenu.
+    private void OnItemMouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        var element = e.OriginalSource as DependencyObject;
+        var row = FindAncestor<ListBoxItem>(element);
+        if (row?.DataContext is not PluginMenuItem item) return;
+        if (item.IsSeparator || item.ContextItems is not { Count: > 0 } ctx) return;
+
+        e.Handled = true;
+
+        // Close any open submenu/context chain, then open the context popup at
+        // the cursor. Reuses the submenu plumbing so the close/hover logic and
+        // InvokeAndDismiss-on-click all work unchanged.
+        _activeSubmenu?.CloseChain();
+
+        var menu   = new TrayMenuWindow(ctx, parent: this);
+        var cursor = System.Windows.Forms.Cursor.Position;
+        menu.ShowAt(cursor.X, cursor.Y, openAboveAnchor: false);
+
+        _activeSubmenu    = menu;
+        _activeSubmenuFor = item;
     }
 
     private void OpenSubmenu(PluginMenuItem item, ListBoxItem row)

@@ -235,6 +235,105 @@ public sealed class EligibleRolesWatcherTests
             Arg.Any<TimeSpan>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task HandleDeactivationAsync_Entra_ConfirmsAndCallsGraphDeactivate()
+    {
+        var graph = Substitute.For<IGraphPimClient>();
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
+        graph.ListEligibleRolesAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<EntraEligibilitySchedule>());
+        graph.ListActiveRoleAssignmentsAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<EntraEligibilitySchedule>());
+        var arm = NewArm();
+        var notifier = Substitute.For<INotifier>();
+        notifier.ShowAsync(Arg.Any<YesNoRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new YesNoResult(true));
+
+        var watcher = NewWatcher(graph, arm, notifier);
+
+        var role = new UnifiedEligibleRole(
+            Source: PimSource.EntraId,
+            RoleName: "Owner",
+            RoleDefinitionId: "graph-role-owner",
+            ScopeDisplay: "Entra ID directory",
+            ArmScope: null,
+            EligibilityId: "elig-1");
+
+        await watcher.HandleDeactivationAsync(role, CancellationToken.None);
+
+        await graph.Received(1).DeactivateRoleAsync(
+            "prin-1",
+            "graph-role-owner",
+            Arg.Any<string>(),
+            Arg.Any<CancellationToken>());
+        await arm.DidNotReceive().DeactivateRoleAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task HandleDeactivationAsync_Arm_ConfirmsAndCallsArmDeactivateWithScope()
+    {
+        var graph = Substitute.For<IGraphPimClient>();
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
+        graph.ListEligibleRolesAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<EntraEligibilitySchedule>());
+        graph.ListActiveRoleAssignmentsAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<EntraEligibilitySchedule>());
+        var arm = NewArm();
+        var notifier = Substitute.For<INotifier>();
+        notifier.ShowAsync(Arg.Any<YesNoRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new YesNoResult(true));
+
+        var watcher = NewWatcher(graph, arm, notifier);
+
+        var role = new UnifiedEligibleRole(
+            Source: PimSource.AzureRbac,
+            RoleName: "Contributor",
+            RoleDefinitionId: "arm-role-contributor",
+            ScopeDisplay: "Dev (sub)",
+            ArmScope: "/subscriptions/sub-1",
+            EligibilityId: "elig-arm-1");
+
+        await watcher.HandleDeactivationAsync(role, CancellationToken.None);
+
+        await arm.Received(1).DeactivateRoleAsync(
+            "/subscriptions/sub-1",
+            "prin-1",
+            "arm-role-contributor",
+            Arg.Any<string>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task HandleDeactivationAsync_Declined_DoesNotDeactivate()
+    {
+        var graph = Substitute.For<IGraphPimClient>();
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
+        var arm = NewArm();
+        var notifier = Substitute.For<INotifier>();
+        notifier.ShowAsync(Arg.Any<YesNoRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new YesNoResult(false));
+
+        var watcher = NewWatcher(graph, arm, notifier);
+
+        var role = new UnifiedEligibleRole(
+            Source: PimSource.EntraId,
+            RoleName: "Owner",
+            RoleDefinitionId: "graph-role-owner",
+            ScopeDisplay: "Entra ID directory",
+            ArmScope: null,
+            EligibilityId: null);
+
+        await watcher.HandleDeactivationAsync(role, CancellationToken.None);
+
+        await graph.DidNotReceive().DeactivateRoleAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await arm.DidNotReceive().DeactivateRoleAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
     // ---- builders ---------------------------------------------------------
 
     private static EntraEligibilitySchedule GraphEligible(string roleDisplayName, string roleDefId)

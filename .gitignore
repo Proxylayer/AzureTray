@@ -25,6 +25,7 @@ Releases/
 # IDE / editor
 .vs/
 .vscode/
+.claude/
 .idea/
 *.user
 *.suo

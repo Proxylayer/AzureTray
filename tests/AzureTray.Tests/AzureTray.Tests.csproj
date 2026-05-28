@@ -20,6 +20,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\AzureTray\AzureTray.csproj" />
     <ProjectReference Include="..\..\src\AzureTray.Plugin.PIM\AzureTray.Plugin.PIM.csproj" />
+    <ProjectReference Include="..\..\src\AzureTray.Plugin.LAPS\AzureTray.Plugin.LAPS.csproj" />
   </ItemGroup>
 
 </Project>

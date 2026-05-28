@@ -35,6 +35,13 @@ internal interface IArmPimClient
         string justification,
         CancellationToken cancellationToken);
 
+    Task<ArmRoleAssignmentScheduleRequest> DeactivateRoleAsync(
+        string scope,
+        string principalId,
+        string roleDefinitionId,
+        string justification,
+        CancellationToken cancellationToken);
+
     Task ReviewAsync(
         string scope,
         string approvalId,

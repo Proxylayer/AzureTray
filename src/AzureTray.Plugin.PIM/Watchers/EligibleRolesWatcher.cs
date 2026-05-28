@@ -386,7 +386,98 @@ internal sealed class EligibleRolesWatcher
         }
     }
 
-    private async Task NotifyActivationErrorAsync(
+    internal async Task HandleDeactivationAsync(UnifiedEligibleRole role, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var confirm = await _context.Notifier.ShowAsync(
+                new YesNoRequest(
+                    Title: $"Deactivate {role.RoleName}?",
+                    Message: $"End your active assignment on {role.ScopeDisplay} now."),
+                cancellationToken).ConfigureAwait(false);
+
+            if (confirm is not YesNoResult { Accepted: true })
+            {
+                _context.Logger.LogDebug(
+                    "Deactivation cancelled at confirm prompt for {RoleName} on tenant {TenantId}.",
+                    role.RoleName, _tenant.TenantId);
+                return;
+            }
+
+            var principalId = _cachedPrincipalId
+                ?? await GetPrincipalIdAsync(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(principalId))
+            {
+                _context.Logger.LogWarning(
+                    "Cannot deactivate {RoleName} on tenant {TenantId}: signed-in principal ID could not be resolved.",
+                    role.RoleName, _tenant.TenantId);
+                return;
+            }
+
+            const string justification = "Deactivated from AzureTray.";
+
+            switch (role.Source)
+            {
+                case PimSource.EntraId:
+                    await _graph.DeactivateRoleAsync(
+                        principalId,
+                        role.RoleDefinitionId,
+                        justification,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+
+                case PimSource.AzureRbac:
+                    if (string.IsNullOrWhiteSpace(role.ArmScope))
+                    {
+                        _context.Logger.LogError(
+                            "ARM role {RoleName} on tenant {TenantId} has no scope; cannot deactivate.",
+                            role.RoleName, _tenant.TenantId);
+                        await NotifyOperationErrorAsync("Deactivation", role, "Cannot deactivate — the role has no ARM scope to act on.", ex: null, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+                    await _arm.DeactivateRoleAsync(
+                        role.ArmScope,
+                        principalId,
+                        role.RoleDefinitionId,
+                        justification,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+            }
+
+            _ = _context.Notifier.ShowAsync(
+                new InformationRequest(
+                    Title: $"Deactivated {role.RoleName}",
+                    Message: $"on {role.ScopeDisplay}.")
+                {
+                    Severity = NotificationSeverity.Success,
+                },
+                CancellationToken.None);
+
+            // Refresh so the menu's "✓ active" grey-out clears. The directory
+            // can lag a beat behind the request landing, so a manual "↻" is the
+            // backstop; this poll just makes the common case update promptly.
+            _ = PollAsync(CancellationToken.None);
+        }
+        catch (OperationCanceledException) { /* shutdown */ }
+        catch (Exception ex)
+        {
+            _context.Logger.LogError(
+                ex,
+                "Deactivation failed for {RoleName} on tenant {TenantId}.",
+                role.RoleName, _tenant.TenantId);
+            await NotifyOperationErrorAsync("Deactivation", role, ExtractHeadline(ex), ex, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private Task NotifyActivationErrorAsync(
+        UnifiedEligibleRole role,
+        string reason,
+        Exception? ex,
+        CancellationToken cancellationToken)
+        => NotifyOperationErrorAsync("Activation", role, reason, ex, cancellationToken);
+
+    private async Task NotifyOperationErrorAsync(
+        string operation,
         UnifiedEligibleRole role,
         string reason,
         Exception? ex,
@@ -398,7 +489,7 @@ internal sealed class EligibleRolesWatcher
         // collapsed by default so the toast doesn't dwarf the screen.
         await _context.Notifier.ShowAsync(
             new InformationRequest(
-                Title: $"Activation failed: {role.RoleName}",
+                Title: $"{operation} failed: {role.RoleName}",
                 Message: reason)
             {
                 Severity = NotificationSeverity.Error,

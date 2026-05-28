@@ -254,6 +254,7 @@
                          ScrollViewer.VerticalScrollBarVisibility="Hidden"
                          KeyboardNavigation.DirectionalNavigation="Cycle"
                          MouseLeftButtonUp="OnItemMouseLeftButtonUp"
+                         MouseRightButtonUp="OnItemMouseRightButtonUp"
                          SelectionChanged="OnSelectionChanged"
                          Loaded="OnItemsListLoaded"/>
 

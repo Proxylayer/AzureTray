@@ -137,6 +137,7 @@ public sealed class TrayIcon : IDisposable
         var pluginLoader = _services.GetService<IPluginLoader>();
         var state = BadgeState.Normal;
         var count = 0;
+        var tooltips = new List<string>();
         if (pluginLoader is not null)
         {
             foreach (var loaded in pluginLoader.LoadedPlugins)
@@ -144,6 +145,9 @@ public sealed class TrayIcon : IDisposable
                 if (loaded.Plugin is not IBadgeProvider p) continue;
                 count += Math.Max(0, p.Count);
                 if (Severity(p.State) > Severity(state)) state = p.State;
+                // Each provider may author its own tooltip text (its own noun:
+                // "expiring", "pending approvals", …); collect the non-empty ones.
+                if (!string.IsNullOrWhiteSpace(p.BadgeTooltip)) tooltips.Add(p.BadgeTooltip!.Trim());
             }
         }
 
@@ -154,9 +158,13 @@ public sealed class TrayIcon : IDisposable
         _currentIcon = newIcon;
         previous?.Dispose();
 
-        _notifyIcon.Text = count > 0
-            ? $"PL Azure Tray — {count} pending"
-            : "PL Azure Tray";
+        // Prefer plugin-authored tooltip text; fall back to a generic summary.
+        var text = tooltips.Count > 0
+            ? string.Join("  ·  ", tooltips)
+            : count > 0 ? $"PL Azure Tray — {count} pending" : "PL Azure Tray";
+        // NotifyIcon.Text is capped (~127 chars on modern Windows); trim safely.
+        if (text.Length > 127) text = text[..126] + "…";
+        _notifyIcon.Text = text;
     }
 
     private static int Severity(BadgeState s) => s switch

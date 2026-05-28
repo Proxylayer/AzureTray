@@ -178,6 +178,57 @@ internal sealed class ArmPimClient : IArmPimClient
         return created;
     }
 
+    public async Task<ArmRoleAssignmentScheduleRequest> DeactivateRoleAsync(
+        string scope,
+        string principalId,
+        string roleDefinitionId,
+        string justification,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(scope);
+        ArgumentException.ThrowIfNullOrWhiteSpace(principalId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(roleDefinitionId);
+
+        var requestId = Guid.NewGuid().ToString();
+        var prefix = NormalizeScope(scope);
+        var url =
+            $"{prefix}providers/Microsoft.Authorization/roleAssignmentScheduleRequests/{requestId}" +
+            $"?api-version={AuthorizationApi}";
+
+        // SelfDeactivate is immediate — no scheduleInfo and no linked
+        // eligibility id (those only matter when granting access). Justification
+        // is optional for deactivation; omit when blank.
+        var body = new
+        {
+            properties = new
+            {
+                principalId,
+                roleDefinitionId,
+                requestType = "SelfDeactivate",
+                justification = string.IsNullOrWhiteSpace(justification) ? null : justification,
+            },
+        };
+
+        using var request = new HttpRequestMessage(HttpMethod.Put, url)
+        {
+            Content = JsonContent.Create(body, options: JsonOptions),
+        };
+        using var response = await SendAsync(request, cancellationToken);
+        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
+
+        var created = await response.Content.ReadFromJsonAsync<ArmRoleAssignmentScheduleRequest>(JsonOptions, cancellationToken);
+        if (created is null)
+        {
+            throw new InvalidOperationException("ARM returned an empty body for self-deactivation.");
+        }
+
+        _logger.LogInformation(
+            "Submitted ARM self-deactivation {RequestId} for role {RoleId} at {Scope} (tenant {TenantId}, status {Status}).",
+            requestId, roleDefinitionId, scope, _tenantId, created.Properties?.Status);
+
+        return created;
+    }
+
     public async Task ReviewAsync(
         string scope,
         string approvalId,

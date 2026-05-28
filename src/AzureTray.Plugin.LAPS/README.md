@@ -6,6 +6,8 @@ LAPS (Local Administrator Password Solution) plugin for [AzureTray](https://gith
 
 - Tray menu lists Entra-joined devices for which the signed-in user has the right to read the local admin credential, grouped by tenant.
 - Selecting a device fetches its current local admin password via Microsoft Graph and copies it to the clipboard.
+- Right-click a device for secondary actions: copy password, copy device name, or refresh the list.
+- Copied passwords auto-clear from the clipboard after a configurable delay (default 5 minutes; only if you haven't replaced them since). **Settings** exposes a checkbox to enable it and a minutes field for the delay.
 - Devices the user isn't entitled to read are silently filtered.
 
 ## Required permission

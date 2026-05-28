@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
@@ -513,10 +514,15 @@ public sealed partial class SettingsViewModel : ObservableObject
                 var values = configurable.Values;
                 var pluginIdCaptured = plugin.Id;
                 var configurableCaptured = configurable;
+
+                // Build one VM per option in declaration order, keyed by option.Key
+                // so followers can be attached to their master in a second pass.
+                var byKey = new Dictionary<string, PluginOptionViewModel>(StringComparer.Ordinal);
+                var ordered = new List<PluginOptionViewModel>();
                 foreach (var option in configurable.Options)
                 {
                     values.TryGetValue(option.Key, out var current);
-                    vm.Options.Add(new PluginOptionViewModel(
+                    var optionVm = new PluginOptionViewModel(
                         definition: option,
                         initialValue: current,
                         commit: (key, value) =>
@@ -526,7 +532,30 @@ public sealed partial class SettingsViewModel : ObservableObject
                             {
                                 _logger.LogWarning(ex, "Plugin {Id} rejected SetValue({Key}).", pluginIdCaptured, key);
                             }
-                        }));
+                        });
+                    byKey[option.Key] = optionVm;
+                    ordered.Add(optionVm);
+                }
+
+                // Pair followers (PluginOption.GroupWithKey -> master) into their
+                // master's Companion slot so the row renders both controls
+                // inline; the follower itself is then excluded from the flat
+                // Options list.
+                var attached = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var optionVm in ordered)
+                {
+                    var groupKey = optionVm.Definition.GroupWithKey;
+                    if (string.IsNullOrEmpty(groupKey)) continue;
+                    if (!byKey.TryGetValue(groupKey, out var master)) continue;
+
+                    master.Companion = optionVm;
+                    attached.Add(optionVm.Definition.Key);
+                }
+
+                foreach (var optionVm in ordered)
+                {
+                    if (attached.Contains(optionVm.Definition.Key)) continue;
+                    vm.Options.Add(optionVm);
                 }
             }
 

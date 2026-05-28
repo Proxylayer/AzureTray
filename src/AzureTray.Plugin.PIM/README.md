@@ -6,8 +6,8 @@ PIM (Privileged Identity Management) plugin for [AzureTray](https://github.com/P
 
 - Tray menu lists pending Entra ID and Azure RBAC PIM approvals, grouped by tenant. Approving or rejecting from the menu calls the Graph / ARM PIM API directly.
 - Eligible roles surface as one-click activation entries. The plugin handles MFA challenge replay, ticket-number prompts, and justification text per the tenant's PIM policy.
-- Active roles are visually distinguished so you don't accidentally re-activate.
-- A badge on the tray icon reflects total pending approvals across all managed tenants.
+- Active roles are visually distinguished so you don't accidentally re-activate. Right-click an active role to **Deactivate** it (or copy its name); right-click any role to copy its name.
+- A badge on the tray icon reflects total pending approvals across all managed tenants, with a tooltip summarising the count.
 
 ## Required permissions
 

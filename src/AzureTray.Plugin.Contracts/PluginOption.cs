@@ -30,13 +30,21 @@
 /// Fixed choices for <see cref="PluginOptionKind.Select"/> options.
 /// Ignored for all other <see cref="PluginOptionKind"/> values.
 /// </param>
+/// <param name="GroupWithKey">
+/// When set, this option renders inline beside the option whose
+/// <see cref="Key"/> matches — typically a <see cref="PluginOptionKind.Boolean"/>
+/// "enabled" checkbox that gates this option's input. The host disables this
+/// option's editor when the partner's value is <c>false</c>. The two options
+/// are still persisted independently; this is purely a rendering hint.
+/// </param>
 public sealed record PluginOption(
     string Key,
     string Label,
     PluginOptionKind Kind,
     string? Description = null,
     object? DefaultValue = null,
-    string[]? AllowedValues = null);
+    string[]? AllowedValues = null,
+    string? GroupWithKey = null);
 
 /// <summary>Determines the editor the host renders for a <see cref="PluginOption"/>.</summary>
 public enum PluginOptionKind

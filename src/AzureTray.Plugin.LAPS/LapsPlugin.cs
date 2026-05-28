@@ -18,6 +18,9 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
 {
     private const int DefaultMaxResultsPerMenu = 50;
     private const string MaxResultsOptionKey = "maxResultsPerMenu";
+    private const string ClearClipboardOptionKey = "clearClipboardAfterCopy";
+    private const string ClearAfterMinutesOptionKey = "clearClipboardAfterMinutes";
+    private const int DefaultClearMinutes = 5;
 
     private readonly ConcurrentDictionary<string, TenantDevices> _devicesByTenant
         = new(StringComparer.OrdinalIgnoreCase);
@@ -25,11 +28,46 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
     private readonly Dictionary<string, object?> _optionValues = new(StringComparer.Ordinal)
     {
         [MaxResultsOptionKey] = DefaultMaxResultsPerMenu,
+        [ClearClipboardOptionKey] = true,
+        [ClearAfterMinutesOptionKey] = DefaultClearMinutes,
     };
 
     private IPluginContext? _context;
     private LapsGraphClient? _graph;
     private CancellationTokenSource? _lifetimeCts;
+
+    // Test override for the configured delay; null = derive from the option.
+    // Lets tests exercise the auto-clear without waiting whole minutes.
+    internal TimeSpan? ClipboardClearDelayOverride { get; set; }
+
+    // How long a copied password lingers before auto-expiry (when enabled).
+    // Driven by the "clear after (minutes)" option; tests may override it.
+    internal TimeSpan ClipboardClearDelay
+        => ClipboardClearDelayOverride ?? TimeSpan.FromMinutes(ClearClipboardMinutes);
+
+    // Whole minutes from the option. The host coerces Number options to int, so
+    // that's the expected runtime type; other numeric forms are tolerated. A
+    // non-positive or unparseable value falls back to the default rather than
+    // disabling expiry or firing instantly.
+    internal int ClearClipboardMinutes
+    {
+        get
+        {
+            if (_optionValues.TryGetValue(ClearAfterMinutesOptionKey, out var v))
+            {
+                var minutes = v switch
+                {
+                    int i => i,
+                    long l => (int)l,
+                    double d => (int)Math.Round(d),
+                    string s when int.TryParse(s, out var parsed) => parsed,
+                    _ => DefaultClearMinutes,
+                };
+                if (minutes > 0) return minutes;
+            }
+            return DefaultClearMinutes;
+        }
+    }
 
     public event Action? MenuChanged;
     public event Action? ValuesChanged;
@@ -42,9 +80,28 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
             Kind: PluginOptionKind.Number,
             Description: "Upper bound on devices shown before the user must refine the search.",
             DefaultValue: DefaultMaxResultsPerMenu),
+        new PluginOption(
+            Key: ClearClipboardOptionKey,
+            Label: "Auto-clear copied password after",
+            Kind: PluginOptionKind.Boolean,
+            Description: "Wipe a copied LAPS password from the clipboard after the chosen delay — but only if you haven't replaced it since. Uncheck to keep copied passwords until you overwrite them yourself.",
+            DefaultValue: true),
+        // GroupWithKey tells the host to render this number editor inline beside
+        // the checkbox above (one compound row), and disable it when unchecked.
+        // The follower's Label becomes the trailing unit text in that row.
+        new PluginOption(
+            Key: ClearAfterMinutesOptionKey,
+            Label: "minutes",
+            Kind: PluginOptionKind.Number,
+            DefaultValue: DefaultClearMinutes,
+            GroupWithKey: ClearClipboardOptionKey),
     };
 
     public IReadOnlyDictionary<string, object?> Values => _optionValues;
+
+    // Default-on: enabled unless the stored value is an explicit bool false.
+    internal bool ClearClipboardAfterCopy
+        => !_optionValues.TryGetValue(ClearClipboardOptionKey, out var v) || v is not bool b || b;
 
     public void SetValue(string key, object? value)
     {
@@ -193,9 +250,26 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
                 if (matched >= MaxResultsPerMenu) { truncated = true; break; }
                 var captured = device;
                 var tenantId = state.Tenant.TenantId;
+                var capturedState = state;
                 rows.Add(new PluginMenuItem(
                     Text: multiTenant ? $"    {captured.DisplayName}" : captured.DisplayName,
-                    Invoke: () => _ = CopyPasswordAsync(tenantId, captured)));
+                    Invoke: () => _ = CopyPasswordAsync(tenantId, captured),
+                    // Right-click secondary actions. Left-click still copies the
+                    // password; these add the device name and an explicit refresh.
+                    ContextItems: new[]
+                    {
+                        new PluginMenuItem(
+                            Text: "Copy password",
+                            Invoke: () => _ = CopyPasswordAsync(tenantId, captured)),
+                        new PluginMenuItem(
+                            Text: "Copy device name",
+                            Invoke: () => _context?.Clipboard.SetText(captured.DisplayName)),
+                        new PluginMenuItem(
+                            Text: "Refresh",
+                            Icon: "↻",
+                            KeepMenuOpen: true,
+                            Invoke: () => _ = LoadDevicesAsync(capturedState)),
+                    }));
                 matched++;
             }
 
@@ -255,7 +329,7 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
     // gains a feature this plugin wants to use conditionally, bump this and gate
     // the feature on `host >= ValidatedAgainstHost` (or a feature-specific
     // minimum) right where you'd call it.
-    private static readonly System.Version ValidatedAgainstHost = new(0, 5, 0);
+    private static readonly System.Version ValidatedAgainstHost = new(0, 6, 0);
 
     private static void LogHostCompatibility(IPluginContext context)
     {
@@ -373,10 +447,15 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
                 "LAPS password for {DeviceName} ({TenantId}) copied to clipboard.",
                 device.DisplayName, tenantId);
 
+            if (ClearClipboardAfterCopy) ScheduleClipboardClear(password);
+
+            var expiryNote = ClearClipboardAfterCopy
+                ? $" Clears in {ClipboardClearDelay.TotalMinutes:0.#} min."
+                : string.Empty;
             await _context.Notifier.ShowAsync(
                 new InformationRequest(
                     Title: "LAPS password copied",
-                    Message: $"🔐 Password for {device.DisplayName} is on the clipboard."),
+                    Message: $"🔐 Password for {device.DisplayName} is on the clipboard.{expiryNote}"),
                 CancellationToken.None).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { /* shutdown */ }
@@ -386,6 +465,28 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
                 "Failed to retrieve LAPS password for {DeviceName} (tenant {TenantId}).",
                 device.DisplayName, tenantId);
         }
+    }
+
+    // Auto-expire a copied secret: after a delay, clear the clipboard — but only
+    // if it still holds this exact password (ClearIfMatches), so anything the
+    // user copied in the meantime is left untouched. Fire-and-forget, tied to
+    // the plugin lifetime so shutdown cancels a pending clear.
+    internal void ScheduleClipboardClear(string password)
+    {
+        var ctx = _context;
+        var token = _lifetimeCts?.Token ?? CancellationToken.None;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(ClipboardClearDelay, token).ConfigureAwait(false);
+                ctx?.Clipboard.ClearIfMatches(password);
+                ctx?.Logger.LogInformation(
+                    "Auto-cleared a copied LAPS password from the clipboard after {Minutes:0.#} min (if still present).",
+                    ClipboardClearDelay.TotalMinutes);
+            }
+            catch (OperationCanceledException) { /* shutdown — leave the clipboard as-is */ }
+        }, token);
     }
 
     // Tests exposed to the host's admin Test Runner.
