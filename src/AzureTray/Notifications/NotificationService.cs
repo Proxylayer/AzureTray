@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,20 +9,25 @@ using AzureTray.Plugin.Contracts;
 namespace AzureTray.Notifications;
 
 // Interactive notifications rendered as topmost, frameless WPF popups in the
-// bottom-right of the working area. Multiple notifications stack — each new
-// one is placed above the existing stack. When a notification closes, its slot
-// is released for the *next* arrival (sliding the others is not attempted —
-// the user said "stack them", not "reflow them").
+// bottom-right of the working area. Multiple notifications stack tightly —
+// each one is anchored above the one below it with a small StackSpacing gap,
+// sized to that window's actual rendered height (not a fixed slot). When a
+// notification opens, closes, or grows, the stack reflows so the gap between
+// toasts stays small rather than leaving popup-sized holes for shorter content.
 public sealed class NotificationService : INotifier
 {
     private const double WindowWidth = 360;
     private const double EdgeMargin = 16;
-    private const double StackSlotHeight = 220;
     private const double StackSpacing = 8;
+    // Estimate used before a window's ActualHeight is known (its first
+    // ContentRendered hasn't fired yet). Reposition fixes it up as soon as
+    // real heights arrive — this only avoids a flash at the wrong Y.
+    private const double FallbackHeight = 110;
 
     private readonly ILogger<NotificationService> _logger;
-    private readonly Lock _slotsGate = new();
-    private readonly SortedSet<int> _occupiedSlots = new();
+    private readonly Lock _stackGate = new();
+    // Bottom-to-top: index 0 is the bottommost visible notification.
+    private readonly List<NotificationWindow> _stack = new();
 
     public NotificationService(ILogger<NotificationService> logger)
     {
@@ -56,12 +61,20 @@ public sealed class NotificationService : INotifier
                 var vm = new NotificationViewModel(request, tcs);
                 var window = new NotificationWindow { DataContext = vm };
 
-                var slot = AcquireSlot();
-                PositionWindow(window, slot);
+                AddToStack(window);
+
+                // Re-pack the stack as each window's actual height becomes
+                // known (ContentRendered) or changes (Details expanded →
+                // SizeChanged). Without this the stack would either reserve a
+                // generic max-height slot per toast (popup-sized gaps for
+                // short content) or place subsequent toasts before their
+                // neighbours' heights settled.
+                window.ContentRendered += (_, _) => Reposition();
+                window.SizeChanged += (_, _) => Reposition();
 
                 window.Closed += (_, _) =>
                 {
-                    ReleaseSlot(slot);
+                    RemoveFromStack(window);
                     vm.OnWindowClosed();
                 };
 
@@ -109,52 +122,38 @@ public sealed class NotificationService : INotifier
         return tcs.Task;
     }
 
-    private int AcquireSlot()
+    private void AddToStack(NotificationWindow window)
     {
-        lock (_slotsGate)
-        {
-            // Smallest free index from 0 upward — recycles freed slots.
-            var slot = 0;
-            foreach (var occupied in _occupiedSlots)
-            {
-                if (occupied != slot) break;
-                slot++;
-            }
-            _occupiedSlots.Add(slot);
-            return slot;
-        }
+        lock (_stackGate) { _stack.Add(window); }
+        Reposition();
     }
 
-    private void ReleaseSlot(int slot)
+    private void RemoveFromStack(NotificationWindow window)
     {
-        lock (_slotsGate)
-        {
-            _occupiedSlots.Remove(slot);
-        }
+        lock (_stackGate) { _stack.Remove(window); }
+        Reposition();
     }
 
-    private static void PositionWindow(NotificationWindow window, int slot)
+    // Anchors every open notification bottom-right, stacking upward with a
+    // StackSpacing gap, using each window's ActualHeight (with a Fallback
+    // when not yet rendered). Cheap enough to run on every add / remove /
+    // render / resize without throttling.
+    private void Reposition()
     {
-        var workArea = SystemParameters.WorkArea;
-        window.Width = WindowWidth;
-        window.Left = workArea.Right - WindowWidth - EdgeMargin;
-        // Initial estimate based on fixed slot height so the window doesn't
-        // flash at (0,0) before layout completes.
-        window.Top = workArea.Bottom - (slot + 1) * (StackSlotHeight + StackSpacing) - EdgeMargin;
+        NotificationWindow[] snap;
+        lock (_stackGate) { snap = _stack.ToArray(); }
+        if (snap.Length == 0) return;
 
-        // Re-anchor from the slot's bottom edge once the real height is
-        // known, and again whenever the window resizes (e.g. the Details
-        // expander is opened). This prevents tall notifications from
-        // clipping off the top of the work area.
-        void Reanchor()
+        var wa = SystemParameters.WorkArea;
+        double cumulativeAboveBottom = 0;
+        foreach (var w in snap)
         {
-            if (window.ActualHeight == 0) return;
-            var wa = SystemParameters.WorkArea;
-            var slotBottom = wa.Bottom - slot * (StackSlotHeight + StackSpacing) - EdgeMargin;
-            window.Top = Math.Max(wa.Top + EdgeMargin, slotBottom - window.ActualHeight);
+            var h = w.ActualHeight > 0 ? w.ActualHeight : FallbackHeight;
+            w.Width = WindowWidth;
+            w.Left = wa.Right - WindowWidth - EdgeMargin;
+            var bottom = wa.Bottom - EdgeMargin - cumulativeAboveBottom;
+            w.Top = Math.Max(wa.Top + EdgeMargin, bottom - h);
+            cumulativeAboveBottom += h + StackSpacing;
         }
-
-        window.ContentRendered += (_, _) => Reanchor();
-        window.SizeChanged += (_, _) => Reanchor();
     }
 }

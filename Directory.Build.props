@@ -17,7 +17,7 @@
   <PropertyGroup>
     <!-- Host EXE version. Plugin packages each declare their own
          <Version> in their csproj so they're decoupled from this. -->
-    <Version>0.6.0</Version>
+    <Version>0.6.1</Version>
     <Authors>ProxyLayer</Authors>
     <Product>AzureTray</Product>
     <Copyright>Copyright (c) ProxyLayer</Copyright>
