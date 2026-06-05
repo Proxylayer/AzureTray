@@ -14,6 +14,12 @@ public sealed class UpdateService : IUpdateService
     private readonly UpdateManager? _manager;
     private readonly ILogger<UpdateService> _logger;
 
+    // The UpdateInfo whose bits CheckOnStartupAsync (or CheckAndApplyAsync)
+    // already downloaded. Holding it lets the banner / Install button apply
+    // the staged update offline, without re-querying the feed. Volatile: it's
+    // written from background polling and read from the UI thread's click.
+    private volatile UpdateInfo? _downloadedUpdate;
+
     public UpdateService(IOptions<UpdateFeedOptions> options, ILogger<UpdateService> logger)
     {
         _options = options.Value;
@@ -81,6 +87,9 @@ public sealed class UpdateService : IUpdateService
             await _manager.DownloadUpdatesAsync(info);
             _logger.LogInformation("Update {Version} downloaded; will apply when the user accepts.", version);
 
+            // Remember the staged update so the banner / Install button can
+            // apply it directly, even if the feed is unreachable at click time.
+            _downloadedUpdate = info;
             PendingUpdateVersion = version;
             // Fire after assignment so subscribers can read PendingUpdateVersion
             // synchronously inside the handler.
@@ -104,6 +113,7 @@ public sealed class UpdateService : IUpdateService
             {
                 // No new update — clear any stale pending state so the
                 // banner / notification stops surfacing.
+                _downloadedUpdate = null;
                 PendingUpdateVersion = null;
                 _logger.LogInformation(
                     "Update check returned no newer release. Feed={FeedUrl}, currentVersion={Version}.",
@@ -115,6 +125,7 @@ public sealed class UpdateService : IUpdateService
                 "Update available: {Target} (current {Current}). Downloading.",
                 info.TargetFullRelease.Version, _manager.CurrentVersion);
             await _manager.DownloadUpdatesAsync(info);
+            _downloadedUpdate = info;
             _logger.LogInformation("Applying update {Version} and restarting.", info.TargetFullRelease.Version);
             _manager.ApplyUpdatesAndRestart(info);
             return "Restarting…";
@@ -123,6 +134,37 @@ public sealed class UpdateService : IUpdateService
         {
             _logger.LogError(ex, "Velopack update failed");
             return $"Update failed: {ex.Message}";
+        }
+    }
+
+    public Task<string> ApplyPendingUpdateAndRestartAsync()
+    {
+        if (_manager is null) return Task.FromResult("Updates are not configured.");
+        if (!_manager.IsInstalled) return Task.FromResult("Updates only available in installed builds.");
+
+        var staged = _downloadedUpdate;
+        if (staged is null)
+        {
+            // Nothing pre-downloaded (e.g. the banner was seeded from a prior
+            // process, or the download hasn't finished). Do the full path —
+            // it checks, downloads, and applies.
+            _logger.LogInformation("No pre-downloaded update staged; falling back to check+download+apply.");
+            return CheckAndApplyAsync();
+        }
+
+        try
+        {
+            _logger.LogInformation(
+                "Applying pre-downloaded update {Version} and restarting (no re-check).",
+                staged.TargetFullRelease.Version);
+            // Exits and relaunches the process; the return below is rarely seen.
+            _manager.ApplyUpdatesAndRestart(staged);
+            return Task.FromResult("Restarting…");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Applying the pre-downloaded update failed");
+            return Task.FromResult($"Update failed: {ex.Message}");
         }
     }
 }

@@ -19,4 +19,12 @@ public interface IUpdateService
 
     Task CheckOnStartupAsync();
     Task<string> CheckAndApplyAsync();
+
+    // Applies the update already downloaded by CheckOnStartupAsync and restarts,
+    // WITHOUT another network round-trip. This is what the "update available"
+    // banner / Install button should call: the bits are already on disk, so a
+    // flaky or offline network (or a feed that no longer reports the staged
+    // release as "new") must not block the install. Falls back to a full
+    // check+download+apply when nothing has been pre-downloaded yet.
+    Task<string> ApplyPendingUpdateAndRestartAsync();
 }

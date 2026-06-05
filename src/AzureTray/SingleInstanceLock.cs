@@ -26,17 +26,32 @@ internal sealed class SingleInstanceLock : IDisposable
     // installs holding the old name won't block the new name's lock.
     private const string BaseMutexName = @"Local\Proxylayer.AzureTray.SingleInstance";
 
+    // How long a fresh instance waits for a previous holder to release the
+    // mutex before concluding another instance is genuinely running. A
+    // just-replaced build (Velopack relaunch after an update, or a manual
+    // Setup.exe launching while the old tray is still shutting down) can race
+    // the old process's mutex release by a moment; without this grace window
+    // the new build would log "already running" and exit silently — the tray
+    // never comes back. A few seconds is imperceptible to a user who really
+    // did double-launch, and reliably covers the hand-off.
+    private static readonly TimeSpan DefaultPreviousInstanceWait = TimeSpan.FromSeconds(5);
+
     private readonly Mutex _mutex;
     private bool _disposed;
 
     public bool Acquired { get; }
 
     public SingleInstanceLock()
+        : this(DefaultPreviousInstanceWait)
+    {
+    }
+
+    public SingleInstanceLock(TimeSpan waitForPreviousInstance)
     {
         _mutex = new Mutex(initiallyOwned: false, name: ResolveMutexName());
         try
         {
-            Acquired = _mutex.WaitOne(TimeSpan.Zero, exitContext: false);
+            Acquired = _mutex.WaitOne(waitForPreviousInstance, exitContext: false);
         }
         catch (AbandonedMutexException)
         {

@@ -35,13 +35,32 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        var appPaths = new AppPaths();
+        appPaths.EnsureDirectoriesExist();
+
+        // The bootstrap logger writes to the rolling log file (not just Debug)
+        // so events that happen BEFORE the host is built — Velopack's
+        // update/restart hooks, the single-instance outcome, and any fatal
+        // startup exception — leave a trail on disk. Without this, a relaunch
+        // that exits early (e.g. losing the single-instance race after an
+        // update) produces zero file evidence, which reads as "the app just
+        // didn't come back." The host reconfigures Log.Logger moments later.
         Log.Logger = new LoggerConfiguration()
             .MinimumLevel.Information()
             .WriteTo.Debug(formatProvider: CultureInfo.InvariantCulture)
+            .WriteTo.File(
+                path: appPaths.LogFileTemplate,
+                rollingInterval: RollingInterval.Day,
+                rollOnFileSizeLimit: true,
+                shared: true,
+                formatProvider: CultureInfo.InvariantCulture,
+                outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}")
             .CreateBootstrapLogger();
 
         try
         {
+            Log.Information("AzureTray starting up. ProcessPath={ProcessPath}", Environment.ProcessPath);
+
             VelopackApp.Build()
                 .OnFirstRun(v => Log.Information("Velopack: first run after install of v{Version}", v))
                 .OnRestarted(v => Log.Information("Velopack: restarted into v{Version}", v))
@@ -54,11 +73,13 @@ internal static class Program
             using var singleInstance = new SingleInstanceLock();
             if (!singleInstance.Acquired)
             {
-                Log.Information("AzureTray is already running for this user; exiting without starting a second tray.");
+                Log.Information(
+                    "AzureTray is already running for this user; exiting without starting a second tray. This exe: {ProcessPath}",
+                    Environment.ProcessPath);
                 return 0;
             }
 
-            using var host = BuildHost(args);
+            using var host = BuildHost(args, appPaths);
             host.Start();
 
             var app = host.Services.GetRequiredService<App>();
@@ -79,11 +100,8 @@ internal static class Program
         }
     }
 
-    private static IHost BuildHost(string[] args)
+    private static IHost BuildHost(string[] args, AppPaths appPaths)
     {
-        var appPaths = new AppPaths();
-        appPaths.EnsureDirectoriesExist();
-
         var builder = Host.CreateApplicationBuilder(args);
 
         builder.Configuration.AddJsonFile(

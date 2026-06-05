@@ -388,6 +388,11 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         _authHealth.AuthStateChanged += OnTenantAuthStateChanged;
 
+        // Keep the installed/config lists live when plugins are loaded or
+        // unloaded out-of-band — e.g. the folder watcher picking up a plugin
+        // the user dropped into the plugins folder by hand while Settings is open.
+        _pluginLoader.PluginsChanged += OnPluginsChanged;
+
         RefreshInstalledExtensions();
         RefreshPluginConfigs();
 
@@ -470,6 +475,28 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         _authHealth.AuthStateChanged -= OnTenantAuthStateChanged;
         _updateService.UpdateAvailable -= OnUpdateAvailable;
+        _pluginLoader.PluginsChanged -= OnPluginsChanged;
+    }
+
+    // Fired when PluginLoader's loaded set changes (manual drop / hot reload /
+    // unload). Marshalled to the WPF thread because it mutates the bound
+    // InstalledExtensions / PluginConfigs collections.
+    private void OnPluginsChanged()
+    {
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess())
+        {
+            RefreshInstalledExtensions();
+            RefreshPluginConfigs();
+        }
+        else
+        {
+            dispatcher.InvokeAsync(() =>
+            {
+                RefreshInstalledExtensions();
+                RefreshPluginConfigs();
+            });
+        }
     }
 
     private void RefreshPluginConfigs()
@@ -590,7 +617,10 @@ public sealed partial class SettingsViewModel : ObservableObject
         UpdateStatus = "Installing update…";
         try
         {
-            UpdateStatus = await _updateService.CheckAndApplyAsync();
+            // Apply the update already downloaded at startup — no second network
+            // round-trip — so an offline/flaky feed can't make the banner appear
+            // to "do nothing." Falls back to a full check+apply if nothing's staged.
+            UpdateStatus = await _updateService.ApplyPendingUpdateAndRestartAsync();
         }
         finally
         {
@@ -2139,12 +2169,17 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         InstalledExtensions.Clear();
 
-        var loadedByFileName = _pluginLoader.LoadedPlugins
-            .GroupBy(p => Path.GetFileName(p.AssemblyPath), StringComparer.OrdinalIgnoreCase)
+        // Index live plugins by their assembly's full path. We match on the
+        // full path (not just the file name) so two plugins that happen to
+        // share a DLL name in different folders don't collide.
+        var loadedByPath = _pluginLoader.LoadedPlugins
+            .GroupBy(p => Path.GetFullPath(p.AssemblyPath), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
         var pending = _extensionInstaller.ListPendingUninstalls()
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var dllPath in _extensionInstaller.ListInstalledDlls())
         {
@@ -2156,7 +2191,9 @@ public sealed partial class SettingsViewModel : ObservableObject
             // concern that gets resolved on next launch.
             if (pending.Contains(fileName)) continue;
 
-            loadedByFileName.TryGetValue(fileName, out var loaded);
+            var fullPath = Path.GetFullPath(dllPath);
+            seenPaths.Add(fullPath);
+            loadedByPath.TryGetValue(fullPath, out var loaded);
 
             InstalledExtensions.Add(new InstalledExtension(
                 FileName: fileName,
@@ -2166,6 +2203,28 @@ public sealed partial class SettingsViewModel : ObservableObject
                 PluginId: loaded?.Plugin.Id,
                 LoadedDisplayName: loaded?.Plugin.DisplayName,
                 LoadedVersion: loaded?.Plugin.Version));
+        }
+
+        // Surface plugins that are actually loaded but weren't surfaced by the
+        // disk scan. PluginLoader loads a subfolder plugin by scanning *every*
+        // DLL in the folder for an ITrayPlugin, whereas ListInstalledDlls only
+        // reports the conventional plugins/<id>/<id>.dll. So a manually-dropped
+        // plugin whose DLL name differs from its folder loads and runs but would
+        // otherwise be invisible here — denying it the Configure button. Adding
+        // it from the loaded set keeps the list honest and configurable.
+        foreach (var (fullPath, loaded) in loadedByPath)
+        {
+            if (seenPaths.Contains(fullPath)) continue;
+            if (pending.Contains(Path.GetFileName(fullPath))) continue;
+
+            InstalledExtensions.Add(new InstalledExtension(
+                FileName: Path.GetFileName(fullPath),
+                FullPath: fullPath,
+                IsPendingUninstall: false,
+                IsLoaded: true,
+                PluginId: loaded.Plugin.Id,
+                LoadedDisplayName: loaded.Plugin.DisplayName,
+                LoadedVersion: loaded.Plugin.Version));
         }
 
         // The installed set just changed — re-apply the available-list

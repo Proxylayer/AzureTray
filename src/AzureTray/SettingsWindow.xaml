@@ -717,8 +717,25 @@
                        Style="{StaticResource Text.Muted}"
                        VerticalAlignment="Center"
                        Margin="0,0,12,0"/>
+            <!-- "Check for updates" while nothing is pending; once an update is
+                 downloaded and waiting, this collapses and the accent-blue
+                 "Install update" button below takes its place. -->
             <Button Content="Check for updates"
-                    Command="{Binding CheckUpdatesCommand}"/>
+                    Command="{Binding CheckUpdatesCommand}">
+                <Button.Style>
+                    <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsUpdateAvailable}" Value="True">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Button.Style>
+            </Button>
+            <Button Content="Install update"
+                    Style="{StaticResource Button.Primary}"
+                    Command="{Binding ApplyPendingUpdateCommand}"
+                    Visibility="{Binding IsUpdateAvailable, Converter={StaticResource BoolToVisibility}}"/>
             <TextBlock Text="{Binding UpdateStatus}"
                        Style="{StaticResource Text.Muted}"
                        VerticalAlignment="Center"
