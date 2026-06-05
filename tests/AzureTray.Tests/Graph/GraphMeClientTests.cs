@@ -49,6 +49,35 @@ public sealed class GraphMeClientTests
     }
 
     [Fact]
+    public async Task GetMeAsync_DeserializesGuestMailDistinctFromExternalUpn()
+    {
+        // A B2B guest: userPrincipalName is the synthetic "#EXT#" form while
+        // mail holds the routable home address. The login hint must come from
+        // mail, so verify both land on the response.
+        var handler = new CapturingHttpMessageHandler(
+            HttpStatusCode.OK,
+            """{"id":"guest-1","displayName":"J Bland","userPrincipalName":"jbland_proxylayer.net#EXT#@cfoadminpgcfo.onmicrosoft.com","mail":"jbland@proxylayer.net"}""");
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://graph.microsoft.com/") };
+
+        var factory = Substitute.For<IHttpClientFactory>();
+        factory.CreateClient(HttpClientNames.Graph).Returns(httpClient);
+
+        var credentials = Substitute.For<ICredentialFactory>();
+        credentials.GetForTenant("tenant-1").Returns(new StubCredential("token-1"));
+
+        var cloud = Substitute.For<IAzureCloudConfig>();
+        cloud.GraphScope.Returns("https://graph.microsoft.com/.default");
+
+        var client = new GraphMeClient(factory, credentials, cloud, NullLogger<GraphMeClient>.Instance);
+
+        var me = await client.GetMeAsync("tenant-1", CancellationToken.None);
+
+        Assert.Equal("jbland_proxylayer.net#EXT#@cfoadminpgcfo.onmicrosoft.com", me.UserPrincipalName);
+        Assert.Equal("jbland@proxylayer.net", me.Mail);
+        Assert.Equal("jbland@proxylayer.net", SignInHint.Pick(me.Mail, me.UserPrincipalName));
+    }
+
+    [Fact]
     public async Task GetMeAsync_ThrowsOnHttpFailure()
     {
         var handler = new CapturingHttpMessageHandler(HttpStatusCode.Unauthorized, "");

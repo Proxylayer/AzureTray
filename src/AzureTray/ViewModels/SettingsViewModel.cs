@@ -861,14 +861,16 @@ public sealed partial class SettingsViewModel : ObservableObject
             // 2. Save the tenant up-front with ClientId=null so the next
             //    Graph call (the app-registration search) can authenticate
             //    via CredentialFactory using the global App:Auth:ClientId.
-            //    SignInEmail captures the UPN the user signed in with so
+            //    SignInEmail captures the account the user signed in with so
             //    future readiness probes / sign-in prompts can pre-fill
-            //    the broker's LoginHint and target the same account.
+            //    the broker's LoginHint and target the same account. We store
+            //    the clean email (account.Email) — never the synthetic "#EXT#"
+            //    UPN a guest carries, which has no password and would fail.
             var tenant = new Tenant(
                 account.TenantId,
                 resolvedDisplayName,
                 ClientId: null,
-                SignInEmail: string.IsNullOrWhiteSpace(account.UserPrincipalName) ? null : account.UserPrincipalName,
+                SignInEmail: SignInHint.Pick(account.Email, account.UserPrincipalName),
                 ProbeDisabled: false);
             await _tenantStore.AddOrUpdateAsync(tenant, CancellationToken.None);
             _credentialFactory.Invalidate(account.TenantId);
@@ -1062,11 +1064,14 @@ public sealed partial class SettingsViewModel : ObservableObject
 
             var me = await _graphMeClient.GetMeAsync(tenantId, cts.Token);
 
-            // Capture the signed-in UPN so subsequent sign-in prompts can
-            // pre-fill MSAL's LoginHint to this account.
-            if (!string.IsNullOrWhiteSpace(me.UserPrincipalName))
+            // Capture the signed-in account so subsequent sign-in prompts can
+            // pre-fill MSAL's LoginHint. Prefer the routable mail attribute
+            // over UserPrincipalName: for a guest the UPN is the synthetic
+            // "#EXT#" form, which has no password and would break sign-in.
+            var signInHint = SignInHint.Pick(me.Mail, me.UserPrincipalName);
+            if (!string.IsNullOrWhiteSpace(signInHint))
             {
-                tenant = tenant with { SignInEmail = me.UserPrincipalName };
+                tenant = tenant with { SignInEmail = signInHint };
             }
 
             // If the user supplied an app-registration name (and no explicit

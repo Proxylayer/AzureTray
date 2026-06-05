@@ -42,7 +42,11 @@ public interface IWindowsAccountSignInService
     Task<WindowsAccount> SignInWithPickerAsync(string? loginHint, CancellationToken cancellationToken);
 }
 
-public sealed record WindowsAccount(string TenantId, string DisplayName, string UserPrincipalName, string Domain);
+// Email is the best value to use as a sign-in LoginHint. For a B2B guest it is
+// the clean home email derived from the token's email/preferred_username
+// claims, whereas UserPrincipalName may be the synthetic "#EXT#" form. Null
+// when no clean address could be resolved (see SignInHint).
+public sealed record WindowsAccount(string TenantId, string DisplayName, string UserPrincipalName, string Domain, string? Email = null);
 
 public sealed class WindowsAccountSignInService : IWindowsAccountSignInService
 {
@@ -87,7 +91,11 @@ public sealed class WindowsAccountSignInService : IWindowsAccountSignInService
                             TenantId: discovery.TenantId,
                             DisplayName: windowsUpn!,
                             UserPrincipalName: windowsUpn!,
-                            Domain: domain);
+                            Domain: domain,
+                            // Zero-UI path targets the user's own Windows
+                            // session, never a guest — the Windows UPN is
+                            // already the clean home email.
+                            Email: windowsUpn);
                     }
                     _logger.LogDebug("OIDC discovery returned no tenant for {Domain}; falling back to broker picker.", domain);
                 }
@@ -164,7 +172,20 @@ public sealed class WindowsAccountSignInService : IWindowsAccountSignInService
         var displayName = claims.GetValueOrDefault("name")
             ?? (string.IsNullOrEmpty(upn) ? tenantId : upn);
 
-        return new WindowsAccount(tenantId, displayName, upn, ExtractDomain(upn));
+        // Resolve the clean sign-in email. For a guest, `upn` is the synthetic
+        // "#EXT#" form (no password of its own); the `email` /
+        // `preferred_username` claims usually carry the real home address, so
+        // prefer those and only fall back to un-mangling the #EXT# UPN.
+        var email = SignInHint.Pick(
+            claims.GetValueOrDefault("email"),
+            claims.GetValueOrDefault("preferred_username"),
+            upn);
+
+        // Anchor Domain on the clean email when we have one so OIDC discovery
+        // targets the user's real home domain rather than the resource tenant.
+        var domain = ExtractDomain(email ?? upn);
+
+        return new WindowsAccount(tenantId, displayName, upn, domain, email);
     }
 
     // GetUserNameEx with NameUserPrincipal returns the signed-in user's UPN
