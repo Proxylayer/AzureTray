@@ -13,8 +13,8 @@
          exist in the older MSAL Azure.Identity 1.13.2 brings transitively.
          Without this pin the broker throws "Could not load type" at runtime
          and every silent /me, /organization call fails. -->
-    <PackageVersion Include="Microsoft.Identity.Client" Version="4.74.1" />
-    <PackageVersion Include="Microsoft.Identity.Client.Broker" Version="4.74.1" />
+    <PackageVersion Include="Microsoft.Identity.Client" Version="4.84.0" />
+    <PackageVersion Include="Microsoft.Identity.Client.Broker" Version="4.84.0" />
     <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.0" />
