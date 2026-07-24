@@ -81,6 +81,16 @@ public sealed class TrayIcon : IDisposable
             SubscribeToBadgeProviders();
             RefreshIcon();
             OnPluginMenuChanged();   // refresh any currently-open menu
+
+            // The unsubscribe/resubscribe above has released this instance's refs
+            // to any superseded plugin(s). Force a collection now so the now-
+            // unrooted, collectible AssemblyLoadContext of a swapped-out plugin is
+            // reclaimed immediately rather than a GC cycle later (the loader's own
+            // unload GC ran before this dispatcher callback, while we still held
+            // the old refs).
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
         }
 
         if (dispatcher.CheckAccess()) Apply();

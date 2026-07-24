@@ -508,6 +508,30 @@ public sealed class PluginLoader : IPluginLoader, IHostedService, IDisposable
 
             var loadedPlugin = new LoadedPlugin(plugin, dllPath, verdict);
             var entry = new LoadedPluginEntry(loadedPlugin, loadContext, context);
+
+            // Dedupe by Plugin.Id, not assembly path. A new version can land at a
+            // different path than the one it replaces (legacy top-level
+            // plugins/<id>.dll vs plugins/<id>/<id>.dll, or a renamed DLL), so a
+            // path-keyed check would miss it and leave two entries sharing an Id:
+            // the tray menu (built from the loaded-plugin list) would show both,
+            // and the superseded instance would never be shut down: its poll
+            // timer roots it and pins its collectible load context. Tear down any
+            // existing instance that already claims this Id through the normal
+            // path (ShutdownAsync -> dispose -> Unload -> GC) before registering
+            // the replacement.
+            LoadedPluginEntry? superseded;
+            lock (_entriesGate)
+            {
+                superseded = _entries.FirstOrDefault(e =>
+                    string.Equals(e.Loaded.Plugin.Id, plugin.Id, StringComparison.OrdinalIgnoreCase));
+                if (superseded is not null) _entries.Remove(superseded);
+            }
+
+            if (superseded is not null)
+            {
+                await UnloadEntryAsync(superseded, plugin.Id, cancellationToken).ConfigureAwait(false);
+            }
+
             lock (_entriesGate)
             {
                 _entries.Add(entry);

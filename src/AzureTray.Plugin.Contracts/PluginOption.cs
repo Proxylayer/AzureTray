@@ -15,8 +15,8 @@
 /// <para>
 /// <strong>Security:</strong> use <see cref="PluginOptionKind.Secret"/> for
 /// any setting that contains a credential, API key, or other sensitive string.
-/// The host stores it encrypted at rest and masks it in the Settings UI;
-/// the plugin receives the plaintext value only through
+/// The host masks it in the Settings UI so it is not shown on screen; the
+/// plugin receives the plaintext value through
 /// <see cref="IPluginConfigurable.Values"/>.
 /// Never use <see cref="PluginOptionKind.Text"/> for secrets.
 /// </para>
@@ -67,8 +67,8 @@ public enum PluginOptionKind
     Select,
 
     /// <summary>
-    /// Masked password box. The host stores the value encrypted at rest and
-    /// masks it in the Settings UI. The plugin receives the plaintext value
+    /// Masked password box. The host masks the value in the Settings UI so it
+    /// is not shown on screen. The plugin receives the plaintext value
     /// through <see cref="IPluginConfigurable.Values"/>.
     /// <strong>Use this for any credential, API key, or sensitive string —
     /// never use <see cref="Text"/> for secrets.</strong>

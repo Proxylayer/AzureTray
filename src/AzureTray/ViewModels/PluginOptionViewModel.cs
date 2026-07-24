@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using CommunityToolkit.Mvvm.ComponentModel;
 using AzureTray.Plugin.Contracts;
 
@@ -33,6 +34,11 @@ public sealed partial class PluginOptionViewModel : ObservableObject
     public bool IsBoolean => Definition.Kind == PluginOptionKind.Boolean;
     public bool IsText => Definition.Kind == PluginOptionKind.Text;
     public bool IsNumber => Definition.Kind == PluginOptionKind.Number;
+    public bool IsSelect => Definition.Kind == PluginOptionKind.Select;
+    public bool IsSecret => Definition.Kind == PluginOptionKind.Secret;
+
+    // Fixed choice list backing a Select combo-box; empty for other kinds.
+    public IReadOnlyList<string> AllowedValues => Definition.AllowedValues ?? Array.Empty<string>();
 
     // When this option is a Boolean master with another option targeting it via
     // PluginOption.GroupWithKey, the follower's VM is attached here so the row
@@ -69,7 +75,9 @@ public sealed partial class PluginOptionViewModel : ObservableObject
 
     partial void OnTextValueChanged(string value)
     {
-        if (!IsText || _suspendCommit) return;
+        // Select and Secret are string-valued and reuse TextValue as their
+        // backing store, so they commit through this same handler.
+        if (!(IsText || IsSelect || IsSecret) || _suspendCommit) return;
         _suspendCommit = true;
         Value = value;
         _commit(Definition.Key, value);

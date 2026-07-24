@@ -98,6 +98,19 @@
                                                  Text="{Binding NumberValue, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                                  VerticalAlignment="Center"
                                                  Visibility="{Binding IsNumber, Converter={StaticResource BoolToVisibility}}"/>
+                                        <ComboBox Grid.Column="1"
+                                                  ItemsSource="{Binding AllowedValues}"
+                                                  SelectedItem="{Binding TextValue, Mode=TwoWay}"
+                                                  VerticalAlignment="Center"
+                                                  Visibility="{Binding IsSelect, Converter={StaticResource BoolToVisibility}}"/>
+                                        <!-- PasswordBox.Password is not a bindable DependencyProperty; the
+                                             PasswordChanged handler pushes the entered value into the VM's
+                                             TextValue, and Loaded seeds it from the stored value. -->
+                                        <PasswordBox Grid.Column="1"
+                                                     VerticalAlignment="Center"
+                                                     PasswordChanged="SecretPasswordChanged"
+                                                     Loaded="SecretPasswordLoaded"
+                                                     Visibility="{Binding IsSecret, Converter={StaticResource BoolToVisibility}}"/>
                                         <!-- Compound row: a Boolean checkbox that gates a companion option's
                                              editor (e.g. "[x] Clear after [5] minutes"). Renders in place of
                                              the standalone CheckBox when this option has a Companion. -->

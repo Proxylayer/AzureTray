@@ -53,4 +53,28 @@ public partial class PluginConfigWindow : Window
     }
 
     private void CloseClick(object sender, RoutedEventArgs e) => Close();
+
+    // Secret options bind to a PasswordBox, whose Password is not a bindable
+    // DependencyProperty. Seed the box from the VM's stored value when the
+    // template loads, then push edits back into the same TextValue string the
+    // other scalar editors commit through.
+    private void SecretPasswordLoaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.PasswordBox box &&
+            box.DataContext is PluginOptionViewModel vm &&
+            box.Password.Length == 0 &&
+            !string.IsNullOrEmpty(vm.TextValue))
+        {
+            box.Password = vm.TextValue;
+        }
+    }
+
+    private void SecretPasswordChanged(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.PasswordBox box &&
+            box.DataContext is PluginOptionViewModel vm)
+        {
+            vm.TextValue = box.Password;
+        }
+    }
 }
