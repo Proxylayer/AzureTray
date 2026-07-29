@@ -23,6 +23,7 @@ using AzureTray.Testing;
 using AzureTray.ViewModels;
 using Serilog;
 using Serilog.Core;
+using Serilog.Events;
 using Velopack;
 
 namespace AzureTray;
@@ -35,6 +36,10 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        // Started before anything else so "Startup completed in N ms" measures
+        // the whole launch, not just the part after the logger exists.
+        var startupClock = new StartupClock();
+
         var appPaths = new AppPaths();
         appPaths.EnsureDirectoriesExist();
 
@@ -59,7 +64,9 @@ internal static class Program
 
         try
         {
-            Log.Information("AzureTray starting up. ProcessPath={ProcessPath}", Environment.ProcessPath);
+            Log.Information(
+                "AzureTray {Version} starting up. ProcessPath={ProcessPath}",
+                AppVersion.Display, Environment.ProcessPath);
 
             VelopackApp.Build()
                 .OnFirstRun(v => Log.Information("Velopack: first run after install of v{Version}", v))
@@ -79,8 +86,18 @@ internal static class Program
                 return 0;
             }
 
-            using var host = BuildHost(args, appPaths);
+            using var host = BuildHost(args, appPaths, startupClock);
+
+            // First point at which the real logging pipeline (file sink + the
+            // Log Viewer's ring buffer) exists. Everything known before the host
+            // was built — version, resolved paths — is replayed here rather than
+            // dropped; the bootstrap logger above only reaches the file.
+            var startupLog = host.Services.GetRequiredService<StartupLog>();
+            LogStartupContext(host.Services, appPaths, startupLog);
+
+            startupLog.HostedServicesStarting();
             host.Start();
+            startupLog.HostedServicesStarted();
 
             var app = host.Services.GetRequiredService<App>();
             app.InitializeComponent();
@@ -100,7 +117,30 @@ internal static class Program
         }
     }
 
-    private static IHost BuildHost(string[] args, AppPaths appPaths)
+    // The configuration a support case actually needs, logged once the pipeline
+    // that can carry it exists. Only settings nothing else reports: the update
+    // feed URL and installed-vs-dev come from UpdateService's own startup line,
+    // and both polling loops log their own intervals when they start.
+    private static void LogStartupContext(IServiceProvider services, IAppPaths appPaths, StartupLog startupLog)
+    {
+        // UpdateService owns the installed-vs-dev distinction (it asks Velopack);
+        // resolving the singleton here only moves its construction a few
+        // milliseconds earlier than the hosted services would have.
+        var updateService = services.GetRequiredService<IUpdateService>();
+
+        startupLog.HostBuilt(AppVersion.Display, updateService.IsInstalledBuild);
+        startupLog.PathsResolved(appPaths);
+        startupLog.LoggingConfiguration(services.GetRequiredService<IOptions<LoggingOptions>>().Value);
+        startupLog.AzureCloudConfiguration(services.GetRequiredService<IOptions<AzureCloudOptions>>().Value);
+        // Auto-update: the persisted user choice, not the config seed — that is
+        // the value that decides what happens on the next poll.
+        startupLog.PluginConfiguration(
+            services.GetRequiredService<IOptions<PluginOptions>>().Value,
+            services.GetRequiredService<PluginUpdatePreferenceStore>().AutoUpdateEnabled);
+        startupLog.PluginFeedConfiguration(services.GetRequiredService<IOptions<NuGetPluginFeedOptions>>().Value);
+    }
+
+    private static IHost BuildHost(string[] args, AppPaths appPaths, StartupClock startupClock)
     {
         var builder = Host.CreateApplicationBuilder(args);
 
@@ -110,6 +150,7 @@ internal static class Program
             reloadOnChange: true);
 
         builder.Services.AddSingleton<IAppPaths>(appPaths);
+        builder.Services.AddSingleton(startupClock);
 
         ConfigureOptions(builder);
         ConfigureLogging(builder, appPaths);
@@ -206,6 +247,7 @@ internal static class Program
         var fileLoggingSwitch = new FileLoggingSwitch(loggingOptions.LogToDisk);
         builder.Services.AddSingleton(fileLoggingSwitch);
 
+        builder.Services.AddSingleton<StartupLog>();
         builder.Services.AddSingleton<LogRingBuffer>();
         builder.Services.AddSingleton<ILogEventSink>(sp =>
             new RingBufferSink(sp.GetRequiredService<LogRingBuffer>()));
@@ -215,6 +257,11 @@ internal static class Program
         builder.Logging.ClearProviders();
         builder.Services.AddSerilog((services, lc) => lc
             .MinimumLevel.ControlledBy(levelSwitch)
+            // These two emit ~5 Information lines per HTTP request and only
+            // restate what HostPluginHttpClient already logs in one line, so they
+            // stay at Warning regardless of the app's level.
+            .MinimumLevel.Override("System.Net.Http", LogEventLevel.Warning)
+            .MinimumLevel.Override("Polly", LogEventLevel.Warning)
             .Enrich.FromLogContext()
             .ReadFrom.Services(services)
             .WriteTo.Debug(formatProvider: CultureInfo.InvariantCulture)
@@ -237,11 +284,19 @@ internal static class Program
 
     private static void ConfigureHttpClients(HostApplicationBuilder builder)
     {
+        // ARM/Graph PIM write PUTs (role activation/deactivation) routinely take
+        // longer than the standard handler's default 10s per-attempt timeout. When
+        // an attempt times out after the server has already committed the write, the
+        // retry re-sends it and ARM answers 409 — surfacing a spurious failure for a
+        // request that actually succeeded. Raising the per-attempt timeout well past
+        // observed PIM write latency keeps the slow path from tripping in the first
+        // place (the 409 is also now reconciled as success in ArmPimClient, but this
+        // stops it happening for the common case).
         builder.Services.AddHttpClient(HttpClientNames.Graph, ConfigureGraphClient)
-            .AddStandardResilienceHandler();
+            .AddStandardResilienceHandler(ConfigurePimResilience);
 
         builder.Services.AddHttpClient(HttpClientNames.Arm, ConfigureArmClient)
-            .AddStandardResilienceHandler();
+            .AddStandardResilienceHandler(ConfigurePimResilience);
 
         // NuGet search client — queries nuget.org's v3 search API for
         // packages carrying the host's discovery tag.
@@ -281,6 +336,19 @@ internal static class Program
         var cloud = sp.GetRequiredService<IAzureCloudConfig>();
         client.BaseAddress = cloud.ArmEndpoint;
         client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
+    }
+
+    // Per-attempt 30s comfortably exceeds observed ARM/Graph PIM write latency
+    // (the confirmed offender timed out at exactly 10.01s). Total 100s bounds the
+    // whole retried operation. The handler validates its own invariants:
+    // TotalRequestTimeout >= AttemptTimeout (100 >= 30) and
+    // CircuitBreaker.SamplingDuration >= 2 * AttemptTimeout — the 30s default
+    // would fail against a 30s attempt, so it is raised to 60s.
+    private static void ConfigurePimResilience(HttpStandardResilienceOptions options)
+    {
+        options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(30);
+        options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(100);
+        options.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(60);
     }
 
     private static void ConfigureApplication(HostApplicationBuilder builder)

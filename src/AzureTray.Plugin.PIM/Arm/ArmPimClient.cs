@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -176,10 +177,6 @@ internal sealed class ArmPimClient : IArmPimClient
         }
 
         var requestId = Guid.NewGuid().ToString();
-        var prefix = NormalizeScope(scope);
-        var url =
-            $"{prefix}providers/Microsoft.Authorization/roleAssignmentScheduleRequests/{requestId}" +
-            $"?api-version={AuthorizationApi}";
 
         var body = new
         {
@@ -209,18 +206,8 @@ internal sealed class ArmPimClient : IArmPimClient
             },
         };
 
-        using var request = new HttpRequestMessage(HttpMethod.Put, url)
-        {
-            Content = JsonContent.Create(body, options: JsonOptions),
-        };
-        using var response = await SendAsync(request, cancellationToken);
-        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
-
-        var created = await response.Content.ReadFromJsonAsync<ArmRoleAssignmentScheduleRequest>(JsonOptions, cancellationToken);
-        if (created is null)
-        {
-            throw new InvalidOperationException("ARM returned an empty body for self-activation.");
-        }
+        var created = await PutScheduleRequestAsync(
+            scope, requestId, body, "self-activation", cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
             "Submitted ARM self-activation {RequestId} for role {RoleId} at {Scope} (tenant {TenantId}, status {Status}).",
@@ -241,10 +228,6 @@ internal sealed class ArmPimClient : IArmPimClient
         ArgumentException.ThrowIfNullOrWhiteSpace(roleDefinitionId);
 
         var requestId = Guid.NewGuid().ToString();
-        var prefix = NormalizeScope(scope);
-        var url =
-            $"{prefix}providers/Microsoft.Authorization/roleAssignmentScheduleRequests/{requestId}" +
-            $"?api-version={AuthorizationApi}";
 
         // SelfDeactivate is immediate — no scheduleInfo and no linked
         // eligibility id (those only matter when granting access). Justification
@@ -260,18 +243,8 @@ internal sealed class ArmPimClient : IArmPimClient
             },
         };
 
-        using var request = new HttpRequestMessage(HttpMethod.Put, url)
-        {
-            Content = JsonContent.Create(body, options: JsonOptions),
-        };
-        using var response = await SendAsync(request, cancellationToken);
-        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
-
-        var created = await response.Content.ReadFromJsonAsync<ArmRoleAssignmentScheduleRequest>(JsonOptions, cancellationToken);
-        if (created is null)
-        {
-            throw new InvalidOperationException("ARM returned an empty body for self-deactivation.");
-        }
+        var created = await PutScheduleRequestAsync(
+            scope, requestId, body, "self-deactivation", cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
             "Submitted ARM self-deactivation {RequestId} for role {RoleId} at {Scope} (tenant {TenantId}, status {Status}).",
@@ -349,6 +322,73 @@ internal sealed class ArmPimClient : IArmPimClient
     }
 
     // ---- helpers ----------------------------------------------------------
+
+    // PUT to roleAssignmentScheduleRequests/{requestId}, where requestId is a
+    // client-generated GUID chosen by the caller. Owning that id is what makes
+    // the write idempotent, and this method is where that pays off:
+    //
+    // ARM PIM write PUTs regularly take longer than the resilience handler's
+    // per-attempt timeout. When one does, the socket is aborted *after* ARM has
+    // already accepted and committed the request, and the handler retries the
+    // identical PUT (same GUID, same URL). ARM then answers 409 Conflict —
+    // "a role assignment request with Id {guid} already exists" — which is not
+    // transient, so it is surfaced as a failure even though the role was in fact
+    // granted. That is the spurious "Activation failed" the user sees.
+    //
+    // Because we generated that GUID, a 409 whose body names *this* requestId is
+    // proof that our own earlier attempt won the race: the request exists and is
+    // ours. We reconcile by GETting the committed request and returning it as if
+    // the PUT had returned it. Any other 409 (a different id, a genuine
+    // conflict) is left to throw unchanged.
+    private async Task<ArmRoleAssignmentScheduleRequest> PutScheduleRequestAsync(
+        string scope, string requestId, object body, string operation, CancellationToken cancellationToken)
+    {
+        var prefix = NormalizeScope(scope);
+        var url =
+            $"{prefix}providers/Microsoft.Authorization/roleAssignmentScheduleRequests/{requestId}" +
+            $"?api-version={AuthorizationApi}";
+
+        using var request = new HttpRequestMessage(HttpMethod.Put, url)
+        {
+            Content = JsonContent.Create(body, options: JsonOptions),
+        };
+        using var response = await SendAsync(request, cancellationToken);
+
+        if (response.StatusCode == HttpStatusCode.Conflict)
+        {
+            var conflictBody = await ReadBodySafeAsync(response, cancellationToken).ConfigureAwait(false);
+            if (conflictBody.Contains(requestId, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "ARM {Operation} {RequestId} returned 409 for our own request id (a per-attempt timeout aborted the " +
+                    "socket after ARM had committed it, then the retry re-sent it); reconciling by reading the committed " +
+                    "request (tenant {TenantId}).",
+                    operation, requestId, _tenantId);
+
+                var existing = await GetJsonAsync<ArmRoleAssignmentScheduleRequest>(url, cancellationToken).ConfigureAwait(false);
+                if (existing is not null)
+                {
+                    return existing;
+                }
+
+                throw new InvalidOperationException(
+                    $"ARM {operation} {requestId} returned a self-id 409 but the committed request could not be read back.");
+            }
+
+            // A 409 that does NOT name our requestId is a genuine conflict — throw.
+            throw BuildArmError(response, conflictBody);
+        }
+
+        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
+
+        var created = await response.Content.ReadFromJsonAsync<ArmRoleAssignmentScheduleRequest>(JsonOptions, cancellationToken);
+        if (created is null)
+        {
+            throw new InvalidOperationException($"ARM returned an empty body for {operation}.");
+        }
+        return created;
+    }
+
 
     // Per-scope fan-out tuned to avoid ARM 429s when a tenant has many
     // subscriptions: at most BatchSize parallel requests in flight, with a
@@ -439,18 +479,27 @@ internal sealed class ArmPimClient : IArmPimClient
     {
         if (response.IsSuccessStatusCode) return;
 
-        string body;
+        var body = await ReadBodySafeAsync(response, cancellationToken).ConfigureAwait(false);
+        throw BuildArmError(response, body);
+    }
+
+    private static async Task<string> ReadBodySafeAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
         try
         {
-            body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            return await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         }
         catch
         {
-            body = "(body unreadable)";
+            return "(body unreadable)";
         }
+    }
+
+    private static HttpRequestException BuildArmError(HttpResponseMessage response, string body)
+    {
         if (body.Length > 1500) body = body[..1500] + "…(truncated)";
 
-        throw new HttpRequestException(
+        return new HttpRequestException(
             $"ARM {response.RequestMessage?.Method} {response.RequestMessage?.RequestUri} returned {(int)response.StatusCode} {response.ReasonPhrase}. Body: {body}",
             inner: null,
             statusCode: response.StatusCode);

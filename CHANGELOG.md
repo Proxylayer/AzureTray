@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-29
+
+### Added
+
+- **Startup is no longer silent in the log.** `Program`, `App` and the paths/version resolution carried zero log statements, so the first thing a log (or the in-app Log Viewer) showed was whatever a hosted service happened to say once it was already running — "the app started but no icon appeared" and "where is my config" both had nothing to read. Startup now narrates itself at Information: version and installed-vs-dev build, the resolved data / plugins / logs / config directories, the configuration that actually changes behaviour (log level and file logging, Azure cloud authority and endpoints, plugin trust mode, the effective automatic-plugin-update choice, the NuGet feed URL, discovery tag and prerelease preference), host build → hosted services starting → started, how many tenants were loaded, a one-line summary of which plugins ended up loaded, the tray icon becoming visible, and "Startup completed in N ms" measured with a `Stopwatch` from the first line of `Main`. Roughly a dozen lines for a normal launch — no per-file or per-registration chatter, no secrets, tokens or user identity, and nothing that duplicates what `UpdateService` and the two polling loops already report.
+
+### Fixed
+
+- **PIM role activation reported "Activation failed" for activations that had actually succeeded** (`AzureTray.Plugin.PIM` 0.9.0 → 0.9.1). ARM Just-in-Time activation issues `PUT …/roleAssignmentScheduleRequests/{guid}` with a client-generated GUID; the `arm` HttpClient's standard resilience handler capped each attempt at 10 s, but ARM's PIM write regularly takes longer, so the socket was aborted at 10 s *after* the server had already committed the request. The resilience handler then retried the identical PUT and ARM answered `409 Conflict` — *"A role assignment request with Id: {guid} already exists"* — which surfaced to the user as a failed activation even though the role had been granted (a production log shows this happening twice). Two fixes: (1) `ArmPimClient` now treats a 409 that names its own request GUID as success, reconciling by re-reading the committed request and returning it, while any other 409 (a different id, a genuine conflict) still throws and a missing reconciled request is still an error; (2) the `arm` and `graph` resilience timeouts were raised — per-attempt 10 s → 30 s, total request 100 s, circuit-breaker sampling 60 s — so the slow path that triggers a retry is far less likely in the first place.
+
+- **The Entra activation-cap policy query was rejected by Graph on every call, and had been since it shipped** (`AzureTray.Plugin.PIM` 0.9.0 → 0.9.1). A production log shows 42 attempts and 0 successes: `policies/roleManagementPolicyAssignments?…&$expand=policy($expand=effectiveRules($select=id,maximumDuration,isExpirationRequired,setting))` returns `400 Bad Request` — *"Parsing OData Select and Expand failed: Could not find a property named 'maximumDuration' on type 'microsoft.graph.unifiedRoleManagementPolicyRule'"*. `effectiveRules` is a collection of the **base** rule type; `maximumDuration`, `isExpirationRequired` and `setting` exist only on the derived types, so naming them in a nested `$select` fails while the query is being parsed, before any data is touched. The clamping feature therefore never read a cap — it fell back to "cap unknown" on every poll, which is exactly what a tenant with no policies looks like, so it read as working. The nested `$select` is gone: `$expand=policy($expand=effectiveRules)` fetches all 17 rules per policy, and correctness beats the payload saving. ARM's policy path was never affected (it reads `properties.effectiveRules` inline off the listing) and is unchanged.
+  - **The `scopeType` is now self-diagnosing.** The `$filter` had never actually been evaluated — the request died at `$select` parsing — so `scopeType eq 'Directory'` was unverified, and Microsoft's own v1.0 example for Entra roles uses `'DirectoryRole'`. A wrong value returns an *empty set*, not an error, so it cannot be told apart from a tenant with no policies. The client now queries `'Directory'` first and, if that succeeds with zero assignments, retries once with `'DirectoryRole'`; the value that returns assignments is logged at Information and cached for the session, so the probe costs one extra request once per tenant rather than one per poll.
+  - **A zero-assignment read is no longer silent.** A successful-but-empty policy read logs a Warning naming the `scopeType`(s) tried and stating that caps and approval requirements stay unknown; a normal non-empty read keeps its Debug line with the policy and assignment counts.
+
+- **Framework HTTP logging no longer drowns the log.** Of 16,646 Information lines in a 2.5-hour session, ~14,500 came from `System.Net.Http.HttpClient.*` (`LogicalHandler` / `ClientHandler` Start / End / Sending / Received) and Polly's "Execution attempt" telemetry — about five lines per HTTP request across ~2,900 requests, restating what `HostPluginHttpClient` already reports in one line per request (21 lines over the same window). At 3.5 MB per 2.5 hours against a 10 MB cap, the on-disk history held well under a day. Serilog `MinimumLevel.Override` entries now hold the `System.Net.Http` and `Polly` source contexts at Warning, cutting roughly 87% of the volume and making the retained files genuinely retrospective. Nothing else changed: file rolling, retained count, size limit, ring-buffer size, and the app's own `AzureTray.*` / `Plugin.*` levels are all untouched.
+  - The two overrides are fixed at `Warning`, so lowering the app's level to Debug or Verbose does not bring the per-handler detail back — `HostPluginHttpClient` already logs each plugin-feed request and response, and the app's own `AzureTray.*` / `Plugin.*` categories still follow the runtime level switch as before. The startup "Logging at minimum level …" line states that the two framework categories are held at Warning.
+
 ## [0.9.0] — 2026-07-29
 
 ### Added
@@ -209,7 +226,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - This release is foundation only; no features from `Azure.PIM.Tray` have been ported yet.
 
-[Unreleased]: https://github.com/Proxylayer/AzureTray/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/Proxylayer/AzureTray/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Proxylayer/AzureTray/compare/v0.9.0...v0.10.0
 [0.2.2]: https://github.com/Proxylayer/AzureTray/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Proxylayer/AzureTray/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Proxylayer/AzureTray/compare/v0.1.0...v0.2.0

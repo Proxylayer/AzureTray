@@ -15,12 +15,13 @@ using Xunit;
 namespace AzureTray.Tests.PimPlugin;
 
 // GetRolePoliciesAsync over a stub HTTP handler. Two things are being pinned:
-// the request must carry the $filter and the nested $expand that make the caps
-// come back at all, and the response reader must take the activation cap from
-// Expiration_EndUser_Assignment and from nothing else. The Admin_* expiration
-// rules are days-scale caps on how long an admin may grant eligibility; letting
-// one of those through as a self-activation cap would offer the user a 365-day
-// activation that the service then rejects.
+// the request must carry the $filter and the plain nested $expand that make the
+// caps come back at all — a nested $select naming derived-type properties is a
+// 400 at OData parse time, which is what shipped — and the response reader must
+// take the activation cap from Expiration_EndUser_Assignment and from nothing
+// else. The Admin_* expiration rules are days-scale caps on how long an admin
+// may grant eligibility; letting one of those through as a self-activation cap
+// would offer the user a 365-day activation that the service then rejects.
 public sealed class GraphPimClientPolicyTests
 {
     private const string ExpirationType = "#microsoft.graph.unifiedRoleManagementPolicyExpirationRule";
@@ -30,21 +31,41 @@ public sealed class GraphPimClientPolicyTests
     // straight onto an eligible role's RoleDefinitionId.
     private const string GlobalReaderId = "f2ef992c-3afb-46b9-b7cf-a126ee74c451";
 
+    // The nested $select this used to assert was rejected by Graph on every
+    // call: effectiveRules is a collection of the base rule type, and
+    // maximumDuration / isExpirationRequired / setting exist only on derived
+    // types, so the query died at parse time with a 400. effectiveRules is now
+    // expanded whole — no nested $select at all.
     [Fact]
-    public async Task GetRolePoliciesAsync_RequestsDirectoryScopedAssignments_WithTheNestedEffectiveRulesExpand()
+    public async Task GetRolePoliciesAsync_RequestsDirectoryScopedAssignments_ExpandingEffectiveRulesWithoutANestedSelect()
     {
         var http = new RecordingPluginHttp(_ => Json(EmptyPage));
         var client = new GraphPimClient(NewContext(http), "tenant-1");
 
         await client.GetRolePoliciesAsync(CancellationToken.None);
 
-        var url = Assert.Single(http.Urls);
+        var url = http.Urls[0];
         Assert.StartsWith("v1.0/policies/roleManagementPolicyAssignments?", url, StringComparison.Ordinal);
         Assert.Contains("$filter=scopeId eq '/' and scopeType eq 'Directory'", url, StringComparison.Ordinal);
-        Assert.Contains(
-            "$expand=policy($expand=effectiveRules($select=id,maximumDuration,isExpirationRequired,setting))",
-            url,
-            StringComparison.Ordinal);
+        Assert.Contains("$expand=policy($expand=effectiveRules)", url, StringComparison.Ordinal);
+        Assert.DoesNotContain("$select", url, StringComparison.Ordinal);
+    }
+
+    // 'Directory' is unverifiable by inspection — a wrong scopeType returns an
+    // empty set rather than an error — so an empty result is treated as "maybe
+    // the wrong scopeType" and retried once with the value Microsoft's own v1.0
+    // Entra-role example uses.
+    [Fact]
+    public async Task GetRolePoliciesAsync_ZeroAssignments_RetriesOnceWithTheDirectoryRoleScopeType()
+    {
+        var http = new RecordingPluginHttp(_ => Json(EmptyPage));
+        var client = new GraphPimClient(NewContext(http), "tenant-1");
+
+        await client.GetRolePoliciesAsync(CancellationToken.None);
+
+        Assert.Equal(2, http.Urls.Count);
+        Assert.Contains("scopeType eq 'Directory'", http.Urls[0], StringComparison.Ordinal);
+        Assert.Contains("scopeType eq 'DirectoryRole'", http.Urls[1], StringComparison.Ordinal);
     }
 
     [Fact]

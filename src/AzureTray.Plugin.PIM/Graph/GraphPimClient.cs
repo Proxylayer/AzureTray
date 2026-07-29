@@ -21,6 +21,13 @@ internal sealed class GraphPimClient : IGraphPimClient
     private const string EndUserExpirationRuleId = "Expiration_EndUser_Assignment";
     private const string EndUserApprovalRuleId = "Approval_EndUser_Assignment";
 
+    // scopeType for the tenant-wide role policies, tried in this order. A wrong
+    // scopeType is not an error — Graph returns an empty set — so the value
+    // cannot be verified by inspection: 'Directory' is what we have always sent,
+    // 'DirectoryRole' is what Microsoft's own v1.0 example for Entra roles uses.
+    // Whichever one returns assignments is remembered for the session.
+    private static readonly string[] ScopeTypeCandidates = ["Directory", "DirectoryRole"];
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -30,6 +37,13 @@ internal sealed class GraphPimClient : IGraphPimClient
     private readonly IPluginContext _ctx;
     private readonly ILogger _logger;
     private readonly string _tenantId;
+
+    // The scopeType that was proven to return policy assignments for this
+    // tenant, so the probe below costs one extra request once rather than one
+    // per poll. Written by whichever poll confirms it and read by all of them —
+    // two watchers can call GetRolePoliciesAsync concurrently, and the worst a
+    // stale read can cost is a repeated probe.
+    private volatile string? _confirmedScopeType;
 
     public GraphPimClient(IPluginContext ctx, string tenantId)
     {
@@ -84,8 +98,16 @@ internal sealed class GraphPimClient : IGraphPimClient
     // One request covers the whole tenant: every directory-scoped policy
     // assignment, each with its policy's effective rules expanded, keyed by the
     // role definition id the assignment names (a bare GUID for Graph, so it
-    // joins straight to an eligible role's RoleDefinitionId). The nested
-    // $select matters — each policy carries 17 rules and we read four fields.
+    // joins straight to an eligible role's RoleDefinitionId).
+    //
+    // effectiveRules is expanded WITHOUT a nested $select. It is a collection of
+    // the base type unifiedRoleManagementPolicyRule, and maximumDuration /
+    // isExpirationRequired / setting live only on the derived rule types, so
+    // naming them in a nested $select is rejected while OData parses the query:
+    // "Could not find a property named 'maximumDuration' on type
+    // 'microsoft.graph.unifiedRoleManagementPolicyRule'". That 400 shipped, and
+    // every poll fell back to "cap unknown" without a cap ever being read. The
+    // fuller payload (17 rules per policy) is the price of the query working.
     //
     // Requires the signed-in user to hold a directory role that permits
     // reading policies (Global Reader, Security Reader/Operator/Administrator,
@@ -94,12 +116,7 @@ internal sealed class GraphPimClient : IGraphPimClient
     public async Task<IReadOnlyDictionary<string, RolePolicy>> GetRolePoliciesAsync(
         CancellationToken cancellationToken)
     {
-        var url =
-            "v1.0/policies/roleManagementPolicyAssignments" +
-            $"?$filter=scopeId eq '{DirectoryScope}' and scopeType eq 'Directory'" +
-            "&$expand=policy($expand=effectiveRules($select=id,maximumDuration,isExpirationRequired,setting))";
-
-        var assignments = await GetAllPagesAsync<EntraPolicyAssignment>(url, cancellationToken);
+        var (assignments, scopeTypesTried) = await ReadPolicyAssignmentsAsync(cancellationToken);
 
         var policies = new Dictionary<string, RolePolicy>(StringComparer.OrdinalIgnoreCase);
         foreach (var assignment in assignments)
@@ -115,12 +132,61 @@ internal sealed class GraphPimClient : IGraphPimClient
                 MaxActivationDuration: ReadMaxActivationDuration(rules));
         }
 
-        _logger.LogDebug(
-            "Read {PolicyCount} Entra role policies for tenant {TenantId} from {AssignmentCount} assignment(s).",
-            policies.Count, _tenantId, assignments.Count);
+        // A successful-but-empty read is the failure mode that hid the broken
+        // $select for a whole release: it looks exactly like a healthy poll from
+        // the outside. Say so out loud instead.
+        if (assignments.Count == 0)
+        {
+            _logger.LogWarning(
+                "Entra role-policy read for tenant {TenantId} succeeded but returned no policy assignments (scopeType {ScopeTypesTried}). Activation caps and approval requirements stay unknown for Entra roles.",
+                _tenantId, scopeTypesTried);
+        }
+        else
+        {
+            _logger.LogDebug(
+                "Read {PolicyCount} Entra role policies for tenant {TenantId} from {AssignmentCount} assignment(s).",
+                policies.Count, _tenantId, assignments.Count);
+        }
 
         return policies;
     }
+
+    // Self-diagnosing scopeType probe: the candidate that returns assignments
+    // wins and is cached for the session. Returns the assignments plus the
+    // scopeType(s) actually queried, so a zero-result read can name them.
+    private async Task<(List<EntraPolicyAssignment> Assignments, string ScopeTypesTried)>
+        ReadPolicyAssignmentsAsync(CancellationToken cancellationToken)
+    {
+        var confirmed = _confirmedScopeType;
+        if (confirmed is not null)
+        {
+            var cached = await GetAllPagesAsync<EntraPolicyAssignment>(
+                PolicyAssignmentsUrl(confirmed), cancellationToken);
+            return (cached, confirmed);
+        }
+
+        List<EntraPolicyAssignment> assignments = [];
+        foreach (var scopeType in ScopeTypeCandidates)
+        {
+            assignments = await GetAllPagesAsync<EntraPolicyAssignment>(
+                PolicyAssignmentsUrl(scopeType), cancellationToken);
+            if (assignments.Count == 0) continue;
+
+            _confirmedScopeType = scopeType;
+            _logger.LogInformation(
+                "Entra role policies for tenant {TenantId} read with scopeType '{ScopeType}' ({AssignmentCount} assignment(s)); using it for the rest of this session.",
+                _tenantId, scopeType, assignments.Count);
+            return (assignments, scopeType);
+        }
+
+        // Nothing confirmed — every candidate is retried on the next poll.
+        return (assignments, string.Join(" then ", ScopeTypeCandidates));
+    }
+
+    private static string PolicyAssignmentsUrl(string scopeType) =>
+        "v1.0/policies/roleManagementPolicyAssignments" +
+        $"?$filter=scopeId eq '{DirectoryScope}' and scopeType eq '{scopeType}'" +
+        "&$expand=policy($expand=effectiveRules)";
 
     // Expiration_EndUser_Assignment is the only rule that governs a user
     // self-activating an eligible role. The other expiration rules
@@ -144,9 +210,9 @@ internal sealed class GraphPimClient : IGraphPimClient
         return rule?.Setting?.IsApprovalRequired;
     }
 
-    // @odata.type is a corroborating check only: a $select'd expansion may omit
-    // it, and the rule ids are unique within a policy, so an absent type is
-    // accepted rather than treated as a mismatch.
+    // @odata.type is a corroborating check only: the rule ids are unique within
+    // a policy, so an absent type is accepted rather than treated as a mismatch
+    // (an unexpanded or narrowed payload can arrive without it).
     private static bool IsRuleType(string? odataType, string expected)
         => string.IsNullOrWhiteSpace(odataType)
             || odataType.Contains(expected, StringComparison.OrdinalIgnoreCase);

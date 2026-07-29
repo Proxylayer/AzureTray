@@ -103,6 +103,9 @@ public sealed class JsonFileTenantStore : ITenantStore, IDisposable
     {
         if (!File.Exists(_paths.TenantStoreFilePath))
         {
+            _logger.LogInformation(
+                "No tenant store at {Path} yet; starting with no tenants.",
+                _paths.TenantStoreFilePath);
             return;
         }
 
@@ -110,18 +113,25 @@ public sealed class JsonFileTenantStore : ITenantStore, IDisposable
         {
             var json = File.ReadAllText(_paths.TenantStoreFilePath);
             var doc = JsonSerializer.Deserialize<TenantStoreDocument>(json, JsonOptions);
-            if (doc?.Tenants is null) return;
 
+            int count;
             lock (_stateGate)
             {
-                foreach (var entry in doc.Tenants)
+                foreach (var entry in doc?.Tenants ?? [])
                 {
                     if (!string.IsNullOrWhiteSpace(entry.TenantId))
                     {
                         _byTenantId[entry.TenantId] = entry;
                     }
                 }
+                count = _byTenantId.Count;
             }
+
+            // Count, not a dump — the readiness probe names each tenant as it
+            // works through them.
+            _logger.LogInformation(
+                "Loaded {TenantCount} tenant(s) from {Path}.",
+                count, _paths.TenantStoreFilePath);
         }
         catch (JsonException ex)
         {

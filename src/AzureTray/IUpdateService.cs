@@ -7,6 +7,11 @@ public interface IUpdateService
 {
     string CurrentVersionDisplay { get; }
 
+    // True when this process is a Velopack-installed build rather than a dev
+    // run from bin/. Same distinction the update path itself gates on, exposed
+    // so the startup log can state which kind of build a user is running.
+    bool IsInstalledBuild { get; }
+
     // Set after a successful startup check detects a newer release.
     // Null when no update is pending. Cleared on next launch (each
     // process re-checks fresh).

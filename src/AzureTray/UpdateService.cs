@@ -50,6 +50,8 @@ public sealed class UpdateService : IUpdateService
     public string CurrentVersionDisplay =>
         _manager is { IsInstalled: true, CurrentVersion: { } v } ? v.ToString() : "dev";
 
+    public bool IsInstalledBuild => _manager?.IsInstalled == true;
+
     public string? PendingUpdateVersion { get; private set; }
 
     public event Action<string>? UpdateAvailable;

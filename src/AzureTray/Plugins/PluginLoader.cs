@@ -3,7 +3,6 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
@@ -24,10 +23,11 @@ namespace AzureTray.Plugins;
 
 public sealed class PluginLoader : IPluginLoader, IHostedService, IDisposable
 {
-    // Resolved once from the host assembly. Strips any '+build' metadata
-    // suffix so plugins can pass it straight into System.Version.Parse
-    // for capability comparisons.
-    private static readonly string? HostVersion = ResolveHostVersion();
+    // Resolved once from the host assembly, with any '+build' metadata suffix
+    // stripped so plugins can pass it straight into System.Version.Parse for
+    // capability comparisons. Shared with the startup log, which reports the
+    // same value.
+    private static readonly string? HostVersion = AppVersion.Semantic;
 
     private readonly IAppPaths _paths;
     private readonly IPluginSignatureVerifier _verifier;
@@ -213,6 +213,22 @@ public sealed class PluginLoader : IPluginLoader, IHostedService, IDisposable
         }
 
         if (loadedAny) PluginsChanged?.Invoke();
+
+        // Summary line for the startup narrative. The per-plugin lines above
+        // answer "did THIS plugin load"; this answers "what does the host
+        // actually have" without the reader tallying them up.
+        var loaded = LoadedPlugins;
+        if (loaded.Count == 0)
+        {
+            _logger.LogInformation("No plugins loaded from {Dir}.", _paths.PluginsDir);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "Loaded {PluginCount} plugin(s): {Plugins}.",
+                loaded.Count,
+                string.Join(", ", loaded.Select(p => $"{p.Plugin.Id} v{p.Plugin.Version}")));
+        }
     }
 
     public async Task<LoadedPlugin?> LoadOneAsync(string dllPath, CancellationToken cancellationToken)
@@ -580,20 +596,6 @@ public sealed class PluginLoader : IPluginLoader, IHostedService, IDisposable
             PluginOptionKind.Text => Convert.ToString(value, invariant),
             _ => value,
         };
-    }
-
-    private static string? ResolveHostVersion()
-    {
-        var asm = typeof(PluginLoader).Assembly;
-        var informational = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-        if (!string.IsNullOrEmpty(informational))
-        {
-            // SourceLink appends '+commitSha' for diagnostic provenance; the
-            // SemVer prefix is what callers actually want for version compares.
-            var plus = informational.IndexOf('+', StringComparison.Ordinal);
-            return plus >= 0 ? informational[..plus] : informational;
-        }
-        return asm.GetName().Version?.ToString();
     }
 
     // ─── Folder watcher ───────────────────────────────────────────────────

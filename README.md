@@ -86,7 +86,7 @@ The app deliberately stores user data outside the install directory so updates c
 The current foundation:
 
 - **Generic host + DI** — `Microsoft.Extensions.Hosting` boots before WPF. Every service is resolved from the container.
-- **Logging** — Serilog with rolling file sink, debug sink, in-memory ring-buffer sink (for the in-app log viewer), and a runtime-controllable `LoggingLevelSwitch`.
+- **Logging** — Serilog with rolling file sink, debug sink, in-memory ring-buffer sink (for the in-app log viewer), and a runtime-controllable `LoggingLevelSwitch`. The `System.Net.Http` and `Polly` categories are held at Warning.
 - **Config** — `IConfiguration` layered from `appsettings.json` (shipped) + `%APPDATA%\AzureTray\config.json` (user override) + environment variables. Bound to typed `*Options` records.
 - **HTTP** — `IHttpClientFactory` with named clients (`graph`, `arm`) and the standard resilience handler (retry, circuit breaker, timeout, 429 backoff).
 - **Auth** — single `ICredentialFactory` builds `InteractiveBrowserCredential` per tenant with MSAL persistent token cache, wrapped in a per-tenant `SerializedTokenCredential` (configurable timeout, one stuck tenant cannot block others).
