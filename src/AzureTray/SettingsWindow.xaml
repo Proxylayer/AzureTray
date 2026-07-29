@@ -555,6 +555,28 @@
                            TextWrapping="Wrap"
                            Margin="0,0,0,10"/>
 
+                <!-- Persistent plugin-update banner. Driven by
+                     PluginUpdateState (published by the background poll), so
+                     it is here whether or not the toast was dismissed.
+                     Informational only — the action lives on each installed
+                     row so the user can see exactly what is being replaced. -->
+                <Border Background="#1B3A63"
+                        BorderBrush="#2F7DF0"
+                        BorderThickness="1"
+                        CornerRadius="6"
+                        Padding="12,8"
+                        Margin="0,0,0,10"
+                        Visibility="{Binding IsPluginUpdateAvailable, Converter={StaticResource BoolToVisibility}}">
+                    <TextBlock Text="{Binding PluginUpdateBannerText}"
+                               Foreground="White"
+                               TextWrapping="Wrap"/>
+                </Border>
+
+                <CheckBox Content="Update plugins automatically"
+                          IsChecked="{Binding AutoUpdatePlugins, Mode=TwoWay}"
+                          Margin="0,0,0,10"
+                          ToolTip="Installs newer plugin versions in the background. Anything that needs your decision is never applied automatically: a High or Critical security advisory on the new version, or a plugin that would need the unsigned-plugin trust prompt, is left for you to install manually."/>
+
                 <!-- Available plugins (NuGet tag search). Expander
                      starts collapsed; opening it auto-fetches once. The
                      in-VM cache + the feed's 60s TTL keep this cheap. -->
@@ -660,21 +682,38 @@
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="Auto"/>
                                     <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Grid.Column="0" Margin="0,0,8,0">
                                     <TextBlock Text="{Binding FileName}" FontWeight="SemiBold" TextWrapping="Wrap"/>
                                     <TextBlock Text="{Binding StatusDisplay}" Style="{StaticResource Text.Muted}" TextWrapping="Wrap"/>
+                                    <!-- Only present when the feed offers a newer version. -->
+                                    <TextBlock Text="{Binding UpdateHint}"
+                                               Foreground="#5A9BF6"
+                                               TextWrapping="Wrap"
+                                               Visibility="{Binding HasUpdate, Converter={StaticResource BoolToVisibility}}"/>
                                 </StackPanel>
+                                <!-- Runs the same interactive install as the Available list,
+                                     pinned to the newer version: the advisory prompt, the
+                                     unsigned-plugin prompt, and the required-permissions
+                                     notice all still fire. -->
+                                <Button Grid.Column="1"
+                                        Content="{Binding UpdateButtonText}"
+                                        Style="{StaticResource Button.Primary}"
+                                        Margin="0,0,6,0"
+                                        Visibility="{Binding HasUpdate, Converter={StaticResource BoolToVisibility}}"
+                                        Command="{Binding DataContext.UpdateExtensionCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                        CommandParameter="{Binding}"/>
                                 <!-- Configure opens a per-plugin popup. Only enabled when the
                                      DLL is actually loaded — an installed-but-rejected DLL
                                      has no IPluginContext / config to surface. -->
-                                <Button Grid.Column="1"
+                                <Button Grid.Column="2"
                                         Content="Configure"
                                         Margin="0,0,6,0"
                                         IsEnabled="{Binding IsLoaded}"
                                         Command="{Binding DataContext.ConfigureExtensionCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                         CommandParameter="{Binding}"/>
-                                <Button Grid.Column="2"
+                                <Button Grid.Column="3"
                                         Content="Uninstall"
                                         Command="{Binding DataContext.UninstallExtensionCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                         CommandParameter="{Binding}"/>

@@ -36,6 +36,7 @@ public sealed class TrayIcon : IDisposable
     // service provider because host shutdown disposes the IServiceProvider
     // BEFORE Dispose() is invoked on the singletons it owns.
     private IPluginLoader? _pluginLoader;
+    private Notifications.PluginUpdateNotifier? _pluginUpdateNotifier;
 
     public TrayIcon(IServiceProvider services, ILogger<TrayIcon> logger)
     {
@@ -66,6 +67,24 @@ public sealed class TrayIcon : IDisposable
         {
             _pluginLoader.PluginsChanged += OnPluginsChanged;
         }
+
+        // The plugin-update toast's action has to open Settings, and this class
+        // owns that window. Resolved here (not in the ctor) for the same reason
+        // as the loader above.
+        _pluginUpdateNotifier = _services.GetService<Notifications.PluginUpdateNotifier>();
+        if (_pluginUpdateNotifier is not null)
+        {
+            _pluginUpdateNotifier.OpenSettingsRequested += OnOpenSettingsRequested;
+        }
+    }
+
+    private void OnOpenSettingsRequested()
+    {
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null) return;
+
+        if (dispatcher.CheckAccess()) ShowSettings(admin: false);
+        else dispatcher.BeginInvoke(new Action(() => ShowSettings(admin: false)));
     }
 
     private void OnPluginsChanged()
@@ -590,6 +609,12 @@ public sealed class TrayIcon : IDisposable
         {
             _pluginLoader.PluginsChanged -= OnPluginsChanged;
             _pluginLoader = null;
+        }
+
+        if (_pluginUpdateNotifier is not null)
+        {
+            _pluginUpdateNotifier.OpenSettingsRequested -= OnOpenSettingsRequested;
+            _pluginUpdateNotifier = null;
         }
 
         if (_openMenu is not null)

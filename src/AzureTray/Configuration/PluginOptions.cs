@@ -9,6 +9,19 @@ public sealed class PluginOptions
     public PluginTrustMode TrustMode { get; init; } = PluginTrustMode.AllowUnsigned;
 
     public IList<string> TrustedPublisherThumbprints { get; init; } = new List<string>();
+
+    // How often the background loop asks nuget.org whether any installed
+    // plugin has a newer version. Plugins ship independently of the host, so
+    // without this a user on the newest host can sit on a months-old plugin.
+    // Set to 0 to disable the loop entirely.
+    public int UpdateCheckIntervalHours { get; init; } = 6;
+
+    // Seeds the "Update plugins automatically" checkbox on first run. Off by
+    // default; the user's own choice is persisted separately and wins after
+    // that. Even when enabled, an update that would need a user decision
+    // (High/Critical advisory, unsigned-plugin trust prompt) is refused and
+    // left for a manual click.
+    public bool AutoUpdate { get; init; }
 }
 
 public enum PluginTrustMode

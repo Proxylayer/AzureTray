@@ -37,12 +37,18 @@ public sealed class ExtensionInstaller : IExtensionInstaller
 
     private readonly IAppPaths _paths;
     private readonly IHttpClientFactory _httpFactory;
+    private readonly PluginManifestStore _manifests;
     private readonly ILogger<ExtensionInstaller> _logger;
 
-    public ExtensionInstaller(IAppPaths paths, IHttpClientFactory httpFactory, ILogger<ExtensionInstaller> logger)
+    public ExtensionInstaller(
+        IAppPaths paths,
+        IHttpClientFactory httpFactory,
+        PluginManifestStore manifests,
+        ILogger<ExtensionInstaller> logger)
     {
         _paths = paths;
         _httpFactory = httpFactory;
+        _manifests = manifests;
         _logger = logger;
     }
 
@@ -63,11 +69,12 @@ public sealed class ExtensionInstaller : IExtensionInstaller
 
         // For local installs the registry-supplied packageId isn't around,
         // so we read it from the package's .nuspec. That's authoritative.
-        var packageId = ReadPackageIdFromNuspec(archive)
+        var identity = ReadNuspecIdentity(archive);
+        var packageId = identity.Id
             ?? throw new InvalidOperationException(
                 "Could not determine plugin id: the .nupkg is missing a valid .nuspec/<id> entry.");
 
-        return ExtractDllsFromNupkg(archive, packageId, cancellationToken);
+        return ExtractDllsFromNupkg(archive, packageId, identity.Version, sourceUrl: null, cancellationToken);
     }
 
     public async Task<IReadOnlyList<string>> InstallFromUrlAsync(
@@ -102,10 +109,20 @@ public sealed class ExtensionInstaller : IExtensionInstaller
         }
 
         using var archive = new ZipArchive(new MemoryStream(bytes, writable: false), ZipArchiveMode.Read);
-        return ExtractDllsFromNupkg(archive, packageId, cancellationToken);
+
+        // Version comes from the package's own .nuspec rather than the caller:
+        // it's authoritative for what actually landed on disk, which is what
+        // the manifest has to record.
+        var version = ReadNuspecIdentity(archive).Version;
+        return ExtractDllsFromNupkg(archive, packageId, version, downloadUrl, cancellationToken);
     }
 
-    private List<string> ExtractDllsFromNupkg(ZipArchive archive, string packageId, CancellationToken cancellationToken)
+    private List<string> ExtractDllsFromNupkg(
+        ZipArchive archive,
+        string packageId,
+        string? version,
+        string? sourceUrl,
+        CancellationToken cancellationToken)
     {
         // Per-plugin subfolder isolates each plugin's deps. PluginLoader
         // discovers plugins in plugins/<id>/<id>.dll (preferred) and
@@ -141,9 +158,26 @@ public sealed class ExtensionInstaller : IExtensionInstaller
                 $"Plugin package '{packageId}' contained no DLLs under lib/{chosenTfm}/.");
         }
 
+        // Record what was installed. Skipped (with a log line) when the
+        // .nuspec carried no version — a manifest without one is worse than
+        // no manifest, because the reader would have to special-case it.
+        if (!string.IsNullOrWhiteSpace(version))
+        {
+            _manifests.Write(new InstalledPluginManifest(packageId, version, DateTimeOffset.UtcNow)
+            {
+                SourceUrl = sourceUrl,
+            });
+        }
+        else
+        {
+            _logger.LogWarning(
+                "Package '{PackageId}' has no <version> in its .nuspec; skipping the install manifest, so update detection falls back to the loaded plugin version.",
+                packageId);
+        }
+
         _logger.LogInformation(
-            "Installed {Count} DLL(s) from nupkg into {TargetDir} (tfm={Tfm}).",
-            installed.Count, targetDir, chosenTfm);
+            "Installed {Count} DLL(s) from nupkg into {TargetDir} (tfm={Tfm}, version={Version}).",
+            installed.Count, targetDir, chosenTfm, version ?? "unknown");
         return installed;
     }
 
@@ -163,30 +197,45 @@ public sealed class ExtensionInstaller : IExtensionInstaller
         return targetPath;
     }
 
-    private static string? ReadPackageIdFromNuspec(ZipArchive archive)
+    // Package id + version as declared by the package itself. Either part can
+    // come back null: the id is required for a local install (the caller
+    // throws), the version only feeds the install manifest.
+    private static (string? Id, string? Version) ReadNuspecIdentity(ZipArchive archive)
     {
         // .nuspec lives at the archive root, exactly one per package.
         var nuspec = archive.Entries.FirstOrDefault(e =>
             e.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase) &&
             !e.FullName.Contains('/') &&
             !e.FullName.Contains('\\'));
-        if (nuspec is null) return null;
+        if (nuspec is null) return (null, null);
 
         try
         {
             using var stream = nuspec.Open();
             var doc = XDocument.Load(stream);
-            // The nuspec namespace varies (2010, 2011, 2013…); match by local name.
-            var id = doc.Root?
-                .Descendants()
-                .FirstOrDefault(el => string.Equals(el.Name.LocalName, "id", StringComparison.OrdinalIgnoreCase))
-                ?.Value
-                ?.Trim();
-            return string.IsNullOrWhiteSpace(id) ? null : id;
+            // The nuspec namespace varies (2010, 2011, 2013…); match by local
+            // name. Read from <metadata> only: <dependency> elements carry an
+            // id/version pair too, and a bare Descendants() walk could pick
+            // one of those up instead.
+            var metadata = doc.Root?
+                .Elements()
+                .FirstOrDefault(el => string.Equals(el.Name.LocalName, "metadata", StringComparison.OrdinalIgnoreCase));
+
+            return (Value(metadata, "id"), Value(metadata, "version"));
         }
         catch
         {
-            return null;
+            return (null, null);
+        }
+
+        static string? Value(XElement? metadata, string localName)
+        {
+            var raw = metadata?
+                .Elements()
+                .FirstOrDefault(el => string.Equals(el.Name.LocalName, localName, StringComparison.OrdinalIgnoreCase))
+                ?.Value
+                ?.Trim();
+            return string.IsNullOrWhiteSpace(raw) ? null : raw;
         }
     }
 

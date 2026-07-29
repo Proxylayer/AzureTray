@@ -245,6 +245,7 @@ public sealed class ExtensionInstallerTests : IDisposable
         var paths = Substitute.For<IAppPaths>();
         paths.PluginsDir.Returns(_pluginsDir);
         var httpFactory = Substitute.For<IHttpClientFactory>();
-        return new ExtensionInstaller(paths, httpFactory, NullLogger<ExtensionInstaller>.Instance);
+        var manifests = new PluginManifestStore(paths, NullLogger<PluginManifestStore>.Instance);
+        return new ExtensionInstaller(paths, httpFactory, manifests, NullLogger<ExtensionInstaller>.Instance);
     }
 }

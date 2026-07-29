@@ -150,7 +150,9 @@ public sealed class NuGetPluginFeed : INuGetPluginFeed, IDisposable
     {
         if (string.IsNullOrWhiteSpace(hit.Id)) return null;
 
-        // Newest-first. NuGet's search returns versions oldest-first; flip.
+        // Newest-first. The v3 search spec documents no ordering for a hit's
+        // `versions` array (in practice it arrives oldest-first, but that is
+        // not contractual), so sort by parsed SemVer instead of reversing.
         var versions = new List<NuGetPluginVersion>();
         if (hit.Versions is { Count: > 0 })
         {
@@ -169,7 +171,7 @@ public sealed class NuGetPluginFeed : INuGetPluginFeed, IDisposable
                     DownloadUrl: $"https://api.nuget.org/v3-flatcontainer/{lowerId}/{lowerVersion}/{lowerId}.{lowerVersion}.nupkg",
                     ChecksumSha256: null));
             }
-            versions.Reverse();
+            versions = PluginVersions.SortNewestFirst(versions);
         }
         if (versions.Count == 0 && !string.IsNullOrWhiteSpace(hit.Version))
         {

@@ -42,7 +42,10 @@
         </Border.Effect>
         <Grid>
             <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
+                <!-- title / body band (message + details) / input / actions.
+                     Only the body band is height-capped; the input and action
+                     rows always get their natural height, so however long a
+                     Message is the buttons stay on screen. -->
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -84,56 +87,74 @@
                         ToolTip="Dismiss"/>
             </Grid>
 
-            <!-- Body indents under the glyph so the message aligns with
-                 the title text. -->
-            <TextBlock Grid.Row="1"
-                       Text="{Binding Message}"
-                       TextWrapping="Wrap"
-                       Foreground="{DynamicResource Brush.Text.Secondary}"
-                       Margin="42,6,14,8"/>
+            <!-- Body band: the message and the Details expander share one
+                 scroll host with a hard height cap. Below the cap this is
+                 invisible — the ScrollViewer sizes to its content, adds no
+                 chrome (scrollbars are Auto) and the two children stack
+                 exactly as the two Auto grid rows they replaced did, so an
+                 ordinary short toast renders identically. Past the cap the
+                 band scrolls instead of growing, which is what keeps the
+                 choice list and the action buttons inside the window's
+                 MaxHeight no matter how long a plugin's Message is.
+                 Focusable="False" keeps it out of the tab order; the mouse
+                 wheel scrolls it regardless. -->
+            <ScrollViewer Grid.Row="1"
+                          MaxHeight="280"
+                          Focusable="False"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <StackPanel>
+                    <!-- Body indents under the glyph so the message aligns with
+                         the title text. -->
+                    <TextBlock Text="{Binding Message}"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource Brush.Text.Secondary}"
+                               Margin="42,6,14,8"/>
 
-            <!-- Optional collapsible Details block. Stays closed by default
-                 so the notification renders compact; expanding it reveals
-                 a scrollable ItemsControl of Name/Value rows (exception
-                 type, HResult, response body, stack trace, etc.). The
-                 Expander itself is hidden when Details is empty/null. -->
-            <Expander Grid.Row="2"
-                      Header="Details"
-                      Margin="14,0,14,8"
-                      Foreground="{DynamicResource Brush.Text.Muted}"
-                      Visibility="{Binding HasDetails, Converter={StaticResource BoolToVis}}">
-                <Border BorderBrush="{DynamicResource Brush.Border.Default}"
-                        BorderThickness="1"
-                        Background="{DynamicResource Brush.Surface.Input}"
-                        CornerRadius="{DynamicResource Radius.Small}"
-                        Padding="8,6"
-                        Margin="0,6,0,0">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                  HorizontalScrollBarVisibility="Disabled"
-                                  MaxHeight="240">
-                        <ItemsControl ItemsSource="{Binding Details}">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <StackPanel Margin="0,0,0,6">
-                                        <TextBlock Text="{Binding Name}"
-                                                   FontWeight="SemiBold"
-                                                   FontSize="11"
-                                                   Foreground="{DynamicResource Brush.Text.Muted}"/>
-                                        <TextBlock Text="{Binding Value}"
-                                                   TextWrapping="Wrap"
-                                                   FontFamily="Consolas, Cascadia Mono, Courier New"
-                                                   FontSize="11"
-                                                   Foreground="{DynamicResource Brush.Text.Primary}"/>
-                                    </StackPanel>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </ScrollViewer>
-                </Border>
-            </Expander>
+                    <!-- Optional collapsible Details block. Stays closed by
+                         default so the notification renders compact; expanding
+                         it reveals a scrollable ItemsControl of Name/Value rows
+                         (exception type, HResult, response body, stack trace,
+                         etc.). The Expander itself is hidden when Details is
+                         empty/null. -->
+                    <Expander Header="Details"
+                              Margin="14,0,14,8"
+                              Foreground="{DynamicResource Brush.Text.Muted}"
+                              Visibility="{Binding HasDetails, Converter={StaticResource BoolToVis}}">
+                        <Border BorderBrush="{DynamicResource Brush.Border.Default}"
+                                BorderThickness="1"
+                                Background="{DynamicResource Brush.Surface.Input}"
+                                CornerRadius="{DynamicResource Radius.Small}"
+                                Padding="8,6"
+                                Margin="0,6,0,0">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled"
+                                          MaxHeight="240">
+                                <ItemsControl ItemsSource="{Binding Details}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Margin="0,0,0,6">
+                                                <TextBlock Text="{Binding Name}"
+                                                           FontWeight="SemiBold"
+                                                           FontSize="11"
+                                                           Foreground="{DynamicResource Brush.Text.Muted}"/>
+                                                <TextBlock Text="{Binding Value}"
+                                                           TextWrapping="Wrap"
+                                                           FontFamily="Consolas, Cascadia Mono, Courier New"
+                                                           FontSize="11"
+                                                           Foreground="{DynamicResource Brush.Text.Primary}"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+                        </Border>
+                    </Expander>
+                </StackPanel>
+            </ScrollViewer>
 
             <!-- Choice input -->
-            <StackPanel Grid.Row="3"
+            <StackPanel Grid.Row="2"
                         Margin="14,0,14,0"
                         Visibility="{Binding IsChoice, Converter={StaticResource BoolToVis}}">
                 <ListBox ItemsSource="{Binding Choices}"
@@ -157,14 +178,14 @@
             </StackPanel>
 
             <!-- TextInput input -->
-            <TextBox Grid.Row="3"
+            <TextBox Grid.Row="2"
                      Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
                      Padding="6,4"
                      Margin="14,0,14,0"
                      Visibility="{Binding IsTextInput, Converter={StaticResource BoolToVis}}"/>
 
             <!-- Action buttons -->
-            <Grid Grid.Row="4" Margin="14,12,14,14">
+            <Grid Grid.Row="3" Margin="14,12,14,14">
                 <StackPanel Orientation="Horizontal"
                             HorizontalAlignment="Right"
                             Visibility="{Binding IsYesNo, Converter={StaticResource BoolToVis}}">

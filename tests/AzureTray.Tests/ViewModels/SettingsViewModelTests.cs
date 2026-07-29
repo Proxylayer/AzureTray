@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -24,8 +25,27 @@ using Xunit;
 
 namespace AzureTray.Tests.ViewModels;
 
-public sealed class SettingsViewModelTests
+public sealed class SettingsViewModelTests : IDisposable
 {
+    // Every NewVm points IAppPaths at a throwaway folder; remember them so a
+    // test run doesn't leave a directory per view model behind in %TEMP%.
+    private readonly List<string> _tempRoots = new();
+
+    public void Dispose()
+    {
+        foreach (var root in _tempRoots)
+        {
+            try
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+            catch
+            {
+                // Best-effort.
+            }
+        }
+    }
+
     [Fact]
     public void Constructor_SetsVersionDisplayFromUpdateService()
     {
@@ -478,7 +498,7 @@ public sealed class SettingsViewModelTests
         Assert.Empty(vm.Tenants);
     }
 
-    private static SettingsViewModel NewVm(
+    private SettingsViewModel NewVm(
         IUpdateService? updateService = null,
         IGraphMeClient? graphMeClient = null,
         ITenantStore? tenantStore = null,
@@ -495,7 +515,9 @@ public sealed class SettingsViewModelTests
         IAppRegistrationProvisioning? appRegistrationProvisioning = null,
         ITenantReadinessTracker? readiness = null,
         AuthOptions? authOptions = null,
-        PluginOptions? pluginOptions = null)
+        PluginOptions? pluginOptions = null,
+        IPluginUpdateChecker? pluginUpdateChecker = null,
+        PluginUpdateState? pluginUpdateState = null)
     {
         updateService ??= Substitute.For<IUpdateService>();
         graphMeClient ??= Substitute.For<IGraphMeClient>();
@@ -540,6 +562,23 @@ public sealed class SettingsViewModelTests
             // Default: report unsigned. Tests that want signed assert it explicitly.
             signatureVerifier.Verify(Arg.Any<string>()).Returns(SignatureVerdict.NotSigned);
         }
+        // Plugin update collaborators. Paths are pointed at a throwaway temp
+        // folder so the manifest reads and the preference store never touch
+        // the real user profile.
+        var updatePaths = Substitute.For<IAppPaths>();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "AzureTray.Tests", Guid.NewGuid().ToString("N"));
+        _tempRoots.Add(tempRoot);
+        updatePaths.PluginsDir.Returns(Path.Combine(tempRoot, "plugins"));
+        updatePaths.ConfigDir.Returns(Path.Combine(tempRoot, "config"));
+        var pluginManifests = new PluginManifestStore(updatePaths, NullLogger<PluginManifestStore>.Instance);
+        pluginUpdateChecker ??= Substitute.For<IPluginUpdateChecker>();
+        pluginUpdateState ??= new PluginUpdateState();
+        var pluginUpdatePreferences = new PluginUpdatePreferenceStore(
+            updatePaths,
+            Options.Create(new NuGetPluginFeedOptions()),
+            Options.Create(pluginOptions),
+            NullLogger<PluginUpdatePreferenceStore>.Instance);
+
         var pluginConfigStore = Substitute.For<IPluginConfigStore>();
         pluginConfigStore.IsTenantEnabledFor(Arg.Any<string>(), Arg.Any<string>()).Returns(true);
         pluginConfigStore.GetDisabledTenants(Arg.Any<string>()).Returns(new HashSet<string>());
@@ -553,6 +592,10 @@ public sealed class SettingsViewModelTests
             extensionInstaller,
             nuGetFeed,
             packageSecurityScanner,
+            pluginManifests,
+            pluginUpdateChecker,
+            pluginUpdateState,
+            pluginUpdatePreferences,
             fileDialogService,
             pluginLoader,
             pluginConfigStore,

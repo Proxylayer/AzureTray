@@ -209,7 +209,11 @@ internal sealed class PendingApprovalWatcher
                     RoleDisplay: r.RoleDefinition?.DisplayName ?? "(unknown role)",
                     ScopeDisplay: "Entra ID directory",
                     ArmScope: null,
-                    RequestorPrincipalId: r.Principal?.Id ?? r.PrincipalId))
+                    RequestorPrincipalId: r.Principal?.Id ?? r.PrincipalId,
+                    // The schedule request's own justification — the reason the
+                    // requestor typed. Not EntraApprovalStep.Justification,
+                    // which is an approver's decision comment.
+                    RequestorJustification: r.Justification))
                 .ToList();
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
@@ -252,7 +256,11 @@ internal sealed class PendingApprovalWatcher
                     RoleDisplay: r.Properties.ExpandedProperties?.RoleDefinition?.DisplayName ?? "(unknown role)",
                     ScopeDisplay: r.Properties.ExpandedProperties?.Scope?.DisplayName ?? r.Properties.Scope ?? "(unknown scope)",
                     ArmScope: r.Properties.Scope,
-                    RequestorPrincipalId: r.Properties.ExpandedProperties?.Principal?.Id ?? r.Properties.PrincipalId))
+                    RequestorPrincipalId: r.Properties.ExpandedProperties?.Principal?.Id ?? r.Properties.PrincipalId,
+                    // The schedule request's own justification, not
+                    // ArmApprovalStageProperties.Justification (the approver's
+                    // decision comment). ARM documents this as nullable.
+                    RequestorJustification: r.Properties.Justification))
                 .ToList();
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
@@ -270,11 +278,22 @@ internal sealed class PendingApprovalWatcher
     {
         try
         {
+            // The requestor's reason belongs in Message, not behind the Details
+            // expander — an approver shouldn't have to click to see why they're
+            // being asked. Details only carries the reason when the visible
+            // copy had to be truncated.
+            var reason = ApprovalReason.From(approval.RequestorJustification);
+
             var choice = await _context.Notifier.ShowAsync(
                 new ChoiceRequest(
                     Title: $"PIM approval — {_tenant.DisplayName}",
-                    Message: $"{approval.PrincipalDisplay} is requesting {approval.RoleDisplay} on {approval.ScopeDisplay}.",
-                    Choices: ApproveOrRejectChoices),
+                    Message: $"{approval.PrincipalDisplay} is requesting {approval.RoleDisplay} on {approval.ScopeDisplay}.\n\n{reason.MessageLine}",
+                    Choices: ApproveOrRejectChoices)
+                {
+                    Details = reason.ClampedFullText is { } fullReason
+                        ? new[] { new NotificationDetail("Reason", fullReason) }
+                        : null,
+                },
                 cancellationToken).ConfigureAwait(false);
 
             if (choice is not ChoiceResult { SelectedChoice: { } picked })

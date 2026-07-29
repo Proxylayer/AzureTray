@@ -36,6 +36,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly IExtensionInstaller _extensionInstaller;
     private readonly INuGetPluginFeed _nuGetFeed;
     private readonly IPackageSecurityScanner _packageSecurityScanner;
+    private readonly PluginManifestStore _pluginManifests;
+    private readonly IPluginUpdateChecker _pluginUpdateChecker;
+    private readonly PluginUpdateState _pluginUpdateState;
+    private readonly PluginUpdatePreferenceStore _pluginUpdatePreferences;
     private readonly IFileDialogService _fileDialogService;
     private readonly IPluginLoader _pluginLoader;
     private readonly IOpenIdConfigClient _oidc;
@@ -54,6 +58,11 @@ public sealed partial class SettingsViewModel : ObservableObject
     // Guard so flipping LaunchAtStartup from the ctor (initial sync of the
     // checkbox to the registry value) doesn't re-enter the registry write.
     private bool _suppressLaunchAtStartupCommit;
+
+    // Same idea for the plugin-update preferences: seeding the checkboxes from
+    // the persisted values must not write them back or kick off a check (the
+    // ctor runs one explicitly, once).
+    private bool _seedingPluginUpdatePreferences;
 
     private CancellationTokenSource? _addTenantCts;
 
@@ -217,8 +226,26 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private string _onlinePluginFilter = string.Empty;
 
+    // Seeded from the persisted preference (whose own default comes from
+    // App:NuGet:IncludePrereleaseByDefault) in the ctor, and written back on
+    // change so the browse list and the background update checker query the
+    // feed with the same prerelease flag.
     [ObservableProperty]
-    private bool _includeOnlinePrereleases = true;
+    private bool _includeOnlinePrereleases;
+
+    // "Update plugins automatically" — opt-in, persisted. Seeded in the ctor.
+    [ObservableProperty]
+    private bool _autoUpdatePlugins;
+
+    // Persistent banner inside the Plugins card listing installed plugins with
+    // a newer version on nuget.org. Driven by PluginUpdateState, which the
+    // background poll publishes into, so it survives this (transient) view
+    // model being recreated each time Settings is opened.
+    [ObservableProperty]
+    private bool _isPluginUpdateAvailable;
+
+    [ObservableProperty]
+    private string _pluginUpdateBannerText = string.Empty;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(RefreshOnlinePluginsCommand))]
@@ -324,6 +351,10 @@ public sealed partial class SettingsViewModel : ObservableObject
         IExtensionInstaller extensionInstaller,
         INuGetPluginFeed pluginRegistry,
         IPackageSecurityScanner packageSecurityScanner,
+        PluginManifestStore pluginManifests,
+        IPluginUpdateChecker pluginUpdateChecker,
+        PluginUpdateState pluginUpdateState,
+        PluginUpdatePreferenceStore pluginUpdatePreferences,
         IFileDialogService fileDialogService,
         IPluginLoader pluginLoader,
         IPluginConfigStore pluginConfigStore,
@@ -349,6 +380,10 @@ public sealed partial class SettingsViewModel : ObservableObject
         _extensionInstaller = extensionInstaller;
         _nuGetFeed = pluginRegistry;
         _packageSecurityScanner = packageSecurityScanner;
+        _pluginManifests = pluginManifests;
+        _pluginUpdateChecker = pluginUpdateChecker;
+        _pluginUpdateState = pluginUpdateState;
+        _pluginUpdatePreferences = pluginUpdatePreferences;
         _fileDialogService = fileDialogService;
         _pluginLoader = pluginLoader;
         _pluginConfigStore = pluginConfigStore;
@@ -393,8 +428,30 @@ public sealed partial class SettingsViewModel : ObservableObject
         // the user dropped into the plugins folder by hand while Settings is open.
         _pluginLoader.PluginsChanged += OnPluginsChanged;
 
+        // Plugin update preferences, seeded without re-entering the persist /
+        // re-check handlers.
+        try
+        {
+            _seedingPluginUpdatePreferences = true;
+            IncludeOnlinePrereleases = _pluginUpdatePreferences.IncludePrerelease;
+            AutoUpdatePlugins = _pluginUpdatePreferences.AutoUpdateEnabled;
+        }
+        finally
+        {
+            _seedingPluginUpdatePreferences = false;
+        }
+
+        // Seed from whatever the background poll already found, then follow it.
+        _pluginUpdateState.Changed += OnPluginUpdatesChanged;
+        ApplyPluginUpdateBanner();
+
         RefreshInstalledExtensions();
         RefreshPluginConfigs();
+
+        // Opening Settings is the moment the user asks "is anything stale?" —
+        // run a check now rather than waiting for the next poll tick. Uses the
+        // feed's cache, so repeat opens are free.
+        _ = CheckPluginUpdatesAsync();
 
         // Seed the checkbox from the registry without triggering a write-back.
         // A read failure (locked-down user hive, etc.) leaves the box
@@ -476,6 +533,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _authHealth.AuthStateChanged -= OnTenantAuthStateChanged;
         _updateService.UpdateAvailable -= OnUpdateAvailable;
         _pluginLoader.PluginsChanged -= OnPluginsChanged;
+        _pluginUpdateState.Changed -= OnPluginUpdatesChanged;
     }
 
     // Fired when PluginLoader's loaded set changes (manual drop / hot reload /
@@ -1753,11 +1811,107 @@ public sealed partial class SettingsViewModel : ObservableObject
     }
 
     // Toggling prerelease changes the server-side query, so we need a
-    // fresh fetch (not just a re-filter of cached data).
+    // fresh fetch (not just a re-filter of cached data). Persisting it also
+    // keeps the update checker's query on the same feed cache key as ours.
     partial void OnIncludeOnlinePrereleasesChanged(bool value)
     {
-        if (!IsAvailablePluginsExpanded) return;
+        if (_seedingPluginUpdatePreferences) return;
+
+        _pluginUpdatePreferences.IncludePrerelease = value;
+        if (!IsAvailablePluginsExpanded)
+        {
+            // What counts as "newer" just changed even if the browse list is
+            // collapsed — re-evaluate the installed rows.
+            _ = CheckPluginUpdatesAsync();
+            return;
+        }
         _ = FetchAvailableAsync(forceRefresh: false);
+    }
+
+    partial void OnAutoUpdatePluginsChanged(bool value)
+    {
+        if (_seedingPluginUpdatePreferences) return;
+
+        _pluginUpdatePreferences.AutoUpdateEnabled = value;
+        _logger.LogInformation("Automatic plugin updates {State}.", value ? "enabled" : "disabled");
+    }
+
+    // ─── Plugin update detection ────────────────────────────────────────
+    // Detection itself lives in IPluginUpdateChecker; this end just publishes
+    // the result into the shared state so the banner, the installed rows, and
+    // the background poll all read one source of truth.
+    private async Task CheckPluginUpdatesAsync()
+    {
+        try
+        {
+            var updates = await _pluginUpdateChecker.CheckAsync(CancellationToken.None);
+            if (updates is null) return;
+            _pluginUpdateState.Publish(updates);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Plugin update check failed.");
+        }
+    }
+
+    private void OnPluginUpdatesChanged(IReadOnlyList<PluginUpdate> updates)
+    {
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess())
+        {
+            ApplyPluginUpdateBanner();
+            RefreshInstalledExtensions();
+        }
+        else
+        {
+            dispatcher.BeginInvoke(new Action(() =>
+            {
+                ApplyPluginUpdateBanner();
+                RefreshInstalledExtensions();
+            }));
+        }
+    }
+
+    private void ApplyPluginUpdateBanner()
+    {
+        var updates = _pluginUpdateState.Available;
+        if (updates.Count == 0)
+        {
+            IsPluginUpdateAvailable = false;
+            PluginUpdateBannerText = string.Empty;
+            return;
+        }
+
+        var summary = string.Join(", ", updates.Select(u => u.SummaryLine));
+        PluginUpdateBannerText = updates.Count == 1
+            ? $"Plugin update available — {summary}. Use the Update button on the plugin's row below."
+            : $"{updates.Count} plugin updates available — {summary}. Use the Update button on each plugin's row below.";
+        IsPluginUpdateAvailable = true;
+    }
+
+    private PluginUpdate? FindUpdateFor(InstalledExtension extension)
+    {
+        var packageId = extension.PackageId ?? Path.GetFileNameWithoutExtension(extension.FileName);
+        return _pluginUpdateState.Available.FirstOrDefault(u =>
+            string.Equals(u.PackageId, packageId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    // Row-level "Update to vX.Y.Z". Runs the ordinary interactive install of a
+    // specific version, so the GHSA advisory prompt, the unsigned-plugin trust
+    // prompt, and the required-permissions notification all still fire.
+    [RelayCommand]
+    private async Task UpdateExtensionAsync(InstalledExtension? extension)
+    {
+        if (extension is null) return;
+
+        var update = FindUpdateFor(extension);
+        if (update is null)
+        {
+            ExtensionStatus = $"No update is pending for {extension.FileName}.";
+            return;
+        }
+
+        await InstallPluginVersionAsync(update.Entry, update.Latest, update);
     }
 
     // Filter is client-side over the already-fetched list — just re-apply.
@@ -1778,6 +1932,10 @@ public sealed partial class SettingsViewModel : ObservableObject
             _fetchedAvailablePlugins = results;
             OnlinePluginsStatus = string.Empty;
             RefreshAvailableList();
+
+            // The feed data we need for update detection is now cached (same
+            // query + prerelease flag), so this is effectively free.
+            await CheckPluginUpdatesAsync();
         }
         catch (Exception ex)
         {
@@ -1814,7 +1972,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         var installedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var ext in InstalledExtensions)
         {
-            var id = Path.GetFileNameWithoutExtension(ext.FileName);
+            var id = ext.PackageId ?? Path.GetFileNameWithoutExtension(ext.FileName);
             if (!string.IsNullOrEmpty(id)) installedIds.Add(id);
         }
 
@@ -1902,18 +2060,43 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
     }
 
-    // Downloads and installs the selected registry plugin (highest
-    // version offered by the registry, honoring the prerelease
-    // checkbox), then hot-loads it without requiring a restart. When
-    // the entry carries a nugetPackageId, runs a GHSA vulnerability
-    // scan against that coordinate first — High/Critical advisories
-    // trigger a Yes/No confirm; lower severities log but don't block.
+    // Downloads and installs the newest version the feed offers for the
+    // selected plugin, honoring the prerelease checkbox, then hot-loads it
+    // without requiring a restart.
     [RelayCommand]
     private async Task InstallOnlinePluginAsync(NuGetPluginEntry? entry)
     {
         if (entry is null || entry.Versions.Count == 0) return;
-        var version = entry.Versions[0]; // registry orders newest-first
 
+        // Parse and compare rather than trusting position: the NuGet v3 search
+        // response documents no ordering for a hit's versions array.
+        var version = PluginVersions.SelectLatest(entry, IncludeOnlinePrereleases);
+        if (version is null)
+        {
+            OnlinePluginsStatus = $"{entry.DisplayName} offers no installable version.";
+            return;
+        }
+
+        await InstallPluginVersionAsync(entry, version, existingInstall: null);
+    }
+
+    // Installs one specific version of a feed plugin and hot-loads it. Shared
+    // by the Available list's Install button and the installed row's "Update
+    // to vX.Y.Z" button — an update is an install of a newer version, not a
+    // separate mechanism, so both go through every gate here:
+    //   * GHSA vulnerability scan (High/Critical → Yes/No confirm),
+    //   * the unsigned-plugin trust prompt,
+    //   * the required-permissions notification after a successful load.
+    //
+    // existingInstall non-null means this is an in-place version bump. In that
+    // case the plugin's folder is snapshotted first, and a declined or failed
+    // install restores it — otherwise saying "no" to the unsigned prompt would
+    // delete the version the user was already running.
+    private async Task InstallPluginVersionAsync(
+        NuGetPluginEntry entry,
+        NuGetPluginVersion version,
+        PluginUpdate? existingInstall)
+    {
         // Tracks the vetting steps that actually ran for THIS install so
         // the unsigned-prompt can quote them accurately later. Don't
         // include claims about scans that were skipped or failed.
@@ -1922,6 +2105,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             "Discovery filter: package is tagged 'proxylayer.azuretray-plugin' on nuget.org.",
         };
 
+        PluginFolderBackup? backup = null;
         try
         {
             if (!string.IsNullOrWhiteSpace(entry.NuGetPackageId))
@@ -1981,7 +2165,16 @@ public sealed partial class SettingsViewModel : ObservableObject
                 completedChecks.Add("GHSA install-time scan: skipped (no nugetPackageId on registry entry).");
             }
 
-            OnlinePluginsStatus = $"Installing {entry.DisplayName} {version.Version}…";
+            OnlinePluginsStatus = existingInstall is null
+                ? $"Installing {entry.DisplayName} {version.Version}…"
+                : $"Updating {entry.DisplayName} {existingInstall.InstalledVersion} → {version.Version}…";
+
+            // Snapshot only exists for an in-place bump; for a fresh install
+            // there is nothing to roll back to.
+            backup = existingInstall is null
+                ? null
+                : PluginFolderBackup.TryCreate(existingInstall.InstalledDllPath, existingInstall.PackageId, _logger);
+
             var installed = await _extensionInstaller.InstallFromUrlAsync(
                 entry.Id,
                 version.DownloadUrl,
@@ -1999,8 +2192,28 @@ public sealed partial class SettingsViewModel : ObservableObject
                 completedChecks: completedChecks);
             if (trustDecision == SignatureTrustDecision.Reject)
             {
-                await CleanUpFailedInstallAsync(installed);
-                OnlinePluginsStatus = $"Install of {entry.DisplayName} {version.Version} cancelled — unsigned plugin declined.";
+                if (existingInstall is null)
+                {
+                    await CleanUpFailedInstallAsync(installed);
+                    OnlinePluginsStatus = $"Install of {entry.DisplayName} {version.Version} cancelled — unsigned plugin declined.";
+                }
+                else
+                {
+                    // Declining an UPDATE must not uninstall the plugin: put
+                    // the previous version's files back and reload them.
+                    var restored = backup is not null && backup.TryRestore();
+                    if (restored)
+                    {
+                        await _pluginLoader.LoadOrReloadAsync(existingInstall.InstalledDllPath, CancellationToken.None);
+                    }
+                    else
+                    {
+                        await CleanUpFailedInstallAsync(installed);
+                    }
+                    OnlinePluginsStatus = restored
+                        ? $"Update of {entry.DisplayName} to {version.Version} cancelled — unsigned plugin declined; v{existingInstall.InstalledVersion} kept."
+                        : $"Update of {entry.DisplayName} to {version.Version} cancelled — unsigned plugin declined, and the previous version could not be restored. Reinstall it from the Available list.";
+                }
                 RefreshInstalledExtensions();
                 return;
             }
@@ -2017,9 +2230,18 @@ public sealed partial class SettingsViewModel : ObservableObject
                 if (loaded is not null) loadedCount++;
             }
 
+            var verb = existingInstall is null ? "Installed" : "Updated";
             OnlinePluginsStatus = loadedCount > 0
-                ? $"Installed {entry.DisplayName} {version.Version} ({loadedCount} plugin(s) loaded)."
-                : $"Installed {entry.DisplayName} {version.Version} but no plugin assembly was recognised — check the trust mode and logs.";
+                ? $"{verb} {entry.DisplayName} {version.Version} ({loadedCount} plugin(s) loaded)."
+                : $"{verb} {entry.DisplayName} {version.Version} but no plugin assembly was recognised — check the trust mode and logs.";
+
+            if (existingInstall is not null)
+            {
+                // Clear the row's Update button and the banner entry now rather
+                // than waiting for the next poll.
+                _pluginUpdateState.Remove(existingInstall.PackageId);
+                ExtensionStatus = $"Updated {entry.DisplayName} to v{version.Version}.";
+            }
 
             RefreshInstalledExtensions();
             RefreshPluginConfigs();
@@ -2032,7 +2254,24 @@ public sealed partial class SettingsViewModel : ObservableObject
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to install plugin {PluginId} {Version}.", entry.Id, version.Version);
-            OnlinePluginsStatus = $"Install failed: {ex.Message}";
+
+            // A failed in-place bump gets the previous version put back so the
+            // user isn't left with a half-written plugin folder.
+            if (existingInstall is not null && backup is not null && backup.TryRestore())
+            {
+                await _pluginLoader.LoadOrReloadAsync(existingInstall.InstalledDllPath, CancellationToken.None);
+                OnlinePluginsStatus =
+                    $"Update failed: {ex.Message} — v{existingInstall.InstalledVersion} kept.";
+            }
+            else
+            {
+                OnlinePluginsStatus = $"Install failed: {ex.Message}";
+            }
+            RefreshInstalledExtensions();
+        }
+        finally
+        {
+            backup?.Dispose();
         }
     }
 
@@ -2179,6 +2418,12 @@ public sealed partial class SettingsViewModel : ObservableObject
         var pending = _extensionInstaller.ListPendingUninstalls()
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        // Newer versions found on the feed, keyed by package id. Empty until
+        // the first check completes.
+        var updatesByPackage = _pluginUpdateState.Available
+            .GroupBy(u => u.PackageId, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
         var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var dllPath in _extensionInstaller.ListInstalledDlls())
@@ -2195,6 +2440,13 @@ public sealed partial class SettingsViewModel : ObservableObject
             seenPaths.Add(fullPath);
             loadedByPath.TryGetValue(fullPath, out var loaded);
 
+            // The install manifest is the only version record that survives a
+            // DLL that fails to load, and it also carries the real package id
+            // instead of inferring it from the file name.
+            var manifest = _pluginManifests.TryReadForDll(dllPath);
+            var packageId = manifest?.PackageId ?? Path.GetFileNameWithoutExtension(fileName);
+            updatesByPackage.TryGetValue(packageId, out var update);
+
             InstalledExtensions.Add(new InstalledExtension(
                 FileName: fileName,
                 FullPath: dllPath,
@@ -2202,7 +2454,10 @@ public sealed partial class SettingsViewModel : ObservableObject
                 IsLoaded: loaded is not null,
                 PluginId: loaded?.Plugin.Id,
                 LoadedDisplayName: loaded?.Plugin.DisplayName,
-                LoadedVersion: loaded?.Plugin.Version));
+                LoadedVersion: loaded?.Plugin.Version,
+                PackageId: packageId,
+                InstalledVersion: manifest?.Version,
+                AvailableUpdateVersion: update?.LatestVersion));
         }
 
         // Surface plugins that are actually loaded but weren't surfaced by the
@@ -2217,6 +2472,10 @@ public sealed partial class SettingsViewModel : ObservableObject
             if (seenPaths.Contains(fullPath)) continue;
             if (pending.Contains(Path.GetFileName(fullPath))) continue;
 
+            var manifest = _pluginManifests.TryReadForDll(fullPath);
+            var packageId = manifest?.PackageId ?? Path.GetFileNameWithoutExtension(fullPath);
+            updatesByPackage.TryGetValue(packageId, out var update);
+
             InstalledExtensions.Add(new InstalledExtension(
                 FileName: Path.GetFileName(fullPath),
                 FullPath: fullPath,
@@ -2224,7 +2483,10 @@ public sealed partial class SettingsViewModel : ObservableObject
                 IsLoaded: true,
                 PluginId: loaded.Plugin.Id,
                 LoadedDisplayName: loaded.Plugin.DisplayName,
-                LoadedVersion: loaded.Plugin.Version));
+                LoadedVersion: loaded.Plugin.Version,
+                PackageId: packageId,
+                InstalledVersion: manifest?.Version,
+                AvailableUpdateVersion: update?.LatestVersion));
         }
 
         // The installed set just changed — re-apply the available-list

@@ -159,6 +159,7 @@ internal static class Program
         builder.Services.AddSingleton<IPluginHttpClientCore, HostPluginHttpClient>();
         builder.Services.AddSingleton<INuGetPluginFeed, NuGetPluginFeed>();
         builder.Services.AddSingleton<IPackageSecurityScanner, GhsaPackageSecurityScanner>();
+        builder.Services.AddSingleton<PluginManifestStore>();
         builder.Services.AddSingleton<IExtensionInstaller, ExtensionInstaller>();
         builder.Services.AddSingleton<IFileDialogService, FileDialogService>();
         builder.Services.AddSingleton<INotifier, NotificationService>();
@@ -294,6 +295,20 @@ internal static class Program
         // UpdateFeedOptions.CheckIntervalHours so a long-running tray
         // session still catches new releases without a restart.
         builder.Services.AddHostedService<UpdatePollingService>();
+
+        // Plugin updates. Plugins are published to nuget.org independently of
+        // the host, so Velopack's self-update says nothing about them: the
+        // checker compares installed manifests against the feed, the poll loop
+        // runs it every App:Plugins:UpdateCheckIntervalHours (0 disables), and
+        // the state object carries the result to the Settings banner and the
+        // per-plugin Update buttons. PluginAutoUpdater only ever acts when the
+        // user opted in, and refuses anything needing a user decision.
+        builder.Services.AddSingleton<PluginUpdatePreferenceStore>();
+        builder.Services.AddSingleton<PluginUpdateState>();
+        builder.Services.AddSingleton<Notifications.PluginUpdateNotifier>();
+        builder.Services.AddSingleton<IPluginUpdateChecker, PluginUpdateChecker>();
+        builder.Services.AddSingleton<PluginAutoUpdater>();
+        builder.Services.AddHostedService<PluginUpdatePollingService>();
         builder.Services.AddSingleton<IGraphMeClient, GraphMeClient>();
         builder.Services.AddSingleton<IGraphOrganizationClient, GraphOrganizationClient>();
         builder.Services.AddTransient<SettingsViewModel>();

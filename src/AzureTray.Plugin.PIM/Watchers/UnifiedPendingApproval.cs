@@ -10,6 +10,11 @@
 // when the requestor IS the signed-in user (Azure RBAC PIM will surface a
 // user's own request to themselves as eligible reviewers — Entra approval
 // policies can do the same when no other approver matches the policy).
+//
+// RequestorJustification is the reason the *requestor* typed when raising the
+// request — not the approver's decision comment on the approval step. Null or
+// blank whenever the request was raised somewhere that doesn't insist on one
+// (the Azure portal and the CLI both allow an empty justification).
 internal sealed record UnifiedPendingApproval(
     PimSource Source,
     string ApprovalId,
@@ -17,7 +22,8 @@ internal sealed record UnifiedPendingApproval(
     string RoleDisplay,
     string ScopeDisplay,
     string? ArmScope,
-    string? RequestorPrincipalId)
+    string? RequestorPrincipalId,
+    string? RequestorJustification)
 {
     public string DedupKey => $"{Source}:{ApprovalId}";
 }
