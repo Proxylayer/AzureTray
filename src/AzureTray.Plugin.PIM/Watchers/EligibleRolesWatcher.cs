@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging;
 using AzureTray.Plugin.Contracts;
 using AzureTray.Plugin.PIM.Arm;
 using AzureTray.Plugin.PIM.Graph;
+using AzureTray.Plugin.PIM.Policies;
 
 namespace AzureTray.Plugin.PIM.Watchers;
 
@@ -20,18 +21,17 @@ namespace AzureTray.Plugin.PIM.Watchers;
 // duration prompt → justification prompt → call the matching API.
 internal sealed class EligibleRolesWatcher
 {
-    private static readonly string[] DurationChoices = { "1 hour", "4 hours", "8 hours" };
-
     private readonly IGraphPimClient _graph;
     private readonly IArmPimClient _arm;
     private readonly IPluginContext _context;
     private readonly PluginTenant _tenant;
     private readonly TimeSpan _interval;
+    private readonly PendingActivationStore _pendingActivations;
 
     private Task? _loopTask;
     private CancellationTokenSource? _cts;
     private UnifiedEligibleRole[] _lastSnapshot = Array.Empty<UnifiedEligibleRole>();
-    private IReadOnlySet<string> _activeRoleNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private ActiveRoleAssignment[] _activeAssignments = Array.Empty<ActiveRoleAssignment>();
     private IReadOnlySet<string> _relevantSubscriptionIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private string? _cachedPrincipalId;
 
@@ -40,13 +40,15 @@ internal sealed class EligibleRolesWatcher
         IArmPimClient arm,
         IPluginContext context,
         PluginTenant tenant,
-        TimeSpan interval)
+        TimeSpan interval,
+        PendingActivationStore pendingActivations)
     {
         _graph = graph;
         _arm = arm;
         _context = context;
         _tenant = tenant;
         _interval = interval;
+        _pendingActivations = pendingActivations;
     }
 
     // Raised at the start and end of each PollAsync so the host can spin a
@@ -61,11 +63,23 @@ internal sealed class EligibleRolesWatcher
 
     public bool IsPolling { get; private set; }
 
-    // Display names of role assignments currently active for the signed-in user
-    // in this tenant. The menu uses this set to gray out eligible roles already
-    // activated (predecessor behavior). Sourced from Graph only — ARM eligible
-    // roles share the same name set, matching the original implementation.
-    public IReadOnlySet<string> CurrentActiveRoleNames => _activeRoleNames;
+    // Role assignments currently in force for the signed-in user in this tenant,
+    // fetched per provider (Graph for Entra ID, ARM for Azure RBAC). The menu
+    // uses these to gray out eligible roles that are already activated and to
+    // show how long each activation has left.
+    public IReadOnlyList<ActiveRoleAssignment> CurrentActiveAssignments => _activeAssignments;
+
+    // The assignment backing an eligible-role row, or null when the row is not
+    // currently active. Matched within the row's own provider — see
+    // ActiveRoleAssignment.Matches.
+    public ActiveRoleAssignment? FindActiveFor(UnifiedEligibleRole role)
+    {
+        foreach (var assignment in _activeAssignments)
+        {
+            if (assignment.Matches(role)) return assignment;
+        }
+        return null;
+    }
 
     // Subscription IDs where the signed-in user has at least one ARM eligible
     // role. PendingApprovalWatcher reads this to skip subscriptions where the
@@ -101,10 +115,17 @@ internal sealed class EligibleRolesWatcher
             var dto = JsonSerializer.Deserialize<CacheDto>(stream);
             if (dto is null) return;
 
-            _lastSnapshot = dto.Roles ?? Array.Empty<UnifiedEligibleRole>();
-            _activeRoleNames = dto.ActiveRoleNames is { Count: > 0 }
-                ? new HashSet<string>(dto.ActiveRoleNames, StringComparer.OrdinalIgnoreCase)
-                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // Deduplicated on the way in as well as on the way out: a cache file
+            // written before the collapse existed would otherwise show its
+            // duplicate rows until the first poll lands, half an hour later.
+            _lastSnapshot = dto.Roles is { Length: > 0 }
+                ? EligibleRoleDeduplicator.Deduplicate(dto.Roles).ToArray()
+                : Array.Empty<UnifiedEligibleRole>();
+            // Caches written before actives carried end times simply have no
+            // ActiveAssignments member; unknown/missing members are ignored, so
+            // a legacy file loads as "eligibility known, actives unknown" and
+            // the first poll fills them in.
+            _activeAssignments = dto.ActiveAssignments ?? Array.Empty<ActiveRoleAssignment>();
             _relevantSubscriptionIds = dto.RelevantSubscriptionIds is { Count: > 0 }
                 ? new HashSet<string>(dto.RelevantSubscriptionIds, StringComparer.OrdinalIgnoreCase)
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -131,7 +152,7 @@ internal sealed class EligibleRolesWatcher
             var dto = new CacheDto
             {
                 Roles = _lastSnapshot.ToArray(),
-                ActiveRoleNames = _activeRoleNames.ToList(),
+                ActiveAssignments = _activeAssignments.ToArray(),
                 RelevantSubscriptionIds = _relevantSubscriptionIds.ToList(),
             };
             using var stream = File.Create(CachePath);
@@ -148,7 +169,7 @@ internal sealed class EligibleRolesWatcher
     private sealed class CacheDto
     {
         public UnifiedEligibleRole[]? Roles { get; set; }
-        public List<string>? ActiveRoleNames { get; set; }
+        public ActiveRoleAssignment[]? ActiveAssignments { get; set; }
         public List<string>? RelevantSubscriptionIds { get; set; }
     }
 
@@ -200,21 +221,21 @@ internal sealed class EligibleRolesWatcher
             if (string.IsNullOrWhiteSpace(principalId))
             {
                 _lastSnapshot = Array.Empty<UnifiedEligibleRole>();
-                _activeRoleNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                _activeAssignments = Array.Empty<ActiveRoleAssignment>();
                 return;
             }
 
             var graphTask = FetchGraphAsync(principalId, cancellationToken);
             var armTask = FetchArmAsync(principalId, cancellationToken);
-            var activeTask = FetchActiveRoleNamesAsync(principalId, cancellationToken);
+            var graphActiveTask = FetchGraphActiveAssignmentsAsync(principalId, cancellationToken);
 
             var graphRoles = await graphTask.ConfigureAwait(false);
-            var armRoles = await armTask.ConfigureAwait(false);
-            var activeNames = await activeTask.ConfigureAwait(false);
+            var arm = await armTask.ConfigureAwait(false);
+            var graphActives = await graphActiveTask.ConfigureAwait(false);
 
-            _lastSnapshot = graphRoles.Concat(armRoles).ToArray();
-            _activeRoleNames = activeNames;
-            _relevantSubscriptionIds = ExtractSubscriptionIds(armRoles);
+            _lastSnapshot = graphRoles.Concat(arm.Roles).ToArray();
+            _activeAssignments = graphActives.Concat(arm.ActiveAssignments).ToArray();
+            _relevantSubscriptionIds = ExtractSubscriptionIds(arm.Roles);
             SaveToCache();
         }
         finally
@@ -250,33 +271,57 @@ internal sealed class EligibleRolesWatcher
         return slash < 0 ? remainder.ToString() : remainder[..slash].ToString();
     }
 
-    private async Task<IReadOnlySet<string>> FetchActiveRoleNamesAsync(string principalId, CancellationToken ct)
+    private async Task<List<ActiveRoleAssignment>> FetchGraphActiveAssignmentsAsync(string principalId, CancellationToken ct)
     {
         try
         {
             var actives = await _graph.ListActiveRoleAssignmentsAsync(principalId, ct).ConfigureAwait(false);
-            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var item in actives)
-            {
-                var name = item.RoleDefinition?.DisplayName;
-                if (!string.IsNullOrWhiteSpace(name))
-                {
-                    set.Add(name!);
-                }
-            }
-            return set;
+            return actives
+                .Select(a => new ActiveRoleAssignment(
+                    Source: PimSource.EntraId,
+                    RoleName: a.RoleDefinition?.DisplayName ?? "(unknown role)",
+                    RoleDefinitionId: a.RoleDefinitionId,
+                    Scope: a.DirectoryScopeId,
+                    EndDateTime: a.EndDateTime))
+                .ToList();
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
         catch (Exception ex)
         {
             _context.Logger.LogWarning(
                 ex,
-                "Active-role fetch failed for tenant {TenantId}; eligibility list will not gray out active roles this cycle.",
+                "Entra active-role fetch failed for tenant {TenantId}; eligibility list will not gray out active roles this cycle.",
                 _tenant.TenantId);
-            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return new();
+        }
+    }
+
+    private async Task<List<ActiveRoleAssignment>> FetchArmActiveAssignmentsAsync(
+        string principalId, IReadOnlyList<string> scopes, CancellationToken ct)
+    {
+        try
+        {
+            var actives = await _arm.ListActiveRoleAssignmentsAsync(principalId, scopes, ct).ConfigureAwait(false);
+            return actives
+                .Where(a => a.Properties is not null)
+                .Select(a => new ActiveRoleAssignment(
+                    Source: PimSource.AzureRbac,
+                    RoleName: a.Properties!.ExpandedProperties?.RoleDefinition?.DisplayName ?? "(unknown role)",
+                    RoleDefinitionId: a.Properties.RoleDefinitionId,
+                    Scope: a.Properties.Scope,
+                    EndDateTime: a.Properties.EndDateTime))
+                .ToList();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
+        catch (Exception ex)
+        {
+            // Caught separately from the eligibility fan-out so a failure here
+            // still leaves the ARM eligible roles listed (just not grayed out).
+            _context.Logger.LogWarning(
+                ex,
+                "ARM active-role fetch failed for tenant {TenantId}; Azure RBAC rows will not gray out this cycle.",
+                _tenant.TenantId);
+            return new();
         }
     }
 
@@ -294,15 +339,19 @@ internal sealed class EligibleRolesWatcher
                 return;
             }
 
+            // Clamped to the role's policy maximum: offering a longer duration
+            // than the policy permits earns a 400 from the service that reads
+            // as a generic activation failure.
+            var choices = ActivationDurationChoices.For(role);
             var durationChoice = await _context.Notifier.ShowAsync(
                 new ChoiceRequest(
                     Title: $"Activate {role.RoleName}",
                     Message: $"on {role.ScopeDisplay}. How long?",
-                    Choices: DurationChoices),
+                    Choices: choices.Select(c => c.Label).ToArray()),
                 cancellationToken).ConfigureAwait(false);
 
             if (durationChoice is not ChoiceResult { SelectedChoice: { } pickedLabel }
-                || !TryParseDuration(pickedLabel, out var duration))
+                || ActivationDurationChoices.Match(choices, pickedLabel) is not { } duration)
             {
                 _context.Logger.LogDebug(
                     "Activation cancelled at duration prompt for {RoleName} on tenant {TenantId}.",
@@ -325,16 +374,22 @@ internal sealed class EligibleRolesWatcher
                 return;
             }
 
+            string? status = null;
             switch (role.Source)
             {
                 case PimSource.EntraId:
-                    await _graph.ActivateRoleAsync(
+                {
+                    var created = await _graph.ActivateRoleAsync(
                         principalId,
                         role.RoleDefinitionId,
+                        EntraDirectoryScope.OrDirectory(role.DirectoryScopeId),
                         duration,
                         justText,
                         cancellationToken).ConfigureAwait(false);
+                    status = created.Status;
+                    TrackIfAwaitingApproval(role, created.Id, status);
                     break;
+                }
 
                 case PimSource.AzureRbac:
                     if (string.IsNullOrWhiteSpace(role.ArmScope))
@@ -347,13 +402,15 @@ internal sealed class EligibleRolesWatcher
                     }
                     if (string.IsNullOrWhiteSpace(role.EligibilityId))
                     {
-                        _context.Logger.LogError(
-                            "ARM role {RoleName} on tenant {TenantId} has no eligibility id; cannot activate.",
+                        // linkedRoleEligibilityScheduleId is optional on ARM's
+                        // roleAssignmentScheduleRequests contract, so a missing
+                        // one is not a reason to refuse: warn and let ARM decide
+                        // rather than leaving the row dead in the menu.
+                        _context.Logger.LogWarning(
+                            "ARM role {RoleName} on tenant {TenantId} has no eligibility id; activating without linkedRoleEligibilityScheduleId.",
                             role.RoleName, _tenant.TenantId);
-                        await NotifyActivationErrorAsync(role, $"Cannot activate — the role has no eligibility id.", ex: null, cancellationToken).ConfigureAwait(false);
-                        return;
                     }
-                    await _arm.ActivateRoleAsync(
+                    var armRequest = await _arm.ActivateRoleAsync(
                         role.ArmScope,
                         principalId,
                         role.RoleDefinitionId,
@@ -361,15 +418,23 @@ internal sealed class EligibleRolesWatcher
                         duration,
                         justText,
                         cancellationToken).ConfigureAwait(false);
+                    status = armRequest.Properties?.Status;
+                    // ARM's request id is the PUT's resource name; GetActivationStatusAsync
+                    // rebuilds the URL from it, so pass the name rather than the full id.
+                    TrackIfAwaitingApproval(role, armRequest.Name ?? LastSegment(armRequest.Id), status);
                     break;
             }
 
-            // Surface the success to the user so they know the request
-            // landed. Notification auto-dismisses (InformationRequest).
+            // Surface the outcome so the user knows the request landed, and
+            // whether it granted access outright or went to an approver.
+            // Notification auto-dismisses (InformationRequest).
+            var awaitingApproval = !ActivationStatus.IsProvisioned(status);
             _ = _context.Notifier.ShowAsync(
                 new InformationRequest(
-                    Title: $"Activated {role.RoleName}",
-                    Message: $"on {role.ScopeDisplay} for {FormatDuration(duration)}.")
+                    Title: awaitingApproval ? $"Requested {role.RoleName}" : $"Activated {role.RoleName}",
+                    Message: awaitingApproval
+                        ? $"on {role.ScopeDisplay} for {FormatDuration(duration)} — awaiting approval."
+                        : $"on {role.ScopeDisplay} for {FormatDuration(duration)}.")
                 {
                     Severity = NotificationSeverity.Success,
                 },
@@ -384,6 +449,46 @@ internal sealed class EligibleRolesWatcher
                 role.RoleName, _tenant.TenantId);
             await NotifyActivationErrorAsync(role, ExtractHeadline(ex), ex, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    // An activation that comes back already Provisioned granted access outright
+    // (no approval policy) and needs no follow-up. Anything else is sitting with
+    // an approver: record it so PendingActivationWatcher can notice the approval
+    // and get the new role claims into the access token.
+    private void TrackIfAwaitingApproval(UnifiedEligibleRole role, string? requestId, string? status)
+    {
+        if (ActivationStatus.IsProvisioned(status)) return;
+
+        if (string.IsNullOrWhiteSpace(requestId))
+        {
+            _context.Logger.LogWarning(
+                "Activation of {RoleName} on tenant {TenantId} returned status {Status} but no request id; cannot track the approval.",
+                role.RoleName, _tenant.TenantId, status);
+            return;
+        }
+
+        if (ActivationStatus.IsTerminalFailure(status))
+        {
+            _context.Logger.LogInformation(
+                "Activation of {RoleName} on tenant {TenantId} came back {Status}; not tracking.",
+                role.RoleName, _tenant.TenantId, status);
+            return;
+        }
+
+        _pendingActivations.Track(new PendingActivationRequest(
+            Source: role.Source,
+            RequestId: requestId!,
+            RoleName: role.RoleName,
+            ScopeDisplay: role.ScopeDisplay,
+            ArmScope: role.ArmScope,
+            SubmittedAt: DateTimeOffset.UtcNow));
+    }
+
+    private static string? LastSegment(string? resourceId)
+    {
+        if (string.IsNullOrWhiteSpace(resourceId)) return null;
+        var last = resourceId.LastIndexOf('/');
+        return last >= 0 && last < resourceId.Length - 1 ? resourceId[(last + 1)..] : resourceId;
     }
 
     internal async Task HandleDeactivationAsync(UnifiedEligibleRole role, CancellationToken cancellationToken)
@@ -422,6 +527,7 @@ internal sealed class EligibleRolesWatcher
                     await _graph.DeactivateRoleAsync(
                         principalId,
                         role.RoleDefinitionId,
+                        EntraDirectoryScope.OrDirectory(role.DirectoryScopeId),
                         justification,
                         cancellationToken).ConfigureAwait(false);
                     break;
@@ -548,11 +654,31 @@ internal sealed class EligibleRolesWatcher
         return rows;
     }
 
-    private static string FormatDuration(TimeSpan d)
+    internal static string FormatDuration(TimeSpan d)
     {
         if (d.TotalMinutes < 60) return $"{(int)d.TotalMinutes} min";
         if (d.TotalHours < 24) return d.Minutes == 0 ? $"{(int)d.TotalHours}h" : $"{(int)d.TotalHours}h {d.Minutes}m";
         return $"{(int)d.TotalDays}d";
+    }
+
+    // Countdown label for an activation's end time, computed when the menu is
+    // built (the host rebuilds every item on each tray click, so it is accurate
+    // at open and does not tick). Returns null when the end time has already
+    // passed — callers fall back to the bare "active" marker rather than ever
+    // rendering a negative duration.
+    internal static string? FormatRemaining(DateTimeOffset end)
+    {
+        var remaining = end - DateTimeOffset.UtcNow;
+        if (remaining <= TimeSpan.Zero) return null;
+        if (remaining < TimeSpan.FromMinutes(1)) return "< 1m left";
+        if (remaining.TotalHours < 1) return $"{(int)remaining.TotalMinutes}m left";
+        if (remaining.TotalDays < 1)
+        {
+            return remaining.Minutes == 0
+                ? $"{(int)remaining.TotalHours}h left"
+                : $"{(int)remaining.TotalHours}h {remaining.Minutes}m left";
+        }
+        return $"{(int)remaining.TotalDays}d left";
     }
 
     private async Task<string?> GetPrincipalIdAsync(CancellationToken ct)
@@ -578,16 +704,22 @@ internal sealed class EligibleRolesWatcher
         try
         {
             var schedules = await _graph.ListEligibleRolesAsync(principalId, ct).ConfigureAwait(false);
-            return schedules
+
+            // Collapsed before the caps are attached, so the policy join runs
+            // once per distinct row rather than once per grant path.
+            var roles = EligibleRoleDeduplicator.Deduplicate(schedules
                 .Where(s => !string.IsNullOrWhiteSpace(s.RoleDefinitionId))
                 .Select(s => new UnifiedEligibleRole(
                     Source: PimSource.EntraId,
                     RoleName: s.RoleDefinition?.DisplayName ?? "(unknown role)",
                     RoleDefinitionId: s.RoleDefinitionId!,
-                    ScopeDisplay: "Entra ID directory",
+                    ScopeDisplay: EntraDirectoryScope.DisplayFor(s.DirectoryScopeId),
                     ArmScope: null,
-                    EligibilityId: s.Id))
-                .ToList();
+                    EligibilityId: s.Id,
+                    MemberType: s.MemberType,
+                    DirectoryScopeId: s.DirectoryScopeId)));
+
+            return await AttachEntraCapsAsync(roles, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
         catch (Exception ex)
@@ -600,22 +732,35 @@ internal sealed class EligibleRolesWatcher
         }
     }
 
-    private async Task<List<UnifiedEligibleRole>> FetchArmAsync(string principalId, CancellationToken ct)
+    // Eligibility and active assignments come from the same subscription list,
+    // so they are fetched together rather than enumerating subscriptions twice.
+    private sealed record ArmPollResult(
+        List<UnifiedEligibleRole> Roles,
+        List<ActiveRoleAssignment> ActiveAssignments)
+    {
+        public static ArmPollResult Empty() => new(new(), new());
+    }
+
+    private async Task<ArmPollResult> FetchArmAsync(string principalId, CancellationToken ct)
     {
         try
         {
             var subs = await _arm.ListSubscriptionsAsync(ct).ConfigureAwait(false);
-            if (subs.Count == 0) return new();
+            if (subs.Count == 0) return ArmPollResult.Empty();
 
             var scopes = subs
                 .Where(s => !string.IsNullOrWhiteSpace(s.SubscriptionId))
                 .Select(s => $"/subscriptions/{s.SubscriptionId}")
                 .ToList();
-            if (scopes.Count == 0) return new();
+            if (scopes.Count == 0) return ArmPollResult.Empty();
 
             var schedules = await _arm.ListEligibleRolesAsync(principalId, scopes, ct).ConfigureAwait(false);
 
-            return schedules
+            // One management-group-scoped eligibility comes back once per
+            // subscription beneath it (the fan-out queries each subscription and
+            // ARM includes inherited eligibilities), so the collapse happens
+            // before the caps are attached — same key the policy lookup uses.
+            var roles = EligibleRoleDeduplicator.Deduplicate(schedules
                 .Where(s => !string.IsNullOrWhiteSpace(s.Properties?.RoleDefinitionId))
                 .Select(s => new UnifiedEligibleRole(
                     Source: PimSource.AzureRbac,
@@ -623,29 +768,121 @@ internal sealed class EligibleRolesWatcher
                     RoleDefinitionId: s.Properties.RoleDefinitionId!,
                     ScopeDisplay: s.Properties.ExpandedProperties?.Scope?.DisplayName ?? s.Properties.Scope ?? "(unknown scope)",
                     ArmScope: s.Properties.Scope,
-                    EligibilityId: s.Id))
-                .ToList();
+                    EligibilityId: s.Id,
+                    MemberType: s.Properties.MemberType)));
+
+            var actives = await FetchArmActiveAssignmentsAsync(principalId, scopes, ct).ConfigureAwait(false);
+            return new ArmPollResult(await AttachArmCapsAsync(roles, ct).ConfigureAwait(false), actives);
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return ArmPollResult.Empty(); }
         catch (Exception ex)
         {
             _context.Logger.LogWarning(
                 ex,
                 "ARM eligible-role fetch failed for tenant {TenantId}; continuing with Graph only.",
                 _tenant.TenantId);
-            return new();
+            return ArmPollResult.Empty();
         }
     }
 
-    private static bool TryParseDuration(string label, out TimeSpan duration)
+    // One request per poll cycle for every directory-scoped role's policy — not
+    // one per role. A failure (403 for a user without a policy-reading directory
+    // role, or any transport error) leaves the caps at their last known value,
+    // and Entra roles then clamp to the service's documented 8-hour ceiling.
+    private async Task<List<UnifiedEligibleRole>> AttachEntraCapsAsync(
+        List<UnifiedEligibleRole> roles, CancellationToken ct)
     {
-        duration = label switch
+        if (roles.Count == 0) return roles;
+
+        IReadOnlyDictionary<string, RolePolicy>? policies = null;
+        try
         {
-            "1 hour" => TimeSpan.FromHours(1),
-            "4 hours" => TimeSpan.FromHours(4),
-            "8 hours" => TimeSpan.FromHours(8),
-            _ => TimeSpan.Zero,
-        };
-        return duration > TimeSpan.Zero;
+            policies = await _graph.GetRolePoliciesAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _context.Logger.LogWarning(
+                ex,
+                "Entra PIM policy read failed for tenant {TenantId}; activation durations fall back to the last known caps.",
+                _tenant.TenantId);
+        }
+
+        for (var i = 0; i < roles.Count; i++)
+        {
+            TimeSpan? cap = null;
+            if (policies is not null
+                && policies.TryGetValue(roles[i].RoleDefinitionId, out var policy))
+            {
+                cap = policy.MaxActivationDuration;
+            }
+            roles[i] = roles[i] with { MaxActivationDuration = CarryForwardCap(roles[i], cap) };
+        }
+        return roles;
+    }
+
+    // Read at the scopes the user actually holds eligibility on (typically a
+    // handful) rather than every subscription in the tenant, and in one request
+    // per scope covering all roles there — the effective rules come back inline
+    // on the policy assignments, so no per-role follow-up is needed.
+    private async Task<List<UnifiedEligibleRole>> AttachArmCapsAsync(
+        List<UnifiedEligibleRole> roles, CancellationToken ct)
+    {
+        var policyScopes = roles
+            .Select(r => r.ArmScope)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (policyScopes.Count == 0) return roles;
+
+        IReadOnlyDictionary<ArmRolePolicyKey, RolePolicy>? policies = null;
+        try
+        {
+            policies = await _arm.GetRolePoliciesAsync(policyScopes, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _context.Logger.LogWarning(
+                ex,
+                "ARM PIM policy read failed for tenant {TenantId}; Azure RBAC activation durations fall back to the last known caps.",
+                _tenant.TenantId);
+        }
+
+        for (var i = 0; i < roles.Count; i++)
+        {
+            TimeSpan? cap = null;
+            if (policies is not null
+                && policies.TryGetValue(
+                    ArmRolePolicyKey.For(roles[i].ArmScope, roles[i].RoleDefinitionId),
+                    out var policy))
+            {
+                cap = policy.MaxActivationDuration;
+            }
+            roles[i] = roles[i] with { MaxActivationDuration = CarryForwardCap(roles[i], cap) };
+        }
+        return roles;
+    }
+
+    // Policy reads are best-effort: a user who holds none of the directory
+    // roles that permit reading PIM policies gets a 403, and that must not
+    // break the menu or block activation. When the cap for a role cannot be
+    // read this cycle, keep whatever the last successful cycle knew rather
+    // than downgrading a known cap to "unknown".
+    private TimeSpan? CarryForwardCap(UnifiedEligibleRole role, TimeSpan? fetched)
+    {
+        if (fetched is not null) return fetched;
+
+        foreach (var previous in _lastSnapshot)
+        {
+            if (previous.Source == role.Source
+                && string.Equals(previous.RoleDefinitionId, role.RoleDefinitionId, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(previous.ArmScope, role.ArmScope, StringComparison.OrdinalIgnoreCase))
+            {
+                return previous.MaxActivationDuration;
+            }
+        }
+        return null;
     }
 }

@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using AzureTray.Plugin.PIM.Arm.Dto;
 using AzureTray.Plugin.PIM.Graph;
+using AzureTray.Plugin.PIM.Policies;
 
 namespace AzureTray.Plugin.PIM.Arm;
 
@@ -23,14 +24,27 @@ internal interface IArmPimClient
     Task<IReadOnlyList<ArmEligibilitySchedule>> ListEligibleRolesAsync(
         string principalId, IEnumerable<string> scopes, CancellationToken cancellationToken);
 
-    Task<bool?> CheckApprovalRequiredAsync(
-        string scope, string roleDefinitionId, CancellationToken cancellationToken);
+    // Role assignments currently in force for the principal at (or inherited
+    // above) each scope. Carries the endDateTime an activation lapses at.
+    Task<IReadOnlyList<ArmRoleAssignmentScheduleInstance>> ListActiveRoleAssignmentsAsync(
+        string principalId, IEnumerable<string> scopes, CancellationToken cancellationToken);
 
+    // Activation policy for every role assigned a policy at each of the given
+    // scopes — one request per scope, covering all roles at that scope. Keyed
+    // by scope + role definition id because the same role can carry different
+    // policies at different scopes. Entries absent from the result have no
+    // readable policy: "unknown", not "unrestricted".
+    Task<IReadOnlyDictionary<ArmRolePolicyKey, RolePolicy>> GetRolePoliciesAsync(
+        IEnumerable<string> scopes, CancellationToken cancellationToken);
+
+    // linkedRoleEligibilityScheduleId is optional on ARM's contract: pass null
+    // (or blank) when the eligibility row carries no usable id and let ARM match
+    // the request against the principal's eligibility itself.
     Task<ArmRoleAssignmentScheduleRequest> ActivateRoleAsync(
         string scope,
         string principalId,
         string roleDefinitionId,
-        string linkedRoleEligibilityScheduleId,
+        string? linkedRoleEligibilityScheduleId,
         TimeSpan duration,
         string justification,
         CancellationToken cancellationToken);

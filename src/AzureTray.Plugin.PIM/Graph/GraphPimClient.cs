@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using AzureTray.Plugin.PIM.Dto;
+using AzureTray.Plugin.PIM.Policies;
 using AzureTray.Plugin.Contracts;
 
 namespace AzureTray.Plugin.PIM.Graph;
@@ -17,6 +18,8 @@ namespace AzureTray.Plugin.PIM.Graph;
 internal sealed class GraphPimClient : IGraphPimClient
 {
     private const string DirectoryScope = "/";
+    private const string EndUserExpirationRuleId = "Expiration_EndUser_Assignment";
+    private const string EndUserApprovalRuleId = "Approval_EndUser_Assignment";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -78,31 +81,80 @@ internal sealed class GraphPimClient : IGraphPimClient
         return await GetAllPagesAsync<EntraScheduleRequest>(url, cancellationToken);
     }
 
-    public async Task<bool?> CheckApprovalRequiredAsync(
-        string roleDefinitionId, CancellationToken cancellationToken)
+    // One request covers the whole tenant: every directory-scoped policy
+    // assignment, each with its policy's effective rules expanded, keyed by the
+    // role definition id the assignment names (a bare GUID for Graph, so it
+    // joins straight to an eligible role's RoleDefinitionId). The nested
+    // $select matters — each policy carries 17 rules and we read four fields.
+    //
+    // Requires the signed-in user to hold a directory role that permits
+    // reading policies (Global Reader, Security Reader/Operator/Administrator,
+    // Privileged Role Administrator); users with none get a 403. That throws
+    // out of here and the caller degrades to "cap unknown".
+    public async Task<IReadOnlyDictionary<string, RolePolicy>> GetRolePoliciesAsync(
+        CancellationToken cancellationToken)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(roleDefinitionId);
-
-        var assignmentUrl =
+        var url =
             "v1.0/policies/roleManagementPolicyAssignments" +
-            $"?$filter=scopeId eq '/' and scopeType eq 'Directory' and roleDefinitionId eq '{roleDefinitionId}'";
+            $"?$filter=scopeId eq '{DirectoryScope}' and scopeType eq 'Directory'" +
+            "&$expand=policy($expand=effectiveRules($select=id,maximumDuration,isExpirationRequired,setting))";
 
-        var assignments = await GetAllPagesAsync<EntraPolicyAssignment>(assignmentUrl, cancellationToken);
-        var policyId = assignments.FirstOrDefault()?.PolicyId;
-        if (string.IsNullOrWhiteSpace(policyId))
+        var assignments = await GetAllPagesAsync<EntraPolicyAssignment>(url, cancellationToken);
+
+        var policies = new Dictionary<string, RolePolicy>(StringComparer.OrdinalIgnoreCase);
+        foreach (var assignment in assignments)
         {
-            _logger.LogDebug("No policy assignment found for role {RoleId} in tenant {TenantId}.", roleDefinitionId, _tenantId);
-            return null;
+            var roleDefinitionId = assignment.RoleDefinitionId;
+            if (string.IsNullOrWhiteSpace(roleDefinitionId)) continue;
+
+            var rules = assignment.Policy?.EffectiveRules;
+            if (rules is null) continue;
+
+            policies[roleDefinitionId] = new RolePolicy(
+                ApprovalRequired: ReadApprovalRequired(rules),
+                MaxActivationDuration: ReadMaxActivationDuration(rules));
         }
 
-        var ruleUrl = $"v1.0/policies/roleManagementPolicies/{policyId}/rules/Approval_EndUser_Assignment";
-        var rule = await GetJsonAsync<EntraApprovalRule>(ruleUrl, cancellationToken);
+        _logger.LogDebug(
+            "Read {PolicyCount} Entra role policies for tenant {TenantId} from {AssignmentCount} assignment(s).",
+            policies.Count, _tenantId, assignments.Count);
+
+        return policies;
+    }
+
+    // Expiration_EndUser_Assignment is the only rule that governs a user
+    // self-activating an eligible role. The other expiration rules
+    // (Expiration_Admin_Eligibility, Expiration_Admin_Assignment) are
+    // days-scale admin caps and must never stand in for it.
+    private static TimeSpan? ReadMaxActivationDuration(List<EntraPolicyRule> rules)
+    {
+        var rule = rules.FirstOrDefault(r =>
+            string.Equals(r.Id, EndUserExpirationRuleId, StringComparison.OrdinalIgnoreCase)
+            && IsRuleType(r.ODataType, "unifiedRoleManagementPolicyExpirationRule"));
+
+        return Iso8601Duration.TryParse(rule?.MaximumDuration);
+    }
+
+    private static bool? ReadApprovalRequired(List<EntraPolicyRule> rules)
+    {
+        var rule = rules.FirstOrDefault(r =>
+            string.Equals(r.Id, EndUserApprovalRuleId, StringComparison.OrdinalIgnoreCase)
+            && IsRuleType(r.ODataType, "unifiedRoleManagementPolicyApprovalRule"));
+
         return rule?.Setting?.IsApprovalRequired;
     }
+
+    // @odata.type is a corroborating check only: a $select'd expansion may omit
+    // it, and the rule ids are unique within a policy, so an absent type is
+    // accepted rather than treated as a mismatch.
+    private static bool IsRuleType(string? odataType, string expected)
+        => string.IsNullOrWhiteSpace(odataType)
+            || odataType.Contains(expected, StringComparison.OrdinalIgnoreCase);
 
     public async Task<EntraScheduleRequest> ActivateRoleAsync(
         string principalId,
         string roleDefinitionId,
+        string? directoryScopeId,
         TimeSpan duration,
         string justification,
         CancellationToken cancellationToken)
@@ -120,7 +172,7 @@ internal sealed class GraphPimClient : IGraphPimClient
             action = "selfActivate",
             principalId,
             roleDefinitionId,
-            directoryScopeId = DirectoryScope,
+            directoryScopeId = NormalizeDirectoryScope(directoryScopeId),
             justification,
             scheduleInfo = new
             {
@@ -150,15 +202,23 @@ internal sealed class GraphPimClient : IGraphPimClient
         }
 
         _logger.LogInformation(
-            "Submitted self-activation {RequestId} for role {RoleId} on tenant {TenantId} ({Status}).",
-            created.Id, roleDefinitionId, _tenantId, created.Status);
+            "Submitted self-activation {RequestId} for role {RoleId} at scope {DirectoryScopeId} on tenant {TenantId} ({Status}).",
+            created.Id, roleDefinitionId, NormalizeDirectoryScope(directoryScopeId), _tenantId, created.Status);
 
         return created;
     }
 
+    // Every eligibility carries a directoryScopeId, but a cache file written
+    // before the plugin persisted it, or a response that omitted it, leaves the
+    // caller with nothing — fall back to the directory-wide scope, which is what
+    // the plugin sent unconditionally before.
+    private static string NormalizeDirectoryScope(string? directoryScopeId)
+        => string.IsNullOrWhiteSpace(directoryScopeId) ? DirectoryScope : directoryScopeId.Trim();
+
     public async Task<EntraScheduleRequest> DeactivateRoleAsync(
         string principalId,
         string roleDefinitionId,
+        string? directoryScopeId,
         string justification,
         CancellationToken cancellationToken)
     {
@@ -173,7 +233,7 @@ internal sealed class GraphPimClient : IGraphPimClient
             action = "selfDeactivate",
             principalId,
             roleDefinitionId,
-            directoryScopeId = DirectoryScope,
+            directoryScopeId = NormalizeDirectoryScope(directoryScopeId),
             justification = string.IsNullOrWhiteSpace(justification) ? null : justification,
         };
 

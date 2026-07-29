@@ -72,7 +72,15 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         lock (_watcherLock) return _watchersByTenant.Values.Select(w => w.Eligible).ToArray();
     }
 
-    private sealed record TenantWatchers(PendingApprovalWatcher Pending, EligibleRolesWatcher Eligible);
+    private PendingActivationWatcher[] ActivationWatchersSnapshot()
+    {
+        lock (_watcherLock) return _watchersByTenant.Values.Select(w => w.Activations).ToArray();
+    }
+
+    private sealed record TenantWatchers(
+        PendingApprovalWatcher Pending,
+        EligibleRolesWatcher Eligible,
+        PendingActivationWatcher Activations);
 
     public string Id => "net.proxylayer.AzureTray.Plugin.PIM";
 
@@ -225,7 +233,6 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
 
         target.Add(new PluginMenuItem($"    — {sourceLabel} —", IsEnabled: false));
 
-        var activeNames = watcher.CurrentActiveRoleNames;
         foreach (var role in roles)
         {
             var r = role;
@@ -238,10 +245,11 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
                 Text: "Copy role name",
                 Invoke: () => _context?.Clipboard.SetText(r.RoleName));
 
-            if (activeNames.Contains(r.RoleName))
+            var active = watcher.FindActiveFor(r);
+            if (active is not null)
             {
                 target.Add(new PluginMenuItem(
-                    Text: $"    {r.RoleName}  ({r.ScopeDisplay})  ✓ active",
+                    Text: $"    {r.RoleName}  ({r.ScopeDisplay})  {ActiveMarker(active)}",
                     IsEnabled: false,
                     ContextItems: new[]
                     {
@@ -254,11 +262,35 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             else
             {
                 target.Add(new PluginMenuItem(
-                    Text: $"    {r.RoleName}  ({r.ScopeDisplay})",
+                    Text: $"    {r.RoleName}  ({r.ScopeDisplay}){CapMarker(r)}",
                     Invoke: () => _ = watcher.HandleActivationAsync(r, CancellationToken.None),
                     ContextItems: new[] { copyName }));
             }
         }
+    }
+
+    // Right-hand info on a menu row is baked into the row's Text — the host's
+    // row layout has no separate slot for it. Rows with a known end time get a
+    // countdown, computed now: the host rebuilds every item on each tray click,
+    // so the value is accurate when the menu opens and never ticks stale in
+    // place. Permanent assignments (and any end time already past) keep the
+    // bare marker.
+    // Suffix on an eligible (inactive) row when the role's PIM policy caps
+    // activation tighter than the longest duration otherwise offered — the row
+    // then reads "Reader  (Dev sub)  ·  max 2h". Roles with no known cap, or a
+    // cap that doesn't restrict the choices, get nothing so the list stays quiet.
+    private static string CapMarker(UnifiedEligibleRole role)
+    {
+        var hint = ActivationDurationChoices.CapHint(role);
+        return hint is null ? string.Empty : $"  ·  max {hint}";
+    }
+
+    private static string ActiveMarker(ActiveRoleAssignment active)
+    {
+        var remaining = active.EndDateTime is { } end
+            ? EligibleRolesWatcher.FormatRemaining(end)
+            : null;
+        return remaining is null ? "✓ active" : $"✓ active · {remaining}";
     }
 
     // Tests exposed to the host's admin Test Runner.
@@ -294,6 +326,21 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
                 }
                 return PluginTestResult.Pass($"Polled {watchers.Length} tenant(s); {total} eligible role(s) total.");
             }),
+        new PluginTest(
+            "Force pending-activation poll",
+            "Triggers PendingActivationWatcher.PollAsync for every tracked tenant — checks the signed-in user's own activation requests for approval.",
+            async ct =>
+            {
+                var watchers = ActivationWatchersSnapshot();
+                if (watchers.Length == 0) return PluginTestResult.Fail("No tenants tracked.");
+                var total = 0;
+                foreach (var w in watchers)
+                {
+                    await w.PollAsync(ct).ConfigureAwait(false);
+                    total += w.TrackedCount;
+                }
+                return PluginTestResult.Pass($"Polled {watchers.Length} tenant(s); {total} activation(s) still awaiting approval.");
+            }),
     };
 
     public Task InitializeAsync(IPluginContext context, CancellationToken cancellationToken)
@@ -328,7 +375,7 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
     // gains a feature this plugin wants to use conditionally, bump this and gate
     // the feature on `host >= ValidatedAgainstHost` (or a feature-specific
     // minimum) right where you'd call it.
-    private static readonly System.Version ValidatedAgainstHost = new(0, 6, 0);
+    private static readonly System.Version ValidatedAgainstHost = new(0, 8, 0);
 
     private static void LogHostCompatibility(IPluginContext context)
     {
@@ -371,9 +418,15 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             var graph = new GraphPimClient(_context, tenant.TenantId);
             var arm = new ArmPimClient(_context, tenant.TenantId);
 
+            // Activations awaiting an approver are recorded here by the
+            // eligibility watcher and polled by the activation watcher, so the
+            // store is created first and shared by both.
+            var pendingActivations = new PendingActivationStore(_context, tenant);
+
             // Eligibility runs first so its subscription set is available to
             // the pending watcher's relevant-subs filter (captured by Func).
-            var eligible = new EligibleRolesWatcher(graph, arm, _context, tenant, EligiblePollInterval);
+            var eligible = new EligibleRolesWatcher(
+                graph, arm, _context, tenant, EligiblePollInterval, pendingActivations);
             eligible.PollStarted += OnWatcherPollStarted;
             eligible.PollCompleted += OnWatcherPollCompleted;
             eligible.Start(_lifetimeCts.Token);
@@ -385,7 +438,13 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             pending.PollCompleted += OnWatcherPollCompleted;
             pending.Start(_lifetimeCts.Token);
 
-            _watchersByTenant[tenant.TenantId] = new TenantWatchers(pending, eligible);
+            var activations = new PendingActivationWatcher(
+                graph, arm, _context, tenant, PendingPollInterval, pendingActivations,
+                refreshActiveRoles: ct => eligible.PollAsync(ct));
+            activations.ActivationProvisioned += OnActivationProvisioned;
+            activations.Start(_lifetimeCts.Token);
+
+            _watchersByTenant[tenant.TenantId] = new TenantWatchers(pending, eligible, activations);
             _context.Logger.LogInformation(
                 "Started PIM watchers for tenant {TenantId} ({DisplayName}).",
                 tenant.TenantId, tenant.DisplayName);
@@ -406,9 +465,11 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         entry.Pending.PollCompleted -= OnWatcherPollCompleted;
         entry.Eligible.PollStarted -= OnWatcherPollStarted;
         entry.Eligible.PollCompleted -= OnWatcherPollCompleted;
+        entry.Activations.ActivationProvisioned -= OnActivationProvisioned;
 
         await entry.Pending.StopAsync().ConfigureAwait(false);
         await entry.Eligible.StopAsync().ConfigureAwait(false);
+        await entry.Activations.StopAsync().ConfigureAwait(false);
 
         _context?.Logger.LogInformation("Stopped PIM watchers for tenant {TenantId}.", tenantId);
         MenuChanged?.Invoke();
@@ -417,6 +478,14 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
     // Plugin fires MenuChanged on the state transitions (busy → idle, idle →
     // busy). The host's spinner timer handles per-frame animation in place
     // so the rest of the menu stays still.
+    // An approved activation changes both the role rows and (potentially) the
+    // pending-approval roll-up, so refresh the menu and the tray badge.
+    private void OnActivationProvisioned()
+    {
+        MenuChanged?.Invoke();
+        BadgeChanged?.Invoke();
+    }
+
     private void OnWatcherPollStarted() => MenuChanged?.Invoke();
     private void OnWatcherPollCompleted()
     {
@@ -448,8 +517,10 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             entry.Pending.PollCompleted -= OnWatcherPollCompleted;
             entry.Eligible.PollStarted -= OnWatcherPollStarted;
             entry.Eligible.PollCompleted -= OnWatcherPollCompleted;
+            entry.Activations.ActivationProvisioned -= OnActivationProvisioned;
             await entry.Pending.StopAsync().ConfigureAwait(false);
             await entry.Eligible.StopAsync().ConfigureAwait(false);
+            await entry.Activations.StopAsync().ConfigureAwait(false);
         }
 
         _context = null;

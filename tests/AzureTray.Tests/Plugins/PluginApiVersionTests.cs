@@ -33,10 +33,23 @@ public sealed class PluginApiVersionTests
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
     public void IsSupported_AcceptsKnownShippedVersions(int apiVersion)
     {
-        // API 1 (initial) and API 2 (current) plugins must both load — the
-        // contract surface evolved additively between them.
+        // Every shipped API version must still load — the contract surface has
+        // only ever evolved additively (API 4 added
+        // IPluginContext.RefreshTokenAsync as a default-implemented member).
         Assert.True(PluginApiVersion.IsSupported(apiVersion));
+    }
+
+    // Pinned deliberately: bumping Current is an intentional act that should
+    // come with a contract change, and raising MinSupported locks out shipped
+    // plugins, so both values are asserted rather than derived.
+    [Fact]
+    public void Current_IsFour_AndMinSupportedIsStillOne()
+    {
+        Assert.Equal(4, PluginApiVersion.Current);
+        Assert.Equal(1, PluginApiVersion.MinSupported);
     }
 }

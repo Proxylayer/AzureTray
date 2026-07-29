@@ -177,6 +177,7 @@ internal static class Program
             sp.GetRequiredService<IPluginSignatureVerifier>(),
             sp.GetRequiredService<IOptions<PluginOptions>>(),
             sp.GetRequiredService<IPluginHttpClientCore>(),
+            sp.GetRequiredService<ICredentialFactory>(),
             sp.GetRequiredService<INotifier>(),
             sp.GetRequiredService<IClipboard>(),
             sp.GetRequiredService<ITenantStore>(),

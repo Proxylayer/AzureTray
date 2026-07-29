@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
 using AzureTray;
+using AzureTray.Auth;
 using AzureTray.AzureCloud;
 using AzureTray.Configuration;
 using AzureTray.Extensions;
@@ -86,6 +87,7 @@ public sealed class PluginLoaderTests : IDisposable
             NullLogger<AuthenticodePluginSignatureVerifier>.Instance);
 
         var http = Substitute.For<IPluginHttpClientCore>();
+        var credentials = Substitute.For<ICredentialFactory>();
         var notifier = Substitute.For<INotifier>();
         var clipboard = Substitute.For<IClipboard>();
         var tenantStore = Substitute.For<ITenantStore>();
@@ -99,6 +101,6 @@ public sealed class PluginLoaderTests : IDisposable
         configStore.IsTenantEnabledFor(Arg.Any<string>(), Arg.Any<string>()).Returns(true);
         configStore.GetOptions(Arg.Any<string>()).Returns(new System.Collections.Generic.Dictionary<string, object?>());
 
-        return new PluginLoader(paths, verifier, options, http, notifier, clipboard, tenantStore, cloud, installer, readiness, configStore, NullLoggerFactory.Instance);
+        return new PluginLoader(paths, verifier, options, http, credentials, notifier, clipboard, tenantStore, cloud, installer, readiness, configStore, NullLoggerFactory.Instance);
     }
 }

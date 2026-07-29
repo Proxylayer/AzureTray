@@ -1,8 +1,13 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Interop;
@@ -38,6 +43,15 @@ public sealed class CredentialFactory : ICredentialFactory
     private readonly ConcurrentDictionary<string, AuthenticationRecord> _authRecords
         = new(StringComparer.OrdinalIgnoreCase);
 
+    // ForceRefreshAsync serializes per tenant and ignores repeat calls that
+    // arrive right behind a successful one — several approvals landing in the
+    // same poll shouldn't mean several STS round-trips.
+    private static readonly TimeSpan ForceRefreshCooldown = TimeSpan.FromSeconds(30);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _refreshGates
+        = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _lastForcedRefresh
+        = new(StringComparer.OrdinalIgnoreCase);
+
     public CredentialFactory(
         IOptions<AuthOptions> options,
         ITenantStore tenantStore,
@@ -65,6 +79,171 @@ public sealed class CredentialFactory : ICredentialFactory
             disposable.Dispose();
         }
     }
+
+    public async Task<bool> ForceRefreshAsync(
+        string tenantId, IReadOnlyList<string> scopes, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(tenantId);
+        ArgumentNullException.ThrowIfNull(scopes);
+
+        var targets = scopes
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (targets.Length == 0) return false;
+
+        // One refresh at a time per tenant. Several plugins (or several
+        // approvals landing together) can ask concurrently; the gate plus the
+        // cooldown collapse that into a single round-trip to the STS.
+        var gate = _refreshGates.GetOrAdd(tenantId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_lastForcedRefresh.TryGetValue(tenantId, out var last)
+                && DateTimeOffset.UtcNow - last < ForceRefreshCooldown)
+            {
+                _logger.LogDebug(
+                    "Token force-refresh for tenant {TenantId} skipped: one completed {SecondsAgo:F0}s ago.",
+                    tenantId, (DateTimeOffset.UtcNow - last).TotalSeconds);
+                return true;
+            }
+
+            var refreshedAny = false;
+            foreach (var scope in targets)
+            {
+                refreshedAny |= await ForceRefreshScopeAsync(tenantId, scope, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (refreshedAny) _lastForcedRefresh[tenantId] = DateTimeOffset.UtcNow;
+            return refreshedAny;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    // Acquires one scope's token twice: once normally (which serves whatever
+    // MSAL has cached) and once with a claims challenge, which MSAL treats as
+    // "skip the access-token cache" and satisfies from the refresh token — so
+    // the STS re-issues the token with the account's current claims. The two
+    // tokens are compared by hash, never logged, so the caller can tell a real
+    // refresh from a cache hit.
+    private async Task<bool> ForceRefreshScopeAsync(string tenantId, string scope, CancellationToken ct)
+    {
+        string[] scopeArray = [scope];
+
+        var credential = GetForTenant(tenantId);
+        string beforeHash;
+        try
+        {
+            var before = await credential.GetTokenAsync(new TokenRequestContext(scopeArray), ct)
+                .ConfigureAwait(false);
+            beforeHash = HashToken(before.Token);
+        }
+        catch (AuthenticationRequiredException)
+        {
+            _logger.LogInformation(
+                "Token force-refresh for tenant {TenantId} skipped: no silently usable token for {Scope} (re-auth needed).",
+                tenantId, scope);
+            return false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "Token force-refresh for tenant {TenantId} could not read the current token for {Scope}.",
+                tenantId, scope);
+            return false;
+        }
+
+        // First attempt: claims challenge on the existing credential.
+        if (await TryAcquireBypassingCacheAsync(credential, tenantId, scopeArray, beforeHash, ct).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        // Second attempt: rebuild the credential (fresh MSAL client over the
+        // same persisted cache) and challenge again. This covers the case where
+        // the in-memory client, not the persisted cache, is what pinned the
+        // stale token.
+        Rebuild(tenantId);
+        if (await TryAcquireBypassingCacheAsync(GetForTenant(tenantId), tenantId, scopeArray, beforeHash, ct).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        _logger.LogWarning(
+            "Token force-refresh for tenant {TenantId} scope {Scope} returned the same token; new claims will only appear when the cached token rolls over.",
+            tenantId, scope);
+        return false;
+    }
+
+    private async Task<bool> TryAcquireBypassingCacheAsync(
+        TokenCredential credential,
+        string tenantId,
+        string[] scopeArray,
+        string beforeHash,
+        CancellationToken ct)
+    {
+        try
+        {
+            var context = new TokenRequestContext(
+                scopeArray,
+                parentRequestId: null,
+                claims: BuildCacheBypassClaims());
+            var after = await credential.GetTokenAsync(context, ct).ConfigureAwait(false);
+
+            if (string.Equals(HashToken(after.Token), beforeHash, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            _logger.LogInformation(
+                "Token force-refreshed for tenant {TenantId} scope {Scope}; new token expires {ExpiresOn:u}.",
+                tenantId, scopeArray[0], after.ExpiresOn);
+            return true;
+        }
+        catch (AuthenticationRequiredException)
+        {
+            // DisableAutomaticAuthentication is intentional — the silent path
+            // could not satisfy the challenge, and we will not pop a broker
+            // window from a background approval poll.
+            _logger.LogInformation(
+                "Token force-refresh for tenant {TenantId} scope {Scope} needs interactive sign-in; leaving the cached token in place.",
+                tenantId, scopeArray[0]);
+            return false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "Token force-refresh for tenant {TenantId} scope {Scope} failed.",
+                tenantId, scopeArray[0]);
+            return false;
+        }
+    }
+
+    // A minimal CAE-style claims challenge: "issue a token valid no earlier
+    // than now". MSAL skips its access-token cache whenever claims are present,
+    // and the STS honours nbf by minting a fresh token off the refresh token —
+    // no user interaction involved.
+    private static string BuildCacheBypassClaims()
+    {
+        var notBefore = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+        return $"{{\"access_token\":{{\"nbf\":{{\"essential\":true,\"value\":\"{notBefore}\"}}}}}}";
+    }
+
+    // Compared, never logged: the hash is only used to answer "did the STS
+    // hand back a different token than the cache held?".
+    private static string HashToken(string token)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
+
+    // Swaps in a freshly built credential without disposing the outgoing one:
+    // a concurrent caller may still be inside its GetTokenAsync, and disposing
+    // its gate underneath would throw ObjectDisposedException. SemaphoreSlim
+    // holds no unmanaged handle here, so letting the GC collect it is safe.
+    private void Rebuild(string tenantId)
+        => _byTenant[tenantId] = BuildForTenant(tenantId, disableAutomaticAuth: true);
 
     public async Task SignInAsync(string tenantId, CancellationToken cancellationToken)
     {

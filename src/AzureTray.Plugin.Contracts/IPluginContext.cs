@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
 namespace AzureTray.Plugin.Contracts;
@@ -119,4 +121,29 @@ public interface IPluginContext
     /// to the safe minimum behaviour when <c>null</c>.
     /// </summary>
     string? HostVersion => null;
+
+    /// <summary>
+    /// Forces the host to re-acquire this tenant's access tokens, bypassing the
+    /// cached ones, so claims that changed service-side (for example new role
+    /// memberships after a PIM activation was approved) take effect on the next
+    /// <see cref="IPluginHttpClient.SendAsync"/> instead of when the cached
+    /// token would have expired.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Safe to call repeatedly and from multiple threads; the host serializes
+    /// and debounces refreshes per tenant. Never triggers interactive sign-in:
+    /// if the silent path cannot refresh, the host logs it and reports failure
+    /// rather than popping a broker window. Nothing is thrown at the plugin.
+    /// </para>
+    /// <para>
+    /// Returns <c>false</c> when the host does not implement this member (any
+    /// host older than the contract version that introduced it), when the
+    /// tenant is not enabled for this plugin, or when no genuinely new token
+    /// could be obtained. Treat <c>false</c> as "carry on, the change will
+    /// surface when the token naturally rolls over" — not as an error.
+    /// </para>
+    /// </remarks>
+    Task<bool> RefreshTokenAsync(string tenantId, CancellationToken cancellationToken = default)
+        => Task.FromResult(false);
 }

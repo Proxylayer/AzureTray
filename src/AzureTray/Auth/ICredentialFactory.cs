@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Azure.Core;
@@ -27,4 +28,17 @@ public interface ICredentialFactory
     // MSAL cache so subsequent silent GetForTenant calls return immediately.
     // Throws on user cancellation / broker failure.
     Task SignInAsync(string tenantId, CancellationToken cancellationToken);
+
+    // Re-acquires the tenant's access token for each of the given scopes while
+    // bypassing the cached access token, so claims that changed service-side
+    // (new role memberships after a PIM activation, for instance) land before
+    // the cached token would have expired. Returns true only when at least one
+    // scope came back with a genuinely different token.
+    //
+    // Never prompts: the silent, DisableAutomaticAuthentication credential is
+    // used as-is, and an AuthenticationRequiredException is logged and reported
+    // as false rather than thrown. Idempotent, safe to call concurrently
+    // (serialized and briefly debounced per tenant).
+    Task<bool> ForceRefreshAsync(
+        string tenantId, IReadOnlyList<string> scopes, CancellationToken cancellationToken);
 }

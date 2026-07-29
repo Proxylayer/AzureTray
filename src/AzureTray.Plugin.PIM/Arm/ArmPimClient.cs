@@ -12,6 +12,7 @@ using Microsoft.Extensions.Logging;
 using AzureTray.Plugin.Contracts;
 using AzureTray.Plugin.PIM.Arm.Dto;
 using AzureTray.Plugin.PIM.Graph;
+using AzureTray.Plugin.PIM.Policies;
 
 namespace AzureTray.Plugin.PIM.Arm;
 
@@ -20,6 +21,10 @@ internal sealed class ArmPimClient : IArmPimClient
     private const string SubscriptionsApi = "2022-12-01";
     private const string AuthorizationApi = "2020-10-01";
     private const string ApprovalApi = "2021-01-01-preview";
+    private const string EndUserExpirationRuleId = "Expiration_EndUser_Assignment";
+    private const string EndUserApprovalRuleId = "Approval_EndUser_Assignment";
+    private const string ExpirationRuleType = "RoleManagementPolicyExpirationRule";
+    private const string ApprovalRuleType = "RoleManagementPolicyApprovalRule";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -73,44 +78,90 @@ internal sealed class ArmPimClient : IArmPimClient
             cancellationToken);
     }
 
-    public async Task<bool?> CheckApprovalRequiredAsync(
-        string scope, string roleDefinitionId, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<ArmRoleAssignmentScheduleInstance>> ListActiveRoleAssignmentsAsync(
+        string principalId, IEnumerable<string> scopes, CancellationToken cancellationToken)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(scope);
-        ArgumentException.ThrowIfNullOrWhiteSpace(roleDefinitionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(principalId);
+        ArgumentNullException.ThrowIfNull(scopes);
+        return FanOutScopesAsync<ArmRoleAssignmentScheduleInstance>(
+            scopes,
+            prefix =>
+                $"{prefix}providers/Microsoft.Authorization/roleAssignmentScheduleInstances" +
+                $"?api-version={AuthorizationApi}" +
+                // No $expand: the schedule endpoints return expandedProperties
+                // by default (same as roleEligibilitySchedules above), and the
+                // match is on roleDefinitionId + scope regardless.
+                $"&$filter=assignedTo('{principalId}')",
+            cancellationToken);
+    }
 
-        var prefix = NormalizeScope(scope);
-        var assignmentsUrl =
-            $"{prefix}providers/Microsoft.Authorization/roleManagementPolicyAssignments" +
-            $"?api-version={AuthorizationApi}";
+    // One request per scope returns every policy assignment at that scope with
+    // properties.effectiveRules inline, so the approval rule and the activation
+    // duration cap both come out of this single response — no follow-up
+    // GET {policyId} per role. roleManagementPolicyAssignments (not
+    // roleManagementPolicies) because only the assignment carries the
+    // roleDefinitionId needed to join back to an eligible role.
+    public async Task<IReadOnlyDictionary<ArmRolePolicyKey, RolePolicy>> GetRolePoliciesAsync(
+        IEnumerable<string> scopes, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(scopes);
 
-        var assignments = await GetAllPagesAsync<ArmPolicyAssignment>(assignmentsUrl, cancellationToken);
-        var match = assignments.FirstOrDefault(a =>
-            string.Equals(a.Properties?.RoleDefinitionId, roleDefinitionId, StringComparison.OrdinalIgnoreCase));
+        var tagged = await FanOutScopesTaggedAsync<ArmPolicyAssignment>(
+            scopes,
+            prefix =>
+                $"{prefix}providers/Microsoft.Authorization/roleManagementPolicyAssignments" +
+                $"?api-version={AuthorizationApi}",
+            cancellationToken).ConfigureAwait(false);
 
-        var policyId = match?.Properties?.PolicyId;
-        if (string.IsNullOrWhiteSpace(policyId))
+        var policies = new Dictionary<ArmRolePolicyKey, RolePolicy>();
+        foreach (var (scope, assignment) in tagged)
         {
-            _logger.LogDebug(
-                "No ARM policy assignment found for role {RoleId} at {Scope} (tenant {TenantId}).",
-                roleDefinitionId, scope, _tenantId);
-            return null;
+            var roleDefinitionId = assignment.Properties?.RoleDefinitionId;
+            if (string.IsNullOrWhiteSpace(roleDefinitionId)) continue;
+
+            var rules = assignment.Properties?.EffectiveRules;
+            if (rules is null) continue;
+
+            policies[ArmRolePolicyKey.For(scope, roleDefinitionId)] = new RolePolicy(
+                ApprovalRequired: ReadApprovalRequired(rules),
+                MaxActivationDuration: ReadMaxActivationDuration(rules));
         }
 
-        var policyUrl = $"{policyId!.TrimStart('/')}?api-version={AuthorizationApi}";
-        var policy = await GetJsonAsync<ArmPolicyResponse>(policyUrl, cancellationToken);
+        _logger.LogDebug(
+            "Read {PolicyCount} ARM role policies for tenant {TenantId} from {AssignmentCount} assignment(s).",
+            policies.Count, _tenantId, tagged.Count);
 
-        var approvalRule = policy?.Properties?.Rules?
-            .FirstOrDefault(r => string.Equals(r.RuleType, "RoleManagementPolicyApprovalRule", StringComparison.OrdinalIgnoreCase));
+        return policies;
+    }
 
-        return approvalRule?.Setting?.IsApprovalRequired;
+    // Expiration_EndUser_Assignment is the only rule that governs a user
+    // self-activating an eligible role; the Admin_* expiration rules are
+    // days-scale caps on eligibility/assignment and must never substitute for
+    // it. Matched on id + ruleType, never on target — ARM and Graph disagree on
+    // the casing of target values.
+    private static TimeSpan? ReadMaxActivationDuration(List<ArmPolicyRule> rules)
+    {
+        var rule = rules.FirstOrDefault(r =>
+            string.Equals(r.Id, EndUserExpirationRuleId, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(r.RuleType, ExpirationRuleType, StringComparison.OrdinalIgnoreCase));
+
+        return Iso8601Duration.TryParse(rule?.MaximumDuration);
+    }
+
+    private static bool? ReadApprovalRequired(List<ArmPolicyRule> rules)
+    {
+        var rule = rules.FirstOrDefault(r =>
+            string.Equals(r.Id, EndUserApprovalRuleId, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(r.RuleType, ApprovalRuleType, StringComparison.OrdinalIgnoreCase));
+
+        return rule?.Setting?.IsApprovalRequired;
     }
 
     public async Task<ArmRoleAssignmentScheduleRequest> ActivateRoleAsync(
         string scope,
         string principalId,
         string roleDefinitionId,
-        string linkedRoleEligibilityScheduleId,
+        string? linkedRoleEligibilityScheduleId,
         TimeSpan duration,
         string justification,
         CancellationToken cancellationToken)
@@ -310,23 +361,38 @@ internal sealed class ArmPimClient : IArmPimClient
         Func<string, string> urlForScope,
         CancellationToken cancellationToken)
     {
+        var tagged = await FanOutScopesTaggedAsync<T>(scopes, urlForScope, cancellationToken).ConfigureAwait(false);
+        var flattened = new List<T>(tagged.Count);
+        foreach (var (_, item) in tagged) flattened.Add(item);
+        return flattened;
+    }
+
+    // Same fan-out, but each result keeps the scope it was read from. Policy
+    // assignments need it: a policy is identified by role + scope, and the
+    // requested scope is what the caller matches its roles against.
+    private async Task<IReadOnlyList<(string Scope, T Item)>> FanOutScopesTaggedAsync<T>(
+        IEnumerable<string> scopes,
+        Func<string, string> urlForScope,
+        CancellationToken cancellationToken)
+    {
         var distinct = scopes
             .Where(s => !string.IsNullOrWhiteSpace(s))
             .Select(s => s!)
             .ToList();
-        if (distinct.Count == 0) return Array.Empty<T>();
+        if (distinct.Count == 0) return Array.Empty<(string, T)>();
 
-        var combined = new List<T>();
+        var combined = new List<(string Scope, T Item)>();
         foreach (var batch in distinct.Chunk(FanOutBatchSize))
         {
-            var tasks = batch.Select(scope =>
+            var tasks = batch.Select(async scope =>
             {
                 var url = urlForScope(NormalizeScope(scope));
-                return GetAllPagesAsync<T>(url, cancellationToken);
+                var items = await GetAllPagesAsync<T>(url, cancellationToken).ConfigureAwait(false);
+                return (Scope: scope, Items: items);
             });
-            foreach (var page in await Task.WhenAll(tasks).ConfigureAwait(false))
+            foreach (var (scope, items) in await Task.WhenAll(tasks).ConfigureAwait(false))
             {
-                combined.AddRange(page);
+                foreach (var item in items) combined.Add((scope, item));
             }
             if (batch.Length == FanOutBatchSize)
             {

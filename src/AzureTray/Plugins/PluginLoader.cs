@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using AzureTray.Auth;
 using AzureTray.AzureCloud;
 using AzureTray.Configuration;
 using AzureTray.Extensions;
@@ -32,6 +33,7 @@ public sealed class PluginLoader : IPluginLoader, IHostedService, IDisposable
     private readonly IPluginSignatureVerifier _verifier;
     private readonly PluginOptions _options;
     private readonly IPluginHttpClientCore _http;
+    private readonly ICredentialFactory _credentials;
     private readonly INotifier _notifier;
     private readonly IClipboard _clipboard;
     private readonly ITenantStore _tenantStore;
@@ -67,6 +69,7 @@ public sealed class PluginLoader : IPluginLoader, IHostedService, IDisposable
         IPluginSignatureVerifier verifier,
         IOptions<PluginOptions> options,
         IPluginHttpClientCore http,
+        ICredentialFactory credentials,
         INotifier notifier,
         IClipboard clipboard,
         ITenantStore tenantStore,
@@ -80,6 +83,7 @@ public sealed class PluginLoader : IPluginLoader, IHostedService, IDisposable
         _verifier = verifier;
         _options = options.Value;
         _http = http;
+        _credentials = credentials;
         _notifier = notifier;
         _clipboard = clipboard;
         _tenantStore = tenantStore;
@@ -442,6 +446,7 @@ public sealed class PluginLoader : IPluginLoader, IHostedService, IDisposable
                 plugin.Id,
                 pluginLogger,
                 _http,
+                _credentials,
                 _notifier,
                 _clipboard,
                 tenantSnapshot,

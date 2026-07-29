@@ -1,7 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using AzureTray.Auth;
 using AzureTray.Plugin.Contracts;
 
 namespace AzureTray.Plugins;
@@ -16,6 +19,7 @@ internal sealed class PluginContext : IPluginContext, IDisposable
     private readonly ITenantReadinessTracker _readiness;
     private readonly IPluginConfigStore _configStore;
     private readonly IPluginHttpClientCore _httpCore;
+    private readonly ICredentialFactory _credentials;
     private readonly object _handlersLock = new();
     private readonly List<Action<PluginTenant>> _readyHandlers = new();
     private readonly List<Action<string>> _removedHandlers = new();
@@ -26,6 +30,7 @@ internal sealed class PluginContext : IPluginContext, IDisposable
         string pluginId,
         ILogger logger,
         IPluginHttpClientCore httpCore,
+        ICredentialFactory credentials,
         INotifier notifier,
         IClipboard clipboard,
         IReadOnlyList<PluginTenant> tenants,
@@ -43,6 +48,7 @@ internal sealed class PluginContext : IPluginContext, IDisposable
         _configStore = configStore;
         Logger = logger;
         _httpCore = httpCore;
+        _credentials = credentials;
         Notifier = notifier;
         Clipboard = clipboard;
         Tenants = tenants.Where(t => IsEnabled(t.TenantId)).ToArray();
@@ -75,6 +81,40 @@ internal sealed class PluginContext : IPluginContext, IDisposable
                 nameof(tenantId));
         }
         return new TenantScopedPluginHttpClient(_httpCore, tenantId);
+    }
+
+    // Contract guarantees nothing is thrown at the plugin: a tenant this plugin
+    // can't talk to, or a refresh the silent path can't perform, is reported as
+    // false. Graph and ARM tokens are separate cache entries, so both of the
+    // resources a plugin can reach are refreshed together — a role activation
+    // changes claims in both.
+    public async Task<bool> RefreshTokenAsync(string tenantId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tenantId) || !IsEnabled(tenantId))
+        {
+            Logger.LogWarning(
+                "Token refresh requested for tenant '{TenantId}', which is not enabled for plugin '{PluginId}'; ignoring.",
+                tenantId, _pluginId);
+            return false;
+        }
+
+        try
+        {
+            return await _credentials
+                .ForceRefreshAsync(tenantId, [GraphScope, ArmScope], cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex,
+                "Token refresh for tenant {TenantId} failed for plugin '{PluginId}'.",
+                tenantId, _pluginId);
+            return false;
+        }
     }
 
     public IReadOnlyList<PluginTenant> ReadyTenants =>

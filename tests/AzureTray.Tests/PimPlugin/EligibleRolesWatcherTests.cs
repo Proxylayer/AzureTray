@@ -17,7 +17,7 @@ namespace AzureTray.Tests.PimPlugin;
 public sealed class EligibleRolesWatcherTests
 {
     [Fact]
-    public async Task PollAsync_PopulatesActiveRoleNames_FromGraph()
+    public async Task PollAsync_PopulatesActiveAssignments_FromGraph()
     {
         var graph = Substitute.For<IGraphPimClient>();
         graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
@@ -33,13 +33,15 @@ public sealed class EligibleRolesWatcherTests
         var arm = NewArm();
         var watcher = NewWatcher(graph, arm);
 
-        Assert.Empty(watcher.CurrentActiveRoleNames);
+        Assert.Empty(watcher.CurrentActiveAssignments);
 
         await watcher.PollAsync(CancellationToken.None);
 
-        Assert.Contains("Owner", watcher.CurrentActiveRoleNames);
-        Assert.Contains("Reader", watcher.CurrentActiveRoleNames);
-        Assert.Equal(2, watcher.CurrentActiveRoleNames.Count);
+        Assert.Equal(2, watcher.CurrentActiveAssignments.Count);
+        Assert.Contains(watcher.CurrentActiveAssignments, a =>
+            a.Source == PimSource.EntraId && a.RoleName == "Owner");
+        Assert.Contains(watcher.CurrentActiveAssignments, a =>
+            a.Source == PimSource.EntraId && a.RoleName == "Reader");
     }
 
     [Fact]
@@ -57,8 +59,13 @@ public sealed class EligibleRolesWatcherTests
 
         await watcher.PollAsync(CancellationToken.None);
 
-        Assert.Contains("owner", watcher.CurrentActiveRoleNames);
-        Assert.Contains("OWNER", watcher.CurrentActiveRoleNames);
+        Assert.NotNull(watcher.FindActiveFor(new UnifiedEligibleRole(
+            Source: PimSource.EntraId,
+            RoleName: "owner",
+            RoleDefinitionId: "GRAPH-ROLE-OWNER",
+            ScopeDisplay: "Entra ID directory",
+            ArmScope: null,
+            EligibilityId: null)));
     }
 
     [Fact]
@@ -110,6 +117,10 @@ public sealed class EligibleRolesWatcherTests
     {
         var graph = Substitute.For<IGraphPimClient>();
         graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
+        graph.ActivateRoleAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<TimeSpan>(),
+            Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(GraphRequest("req-1", "Provisioned"));
         var arm = NewArm();
         var notifier = Substitute.For<INotifier>();
         notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
@@ -133,6 +144,7 @@ public sealed class EligibleRolesWatcherTests
         await graph.Received(1).ActivateRoleAsync(
             "prin-1",
             "graph-role-owner",
+            "/",
             TimeSpan.FromHours(4),
             "operations",
             Arg.Any<CancellationToken>());
@@ -148,6 +160,10 @@ public sealed class EligibleRolesWatcherTests
         var graph = Substitute.For<IGraphPimClient>();
         graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
         var arm = NewArm();
+        arm.ActivateRoleAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<TimeSpan>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(ArmRequest("req-arm-1", "Provisioned"));
         var notifier = Substitute.For<INotifier>();
         notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ChoiceResult("1 hour", null));
@@ -201,7 +217,7 @@ public sealed class EligibleRolesWatcherTests
         await watcher.HandleActivationAsync(role, CancellationToken.None);
 
         await graph.DidNotReceive().ActivateRoleAsync(
-            Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<TimeSpan>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
@@ -231,7 +247,7 @@ public sealed class EligibleRolesWatcherTests
         await watcher.HandleActivationAsync(role, CancellationToken.None);
 
         await graph.DidNotReceive().ActivateRoleAsync(
-            Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<TimeSpan>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
@@ -264,6 +280,7 @@ public sealed class EligibleRolesWatcherTests
         await graph.Received(1).DeactivateRoleAsync(
             "prin-1",
             "graph-role-owner",
+            "/",
             Arg.Any<string>(),
             Arg.Any<CancellationToken>());
         await arm.DidNotReceive().DeactivateRoleAsync(
@@ -328,7 +345,8 @@ public sealed class EligibleRolesWatcherTests
         await watcher.HandleDeactivationAsync(role, CancellationToken.None);
 
         await graph.DidNotReceive().DeactivateRoleAsync(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string>(), Arg.Any<CancellationToken>());
         await arm.DidNotReceive().DeactivateRoleAsync(
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
             Arg.Any<string>(), Arg.Any<CancellationToken>());
@@ -347,6 +365,40 @@ public sealed class EligibleRolesWatcherTests
             MemberType: "Direct",
             Principal: new EntraPrincipal("prin-1", "Alice", null),
             RoleDefinition: new EntraRoleDefinition(roleDefId, roleDisplayName, null));
+
+    private static EntraScheduleRequest GraphRequest(string id, string status)
+        => new(
+            Id: id,
+            Status: status,
+            Action: "selfActivate",
+            PrincipalId: "prin-1",
+            RoleDefinitionId: "graph-role-owner",
+            DirectoryScopeId: "/",
+            Justification: "operations",
+            CreatedDateTime: DateTimeOffset.UtcNow,
+            ApprovalId: null,
+            RequestType: null,
+            Principal: null,
+            RoleDefinition: null,
+            ScheduleInfo: null);
+
+    private static ArmRoleAssignmentScheduleRequest ArmRequest(string name, string status)
+        => new(
+            Id: $"/subscriptions/sub-1/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/{name}",
+            Name: name,
+            Type: null,
+            Properties: new ArmRoleRequestProperties(
+                Status: status,
+                PrincipalId: "prin-1",
+                RoleDefinitionId: "arm-role-contributor",
+                Scope: "/subscriptions/sub-1",
+                Justification: "incident #42",
+                RequestType: "SelfActivate",
+                ApprovalId: null,
+                CreatedOn: DateTimeOffset.UtcNow,
+                ExpandedProperties: null,
+                ScheduleInfo: null,
+                LinkedRoleEligibilityScheduleId: null));
 
     private static ArmSubscription ArmSub(string id, string displayName)
         => new($"/subscriptions/{id}", id, displayName, "Enabled");
@@ -377,6 +429,8 @@ public sealed class EligibleRolesWatcherTests
             .Returns(subscriptions ?? Array.Empty<ArmSubscription>());
         arm.ListEligibleRolesAsync(Arg.Any<string>(), Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
             .Returns(roles ?? Array.Empty<ArmEligibilitySchedule>());
+        arm.ListActiveRoleAssignmentsAsync(Arg.Any<string>(), Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<ArmRoleAssignmentScheduleInstance>());
         return arm;
     }
 
@@ -390,9 +444,10 @@ public sealed class EligibleRolesWatcherTests
         ctx.Notifier.Returns(notifier ?? Substitute.For<INotifier>());
         ctx.Tenants.Returns(new List<PluginTenant> { new("tenant-1", "Contoso") });
 
+        var tenant = new PluginTenant("tenant-1", "Contoso");
         return new EligibleRolesWatcher(
-            graph, arm, ctx,
-            new PluginTenant("tenant-1", "Contoso"),
-            TimeSpan.FromMilliseconds(50));
+            graph, arm, ctx, tenant,
+            TimeSpan.FromMilliseconds(50),
+            new PendingActivationStore(ctx, tenant));
     }
 }
