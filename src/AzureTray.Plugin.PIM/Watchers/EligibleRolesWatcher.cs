@@ -33,6 +33,7 @@ internal sealed class EligibleRolesWatcher
     private UnifiedEligibleRole[] _lastSnapshot = Array.Empty<UnifiedEligibleRole>();
     private ActiveRoleAssignment[] _activeAssignments = Array.Empty<ActiveRoleAssignment>();
     private IReadOnlySet<string> _relevantSubscriptionIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlySet<string> _relevantManagementGroupScopes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private string? _cachedPrincipalId;
 
     public EligibleRolesWatcher(
@@ -89,6 +90,16 @@ internal sealed class EligibleRolesWatcher
     // scanning all subs when empty.
     public IReadOnlySet<string> RelevantSubscriptionIds => _relevantSubscriptionIds;
 
+    // Full ARM scope strings (/providers/Microsoft.Management/managementGroups/{id})
+    // where the signed-in user holds an eligible role. Management-group-scoped
+    // eligibility surfaces through the per-subscription fan-out as inherited
+    // entries whose scope is the MG itself — ExtractSubscriptionId returns null
+    // for those, so without this set the pending-approval watcher would never
+    // query the MG scope and MG-scoped activation requests from other users
+    // would be invisible to the approver feed. Empty when the user has no
+    // MG-scoped eligibility; the pending watcher then adds no extra requests.
+    public IReadOnlySet<string> RelevantManagementGroupScopes => _relevantManagementGroupScopes;
+
     public void Start(CancellationToken stopToken)
     {
         // Hydrate from cache first so the menu shows last-known eligibility
@@ -129,6 +140,11 @@ internal sealed class EligibleRolesWatcher
             _relevantSubscriptionIds = dto.RelevantSubscriptionIds is { Count: > 0 }
                 ? new HashSet<string>(dto.RelevantSubscriptionIds, StringComparer.OrdinalIgnoreCase)
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // Caches written before MG scopes existed have no member here; that
+            // loads as "no known MG scopes" and the first poll fills it in.
+            _relevantManagementGroupScopes = dto.RelevantManagementGroupScopes is { Count: > 0 }
+                ? new HashSet<string>(dto.RelevantManagementGroupScopes, StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             _context.Logger.LogInformation(
                 "Eligible-role cache loaded for tenant {TenantId}: {Count} role(s).",
@@ -154,6 +170,7 @@ internal sealed class EligibleRolesWatcher
                 Roles = _lastSnapshot.ToArray(),
                 ActiveAssignments = _activeAssignments.ToArray(),
                 RelevantSubscriptionIds = _relevantSubscriptionIds.ToList(),
+                RelevantManagementGroupScopes = _relevantManagementGroupScopes.ToList(),
             };
             using var stream = File.Create(CachePath);
             JsonSerializer.Serialize(stream, dto);
@@ -171,6 +188,7 @@ internal sealed class EligibleRolesWatcher
         public UnifiedEligibleRole[]? Roles { get; set; }
         public ActiveRoleAssignment[]? ActiveAssignments { get; set; }
         public List<string>? RelevantSubscriptionIds { get; set; }
+        public List<string>? RelevantManagementGroupScopes { get; set; }
     }
 
     public async Task StopAsync()
@@ -236,6 +254,7 @@ internal sealed class EligibleRolesWatcher
             _lastSnapshot = graphRoles.Concat(arm.Roles).ToArray();
             _activeAssignments = graphActives.Concat(arm.ActiveAssignments).ToArray();
             _relevantSubscriptionIds = ExtractSubscriptionIds(arm.Roles);
+            _relevantManagementGroupScopes = ExtractManagementGroupScopes(arm.Roles);
             SaveToCache();
         }
         finally
@@ -254,6 +273,35 @@ internal sealed class EligibleRolesWatcher
             if (!string.IsNullOrEmpty(subId)) set.Add(subId);
         }
         return set;
+    }
+
+    private static HashSet<string> ExtractManagementGroupScopes(IEnumerable<UnifiedEligibleRole> armRoles)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var role in armRoles)
+        {
+            var mgScope = ExtractManagementGroupScope(role.ArmScope);
+            if (!string.IsNullOrEmpty(mgScope)) set.Add(mgScope);
+        }
+        return set;
+    }
+
+    // Pulls the management-group scope prefix out of an ARM scope, normalized
+    // with a leading slash. Accepts:
+    //   /providers/Microsoft.Management/managementGroups/{id}
+    // (and tolerates trailing segments, though MG scopes have none in practice).
+    // Returns null for subscription and other non-MG scopes.
+    internal static string? ExtractManagementGroupScope(string? armScope)
+    {
+        if (string.IsNullOrWhiteSpace(armScope)) return null;
+        var trimmed = armScope.TrimStart('/');
+        const string prefix = "providers/Microsoft.Management/managementGroups/";
+        if (!trimmed.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
+        var remainder = trimmed.AsSpan(prefix.Length);
+        if (remainder.IsEmpty) return null;
+        var slash = remainder.IndexOf('/');
+        var mgId = slash < 0 ? remainder.ToString() : remainder[..slash].ToString();
+        return string.IsNullOrWhiteSpace(mgId) ? null : $"/{prefix}{mgId}";
     }
 
     // Pulls the subscription GUID out of an ARM scope. Accepts:

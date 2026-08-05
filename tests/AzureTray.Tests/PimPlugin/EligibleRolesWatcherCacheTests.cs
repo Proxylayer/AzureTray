@@ -64,6 +64,9 @@ public sealed class EligibleRolesWatcherCacheTests : IDisposable
         // Actives unknown: nothing is claimed active until the first poll.
         Assert.Empty(watcher.CurrentActiveAssignments);
         Assert.Null(watcher.FindActiveFor(watcher.CurrentEligibleRoles[0]));
+
+        // Caches written before MG scopes existed load as "no known MG scopes".
+        Assert.Empty(watcher.RelevantManagementGroupScopes);
     }
 
     [Fact]
@@ -162,6 +165,52 @@ public sealed class EligibleRolesWatcherCacheTests : IDisposable
         Assert.Equal(end, active.EndDateTime);
     }
 
+    // MG-scoped eligibility feeds the pending-approval fan-out, so the scope
+    // set must survive the cache the same way roles and actives do.
+    [Fact]
+    public async Task PollAsync_ThenStart_RoundTripsManagementGroupScopesThroughTheCache()
+    {
+        const string mgScope = "/providers/Microsoft.Management/managementGroups/mg-1";
+
+        var graph = Substitute.For<IGraphPimClient>();
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
+        graph.ListEligibleRolesAsync("prin-1", Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<EntraEligibilitySchedule>());
+        graph.ListActiveRoleAssignmentsAsync("prin-1", Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<EntraEligibilitySchedule>());
+
+        var arm = Substitute.For<IArmPimClient>();
+        arm.ListSubscriptionsAsync(Arg.Any<CancellationToken>())
+            .Returns(new[] { new ArmSubscription("/subscriptions/sub-1", "sub-1", "Dev", "Enabled") });
+        arm.ListEligibleRolesAsync("prin-1", Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
+            .Returns(new[]
+            {
+                new ArmEligibilitySchedule(
+                    Id: "elig-arm-1",
+                    Name: "elig-arm-1",
+                    Properties: new ArmEligibilityProperties(
+                        PrincipalId: "prin-1",
+                        RoleDefinitionId: "role-contributor",
+                        Scope: mgScope,
+                        Status: "Provisioned",
+                        MemberType: "Direct",
+                        StartDateTime: DateTimeOffset.UtcNow,
+                        EndDateTime: null,
+                        ExpandedProperties: null)),
+            });
+        arm.ListActiveRoleAssignmentsAsync(Arg.Any<string>(), Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<ArmRoleAssignmentScheduleInstance>());
+
+        var writer = NewWatcher(graph, arm);
+        await writer.PollAsync(CancellationToken.None);
+        Assert.Contains(mgScope, writer.RelevantManagementGroupScopes);
+
+        var reader = NewWatcher();
+        await HydrateAsync(reader);
+
+        Assert.Contains(mgScope, reader.RelevantManagementGroupScopes);
+    }
+
     // ---- helpers ----------------------------------------------------------
 
     private string CachePath => Path.Combine(_dataDir, $"eligible-roles-{Tenant.TenantId}.json");
@@ -193,20 +242,23 @@ public sealed class EligibleRolesWatcherCacheTests : IDisposable
             Principal: new EntraPrincipal("prin-1", "Alice", null),
             RoleDefinition: new EntraRoleDefinition(roleDefId, roleDisplayName, null));
 
-    private EligibleRolesWatcher NewWatcher(IGraphPimClient? graph = null)
+    private EligibleRolesWatcher NewWatcher(IGraphPimClient? graph = null, IArmPimClient? arm = null)
     {
         var ctx = Substitute.For<IPluginContext>();
         ctx.Logger.Returns(NullLogger<EligibleRolesWatcherCacheTests>.Instance);
         ctx.Notifier.Returns(Substitute.For<INotifier>());
         ctx.DataDir.Returns(_dataDir);
 
-        var arm = Substitute.For<IArmPimClient>();
-        arm.ListSubscriptionsAsync(Arg.Any<CancellationToken>())
-            .Returns(Array.Empty<ArmSubscription>());
-        arm.ListEligibleRolesAsync(Arg.Any<string>(), Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
-            .Returns(Array.Empty<ArmEligibilitySchedule>());
-        arm.ListActiveRoleAssignmentsAsync(Arg.Any<string>(), Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
-            .Returns(Array.Empty<ArmRoleAssignmentScheduleInstance>());
+        if (arm is null)
+        {
+            arm = Substitute.For<IArmPimClient>();
+            arm.ListSubscriptionsAsync(Arg.Any<CancellationToken>())
+                .Returns(Array.Empty<ArmSubscription>());
+            arm.ListEligibleRolesAsync(Arg.Any<string>(), Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
+                .Returns(Array.Empty<ArmEligibilitySchedule>());
+            arm.ListActiveRoleAssignmentsAsync(Arg.Any<string>(), Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
+                .Returns(Array.Empty<ArmRoleAssignmentScheduleInstance>());
+        }
 
         var effectiveGraph = graph ?? Substitute.For<IGraphPimClient>();
         return new EligibleRolesWatcher(

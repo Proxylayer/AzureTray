@@ -433,7 +433,8 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
 
             var pending = new PendingApprovalWatcher(
                 graph, arm, _context, tenant, PendingPollInterval,
-                relevantSubscriptions: () => eligible.RelevantSubscriptionIds);
+                relevantSubscriptions: () => eligible.RelevantSubscriptionIds,
+                relevantManagementGroupScopes: () => eligible.RelevantManagementGroupScopes);
             pending.PollStarted += OnWatcherPollStarted;
             pending.PollCompleted += OnWatcherPollCompleted;
             pending.Start(_lifetimeCts.Token);

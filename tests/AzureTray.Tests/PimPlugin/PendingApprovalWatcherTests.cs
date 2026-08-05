@@ -274,6 +274,136 @@ public sealed class PendingApprovalWatcherTests
             Arg.Any<CancellationToken>());
     }
 
+    private const string MgScope = "/providers/Microsoft.Management/managementGroups/mg-1";
+
+    [Fact]
+    public async Task PollAsync_MgEligibilityWithNoSubscriptions_QueriesMgScope_AndNotifies()
+    {
+        // An MG-only user (zero subscriptions) must still fan out to the MG
+        // scope — the old `subs.Count == 0` early-return would have skipped ARM
+        // entirely and the approval would never surface.
+        var graph = NewGraph();
+        var arm = Substitute.For<IArmPimClient>();
+        arm.ListSubscriptionsAsync(Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<ArmSubscription>());
+        List<string>? capturedScopes = null;
+        arm.ListPendingApprovalsAsync(Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                capturedScopes = new List<string>(ci.Arg<IEnumerable<string>>());
+                return (IReadOnlyList<ArmRoleAssignmentScheduleRequest>)new[]
+                {
+                    ArmPending("approval-mg-1", "Bob", "Contributor", MgScope),
+                };
+            });
+        var notifier = NewNotifier();
+
+        var watcher = NewWatcher(
+            graph, arm, notifier,
+            relevantSubscriptions: () => ScopeSet(),
+            relevantManagementGroupScopes: () => ScopeSet(MgScope));
+
+        await watcher.PollAsync(CancellationToken.None);
+        await Settle();
+
+        Assert.NotNull(capturedScopes);
+        Assert.Contains(MgScope, capturedScopes!);
+        await notifier.Received(1).ShowAsync(
+            Arg.Is<NotificationRequest>(r => r is ChoiceRequest),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task PollAsync_CrossScopeDuplicate_NotifiesOnce_AndSnapshotHasOneEntry()
+    {
+        // An MG-scoped request comes back from both the MG query and every
+        // descendant-subscription query. Same ApprovalId → same DedupKey →
+        // must collapse before both the snapshot (menu) and the notify loop.
+        var graph = NewGraph();
+        var arm = NewArm(
+            subscriptions: new[] { ArmSub("sub-1", "Dev") },
+            approvals: new[]
+            {
+                ArmPending("approval-dup", "Bob", "Contributor", MgScope),
+                ArmPending("approval-dup", "Bob", "Contributor", MgScope),
+            });
+        var notifier = NewNotifier();
+
+        var watcher = NewWatcher(
+            graph, arm, notifier,
+            relevantSubscriptions: () => ScopeSet("sub-1"),
+            relevantManagementGroupScopes: () => ScopeSet(MgScope));
+
+        await watcher.PollAsync(CancellationToken.None);
+        await Settle();
+
+        await notifier.Received(1).ShowAsync(
+            Arg.Is<NotificationRequest>(r => r is ChoiceRequest),
+            Arg.Any<CancellationToken>());
+        Assert.Single(watcher.CurrentApprovals);
+        Assert.Equal("approval-dup", watcher.CurrentApprovals[0].ApprovalId);
+    }
+
+    [Fact]
+    public async Task PollAsync_NoMgEligibility_QueriesOnlySubscriptionScopes()
+    {
+        // Guards the "no MG eligibility → identical to today" promise: an
+        // empty MG set must add nothing to the ARM fan-out.
+        var graph = NewGraph();
+        var arm = Substitute.For<IArmPimClient>();
+        arm.ListSubscriptionsAsync(Arg.Any<CancellationToken>())
+            .Returns(new[] { ArmSub("sub-1", "Dev") });
+        List<string>? capturedScopes = null;
+        arm.ListPendingApprovalsAsync(Arg.Any<IEnumerable<string>>(), Arg.Any<CancellationToken>())
+            .Returns(ci =>
+            {
+                capturedScopes = new List<string>(ci.Arg<IEnumerable<string>>());
+                return (IReadOnlyList<ArmRoleAssignmentScheduleRequest>)Array.Empty<ArmRoleAssignmentScheduleRequest>();
+            });
+        var notifier = NewNotifier();
+
+        var watcher = NewWatcher(
+            graph, arm, notifier,
+            relevantSubscriptions: () => ScopeSet("sub-1"),
+            relevantManagementGroupScopes: () => ScopeSet());
+
+        await watcher.PollAsync(CancellationToken.None);
+
+        Assert.NotNull(capturedScopes);
+        Assert.Equal(new[] { "/subscriptions/sub-1" }, capturedScopes!);
+        Assert.DoesNotContain(capturedScopes!, s => s.Contains("managementGroups", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task PollAsync_MgScopedApprovalAuthoredBySignedInUser_IsFilteredOut()
+    {
+        // The self-authored filter must apply to MG-scoped results the same as
+        // subscription-scoped ones.
+        var graph = Substitute.For<IGraphPimClient>();
+        graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("me-objectid");
+        graph.ListPendingApprovalsAsync(Arg.Any<CancellationToken>())
+            .Returns(Array.Empty<EntraScheduleRequest>());
+        var arm = NewArm(
+            approvals: new[]
+            {
+                ArmPendingFor("approval-mg-self", "me-objectid", "Self", "Contributor", MgScope),
+            });
+        var notifier = NewNotifier();
+
+        var watcher = NewWatcher(
+            graph, arm, notifier,
+            relevantSubscriptions: () => ScopeSet(),
+            relevantManagementGroupScopes: () => ScopeSet(MgScope));
+
+        await watcher.PollAsync(CancellationToken.None);
+        await Settle();
+
+        await notifier.DidNotReceive().ShowAsync(
+            Arg.Is<NotificationRequest>(r => r is ChoiceRequest),
+            Arg.Any<CancellationToken>());
+        Assert.Empty(watcher.CurrentApprovals);
+    }
+
     // ---- builders ---------------------------------------------------------
 
     private static EntraScheduleRequest GraphPending(string approvalId, string principalDisplayName, string roleDisplayName)
@@ -301,13 +431,17 @@ public sealed class PendingApprovalWatcherTests
 
     private static ArmRoleAssignmentScheduleRequest ArmPending(
         string approvalId, string principalDisplayName, string roleDisplayName, string scope)
+        => ArmPendingFor(approvalId, principalId: null, principalDisplayName, roleDisplayName, scope);
+
+    private static ArmRoleAssignmentScheduleRequest ArmPendingFor(
+        string approvalId, string? principalId, string principalDisplayName, string roleDisplayName, string scope)
         => new(
             Id: $"/.../req-{approvalId}",
             Name: $"req-{approvalId}",
             Type: null,
             Properties: new ArmRoleRequestProperties(
                 Status: "PendingApproval",
-                PrincipalId: null,
+                PrincipalId: principalId,
                 RoleDefinitionId: null,
                 Scope: scope,
                 Justification: null,
@@ -315,7 +449,7 @@ public sealed class PendingApprovalWatcherTests
                 ApprovalId: approvalId,
                 CreatedOn: DateTimeOffset.UtcNow,
                 ExpandedProperties: new ArmExpandedProperties(
-                    Principal: new ArmPrincipalDto(null, principalDisplayName, "User", null),
+                    Principal: new ArmPrincipalDto(principalId, principalDisplayName, "User", null),
                     RoleDefinition: new ArmRoleDefinitionDto(null, roleDisplayName, null),
                     Scope: new ArmScopeDto(null, "Dev (sub)", "subscription")),
                 ScheduleInfo: null,
@@ -353,7 +487,12 @@ public sealed class PendingApprovalWatcherTests
         return notifier;
     }
 
-    private static PendingApprovalWatcher NewWatcher(IGraphPimClient graph, IArmPimClient arm, INotifier notifier)
+    private static PendingApprovalWatcher NewWatcher(
+        IGraphPimClient graph,
+        IArmPimClient arm,
+        INotifier notifier,
+        Func<IReadOnlySet<string>>? relevantSubscriptions = null,
+        Func<IReadOnlySet<string>>? relevantManagementGroupScopes = null)
     {
         var context = Substitute.For<IPluginContext>();
         context.Logger.Returns(NullLogger<PendingApprovalWatcher>.Instance);
@@ -365,8 +504,13 @@ public sealed class PendingApprovalWatcherTests
             arm,
             context,
             new PluginTenant("tenant-1", "Contoso"),
-            TimeSpan.FromMilliseconds(50));
+            TimeSpan.FromMilliseconds(50),
+            relevantSubscriptions,
+            relevantManagementGroupScopes);
     }
+
+    private static HashSet<string> ScopeSet(params string[] scopes)
+        => new(scopes, StringComparer.OrdinalIgnoreCase);
 
     // PollAsync fires HandleNewApprovalAsync with `_ = ...` so completion is
     // out-of-band. Give those tasks a short slice to run before assertions.

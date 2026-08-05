@@ -27,6 +27,7 @@ internal sealed class PendingApprovalWatcher
     private readonly PluginTenant _tenant;
     private readonly TimeSpan _interval;
     private readonly Func<IReadOnlySet<string>>? _relevantSubscriptions;
+    private readonly Func<IReadOnlySet<string>>? _relevantManagementGroupScopes;
     private readonly HashSet<string> _seenKeys = new(StringComparer.OrdinalIgnoreCase);
 
     private Task? _loopTask;
@@ -47,7 +48,8 @@ internal sealed class PendingApprovalWatcher
         IPluginContext context,
         PluginTenant tenant,
         TimeSpan interval,
-        Func<IReadOnlySet<string>>? relevantSubscriptions = null)
+        Func<IReadOnlySet<string>>? relevantSubscriptions = null,
+        Func<IReadOnlySet<string>>? relevantManagementGroupScopes = null)
     {
         _graph = graph;
         _arm = arm;
@@ -55,6 +57,7 @@ internal sealed class PendingApprovalWatcher
         _tenant = tenant;
         _interval = interval;
         _relevantSubscriptions = relevantSubscriptions;
+        _relevantManagementGroupScopes = relevantManagementGroupScopes;
     }
 
     // Raised at the start and end of each PollAsync so the host can spin a
@@ -137,8 +140,14 @@ internal sealed class PendingApprovalWatcher
             // resolved yet) we fall through to the legacy behaviour of
             // showing everything, so a transient Graph hiccup never silently
             // hides approvals from other requestors.
+            // DistinctBy: the ARM fan-out now covers management-group scopes as
+            // well as subscriptions, and a request scoped at an MG comes back
+            // from both the MG query and every descendant subscription query.
+            // Collapse on the dedup key here so a cross-scope duplicate never
+            // reaches the snapshot (menu) or the notify loop below.
             var all = graphPending.Concat(armPending)
                 .Where(a => !IsSelfAuthored(a))
+                .DistinctBy(a => a.DedupKey, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
             _lastSnapshot = all;
 
@@ -148,6 +157,19 @@ internal sealed class PendingApprovalWatcher
             {
                 if (_seenKeys.Add(approval.DedupKey))
                 {
+                    // The success path used to be silent, which made "the popup
+                    // never appeared" indistinguishable from "the feed never saw
+                    // the request" in the log. One Information line per newly
+                    // surfaced approval.
+                    _context.Logger.LogInformation(
+                        "New {Source} pending approval {ApprovalId}: {Requestor} ({RequestorId}) requesting {Role} at {Scope} (tenant {TenantId}).",
+                        approval.Source,
+                        approval.ApprovalId,
+                        approval.PrincipalDisplay,
+                        approval.RequestorPrincipalId ?? "(unknown id)",
+                        approval.RoleDisplay,
+                        approval.ArmScope ?? approval.ScopeDisplay,
+                        _tenant.TenantId);
                     _ = HandleNewApprovalAsync(approval, cancellationToken);
                 }
             }
@@ -232,7 +254,6 @@ internal sealed class PendingApprovalWatcher
         try
         {
             var subs = await _arm.ListSubscriptionsAsync(ct).ConfigureAwait(false);
-            if (subs.Count == 0) return new();
 
             var relevant = _relevantSubscriptions?.Invoke();
             var scopes = subs
@@ -243,6 +264,19 @@ internal sealed class PendingApprovalWatcher
                 .Where(s => relevant is null || relevant.Count == 0 || relevant.Contains(s.SubscriptionId!))
                 .Select(s => $"/subscriptions/{s.SubscriptionId}")
                 .ToList();
+
+            // Management-group scopes where the user holds PIM eligibility.
+            // asApprover() at a subscription scope never returns requests made
+            // at a management group above it, so without these an MG-scoped
+            // activation request from another user is structurally invisible.
+            // No eligibility-derived MG scopes → no extra requests (identical
+            // behavior to the subscription-only fan-out).
+            var mgScopes = _relevantManagementGroupScopes?.Invoke();
+            if (mgScopes is { Count: > 0 })
+            {
+                scopes.AddRange(mgScopes.Where(s => !string.IsNullOrWhiteSpace(s)));
+            }
+
             if (scopes.Count == 0) return new();
 
             var requests = await _arm.ListPendingApprovalsAsync(scopes, ct).ConfigureAwait(false);
