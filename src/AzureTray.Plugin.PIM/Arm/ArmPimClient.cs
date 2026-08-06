@@ -254,23 +254,25 @@ internal sealed class ArmPimClient : IArmPimClient
     }
 
     public async Task ReviewAsync(
-        string scope,
         string approvalId,
         ApprovalDecision decision,
         string justification,
         CancellationToken cancellationToken)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(scope);
         ArgumentException.ThrowIfNullOrWhiteSpace(approvalId);
         ArgumentException.ThrowIfNullOrWhiteSpace(justification);
 
-        var prefix = NormalizeScope(scope);
-
+        // Role Assignment Approvals is a tenant-level ARM collection — the URL
+        // carries NO scope segment, regardless of where the underlying request
+        // was made (subscription, management group, resource group). Prefixing
+        // a scope happens to route at subscription level but 404s at
+        // management-group level.
         var approvalUrl =
-            $"{prefix}providers/Microsoft.Authorization/roleAssignmentApprovals/{approvalId}" +
+            $"providers/Microsoft.Authorization/roleAssignmentApprovals/{approvalId}" +
             $"?api-version={ApprovalApi}";
         var approval = await GetJsonAsync<ArmApproval>(approvalUrl, cancellationToken)
-            ?? throw new InvalidOperationException($"ARM approval {approvalId} not found at scope {scope}.");
+            ?? throw new InvalidOperationException(
+                $"ARM approval {approvalId} not found (tenant-level roleAssignmentApprovals).");
 
         var openStage = approval.Properties?.Stages?
             .FirstOrDefault(s => string.Equals(s.Properties?.Status, "InProgress", StringComparison.OrdinalIgnoreCase));
@@ -282,7 +284,7 @@ internal sealed class ArmPimClient : IArmPimClient
 
         var reviewResult = decision == ApprovalDecision.Approve ? "Approve" : "Deny";
         var stageUrl =
-            $"{prefix}providers/Microsoft.Authorization/roleAssignmentApprovals/{approvalId}/stages/{openStage.Name}" +
+            $"providers/Microsoft.Authorization/roleAssignmentApprovals/{approvalId}/stages/{openStage.Name}" +
             $"?api-version={ApprovalApi}";
 
         var body = new
@@ -302,8 +304,8 @@ internal sealed class ArmPimClient : IArmPimClient
         await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "{Decision} ARM approval {ApprovalId} stage {StageId} at {Scope} (tenant {TenantId}).",
-            decision, approvalId, openStage.Name, scope, _tenantId);
+            "{Decision} ARM approval {ApprovalId} stage {StageId} (tenant {TenantId}).",
+            decision, approvalId, openStage.Name, _tenantId);
     }
 
     public async Task<string?> GetActivationStatusAsync(

@@ -150,7 +150,6 @@ public sealed class ArmPimClientTests
         var client = new ArmPimClient(NewContext(routes), "tenant-1");
 
         await client.ReviewAsync(
-            "/subscriptions/sub-1",
             "approval-1",
             ApprovalDecision.Deny,
             "wrong scope",
@@ -159,6 +158,60 @@ public sealed class ArmPimClientTests
         Assert.NotNull(capturedBody);
         Assert.Contains("\"reviewResult\":\"Deny\"", capturedBody, StringComparison.Ordinal);
         Assert.Contains("\"justification\":\"wrong scope\"", capturedBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReviewAsync_UsesTenantLevelApprovalUrls_NoScopePrefix()
+    {
+        // Role Assignment Approvals is a tenant-level collection: any scope
+        // prefix (subscription OR management group) on these URLs is a bug —
+        // it happens to route at subscription level but 404s at MG level.
+        Uri? capturedGetUri = null;
+        Uri? capturedPatchUri = null;
+        var routes = new RoutedPluginHttp();
+        routes.OnGet(_ => true, req =>
+        {
+            capturedGetUri = req.RequestUri;
+            return Json("""
+                {
+                  "id": "approval-1",
+                  "name": "approval-1",
+                  "properties": {
+                    "stages": [
+                      { "id": "/.../stages/stage-open", "name": "stage-open", "properties": { "status": "InProgress" } }
+                    ]
+                  }
+                }
+                """);
+        });
+        routes.On(HttpMethod.Patch, _ => true, req =>
+        {
+            capturedPatchUri = req.RequestUri;
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        });
+
+        var client = new ArmPimClient(NewContext(routes), "tenant-1");
+
+        await client.ReviewAsync(
+            "approval-1",
+            ApprovalDecision.Approve,
+            "operations",
+            CancellationToken.None);
+
+        Assert.NotNull(capturedGetUri);
+        Assert.Equal(
+            "/providers/Microsoft.Authorization/roleAssignmentApprovals/approval-1",
+            capturedGetUri!.AbsolutePath);
+
+        Assert.NotNull(capturedPatchUri);
+        Assert.Equal(
+            "/providers/Microsoft.Authorization/roleAssignmentApprovals/approval-1/stages/stage-open",
+            capturedPatchUri!.AbsolutePath);
+
+        Assert.DoesNotContain("/subscriptions/", capturedGetUri.AbsolutePath, StringComparison.Ordinal);
+        Assert.DoesNotContain("/providers/Microsoft.Management/managementGroups/", capturedGetUri.AbsolutePath, StringComparison.Ordinal);
+        Assert.DoesNotContain("/subscriptions/", capturedPatchUri.AbsolutePath, StringComparison.Ordinal);
+        Assert.DoesNotContain("/providers/Microsoft.Management/managementGroups/", capturedPatchUri.AbsolutePath, StringComparison.Ordinal);
     }
 
     [Fact]

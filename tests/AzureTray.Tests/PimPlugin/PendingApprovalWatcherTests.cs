@@ -51,12 +51,12 @@ public sealed class PendingApprovalWatcherTests
             "approval-1", ApprovalDecision.Approve,
             "Needed for incident #42", Arg.Any<CancellationToken>());
         await arm.DidNotReceive().ReviewAsync(
-            Arg.Any<string>(), Arg.Any<string>(),
+            Arg.Any<string>(),
             Arg.Any<ApprovalDecision>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task PollAsync_ArmApproveChoice_RoutesToArmReview_WithScope()
+    public async Task PollAsync_ArmApproveChoice_RoutesToArmReview()
     {
         var graph = NewGraph();
         var arm = NewArm(
@@ -72,7 +72,6 @@ public sealed class PendingApprovalWatcherTests
         await Settle();
 
         await arm.Received(1).ReviewAsync(
-            "/subscriptions/sub-1",
             "approval-arm-1",
             ApprovalDecision.Approve,
             "operations",
@@ -99,7 +98,6 @@ public sealed class PendingApprovalWatcherTests
         await Settle();
 
         await arm.Received(1).ReviewAsync(
-            "/subscriptions/sub-1",
             "approval-arm-1",
             ApprovalDecision.Deny,
             "wrong scope",
@@ -372,6 +370,38 @@ public sealed class PendingApprovalWatcherTests
         Assert.NotNull(capturedScopes);
         Assert.Equal(new[] { "/subscriptions/sub-1" }, capturedScopes!);
         Assert.DoesNotContain(capturedScopes!, s => s.Contains("managementGroups", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task PollAsync_MgScopedApproveChoice_RoutesToArmReview()
+    {
+        // ReviewAsync no longer takes a scope — roleAssignmentApprovals is
+        // tenant-level. An MG-scoped approval must therefore route straight to
+        // the ARM review with only the approval id; the MG scope never reaches
+        // the client (the old scope-prefixed URL was a genuine 404 at MG scope).
+        var graph = NewGraph();
+        var arm = NewArm(
+            approvals: new[] { ArmPending("approval-mg-1", "Bob", "Contributor", MgScope) });
+        var notifier = NewNotifier(
+            choiceResult: new ChoiceResult("Approve", null),
+            textResult: new TextInputResult("operations"));
+
+        var watcher = NewWatcher(
+            graph, arm, notifier,
+            relevantSubscriptions: () => ScopeSet(),
+            relevantManagementGroupScopes: () => ScopeSet(MgScope));
+
+        await watcher.PollAsync(CancellationToken.None);
+        await Settle();
+
+        await arm.Received(1).ReviewAsync(
+            "approval-mg-1",
+            ApprovalDecision.Approve,
+            "operations",
+            Arg.Any<CancellationToken>());
+        await graph.DidNotReceive().ReviewAsync(
+            Arg.Any<string>(), Arg.Any<ApprovalDecision>(),
+            Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

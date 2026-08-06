@@ -372,15 +372,7 @@ internal sealed class PendingApprovalWatcher
                     break;
 
                 case PimSource.AzureRbac:
-                    if (string.IsNullOrWhiteSpace(approval.ArmScope))
-                    {
-                        _context.Logger.LogError(
-                            "ARM approval {ApprovalId} on tenant {TenantId} has no scope; cannot review.",
-                            approval.ApprovalId, _tenant.TenantId);
-                        return;
-                    }
                     await _arm.ReviewAsync(
-                        approval.ArmScope,
                         approval.ApprovalId,
                         decision.Value,
                         justText,

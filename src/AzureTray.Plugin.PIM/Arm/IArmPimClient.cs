@@ -56,8 +56,10 @@ internal interface IArmPimClient
         string justification,
         CancellationToken cancellationToken);
 
+    // Role assignment approvals are a tenant-level ARM collection (no scope
+    // segment in the URL), so no scope is taken: the approvalId alone
+    // identifies the approval wherever the underlying request was made.
     Task ReviewAsync(
-        string scope,
         string approvalId,
         ApprovalDecision decision,
         string justification,
