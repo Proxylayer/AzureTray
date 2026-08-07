@@ -30,6 +30,11 @@ public sealed class TrayIcon : IDisposable
     private Icon? _currentIcon;
     private WinForms.NotifyIcon? _notifyIcon;
     private TrayMenuWindow? _openMenu;
+    // Whether _openMenu was populated from BuildAdminMenuItems (Ctrl+click)
+    // rather than BuildMenuItems. RefreshOpenMenu must rebuild the SAME set —
+    // before this flag existed, a plugin firing MenuChanged while the admin
+    // menu was open replaced its contents with the regular menu.
+    private bool _openMenuIsAdmin;
     private SettingsWindow? _settingsWindow;
     private LogViewerWindow? _logViewerWindow;
     // Cached IPluginLoader resolved at Start() — Dispose can't go back to the
@@ -234,6 +239,7 @@ public sealed class TrayIcon : IDisposable
         }
 
         var items = admin ? BuildAdminMenuItems() : BuildMenuItems();
+        _openMenuIsAdmin = admin;
         var menu = new TrayMenuWindow(items);
         menu.Closed += (_, _) =>
         {
@@ -335,7 +341,12 @@ public sealed class TrayIcon : IDisposable
             PluginMenuItem.Separator,
             new PluginMenuItem(
                 Text: "🩺  Plugin status",
-                Children: BuildPluginStatusItems()),
+                Children: BuildPluginStatusItems())
+            {
+                // Stable identity so an open status flyout survives an
+                // in-place refresh regardless of label tweaks.
+                Key = "host.plugin-status",
+            },
             new PluginMenuItem(
                 Text: "🧪  Test runner…",
                 Invoke: ShowTestRunner),
@@ -459,9 +470,12 @@ public sealed class TrayIcon : IDisposable
     private void RefreshOpenMenu()
     {
         if (_openMenu is null) return;
-        var fresh = BuildMenuItems();
-        _openMenu.Items.Clear();
-        foreach (var item in fresh) _openMenu.Items.Add(item);
+        // Rebuild whichever item set is actually showing (regular vs admin),
+        // then let the window cascade the refresh down its open submenu /
+        // context-popup chain — a root-only swap left child windows holding
+        // their construction-time snapshot (stale rows, no busy spinner).
+        var fresh = _openMenuIsAdmin ? BuildAdminMenuItems() : BuildMenuItems();
+        _openMenu.RefreshItems(fresh);
     }
 
     private bool _settingsWindowIsAdmin;

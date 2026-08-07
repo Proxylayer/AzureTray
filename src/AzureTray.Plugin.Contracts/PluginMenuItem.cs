@@ -63,6 +63,18 @@ public sealed record PluginMenuItem(
     Action? OnToggleFavorite = null,
     IReadOnlyList<PluginMenuItem>? ContextItems = null)
 {
+    /// <summary>
+    /// Optional stable identity for this item, used by the host to correlate
+    /// the "same" logical item across menu rebuilds — e.g. to refresh an open
+    /// submenu in place when <see cref="IMenuChangeNotifier.MenuChanged"/>
+    /// fires while the user has it open. Set it on items whose
+    /// <see cref="Text"/> varies between rebuilds (counts, timers, status
+    /// glyphs) so the host doesn't have to guess. When <c>null</c> the host
+    /// falls back to matching by <see cref="Text"/>, tolerating a trailing
+    /// "(n)" count suffix. Values only need to be unique among siblings.
+    /// </summary>
+    public string? Key { get; init; }
+
     /// <summary>A pre-built horizontal divider. Use instead of constructing manually.</summary>
     public static PluginMenuItem Separator { get; } = new(string.Empty, IsSeparator: true);
 

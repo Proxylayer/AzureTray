@@ -43,9 +43,17 @@ public partial class TrayMenuWindow : Window
     private static TrayMenuWindow? _hoveredSubmenuParent;
 
     private readonly TrayMenuWindow? _parent;
-    private readonly Func<string, IReadOnlyList<PluginMenuItem>>? _searchProvider;
+    // Mutable (not readonly) so an in-place refresh can swap in the fresh
+    // menu item's provider — the delegate closes over the plugin's data
+    // snapshot, so keeping the old one would keep serving stale results.
+    private Func<string, IReadOnlyList<PluginMenuItem>>? _searchProvider;
     private TrayMenuWindow? _activeSubmenu;
     private PluginMenuItem? _activeSubmenuFor;
+    // Whether _activeSubmenu is a right-click context popup (built from
+    // ContextItems) rather than a hover submenu (built from Children /
+    // SearchProvider). An in-place refresh must repopulate it from the
+    // matching source on the fresh parent item.
+    private bool _activeSubmenuIsContext;
     private bool _isClosing;
 
     public ObservableCollection<PluginMenuItem> Items { get; }
@@ -173,6 +181,109 @@ public partial class TrayMenuWindow : Window
 
         Items.Clear();
         foreach (var item in results) Items.Add(item);
+    }
+
+    // ─── In-place refresh (MenuChanged while the menu is open) ───────────
+    //
+    // TrayIcon.RefreshOpenMenu rebuilds the ROOT item set when a plugin
+    // fires MenuChanged; before this existed the rebuild stopped there, so
+    // an open submenu kept its construction-time snapshot — stale rows and
+    // a spinner that never started — until the user re-hovered. RefreshItems
+    // swaps this window's rows and then cascades down the open child chain,
+    // re-anchoring each child to its counterpart in the fresh collection
+    // (MenuItemMatcher: Key first, Text with count-suffix tolerance as the
+    // fallback) so hover dedup, spinner triggers, and search results all see
+    // the fresh PluginMenuItem instances.
+
+    /// <summary>
+    /// Replaces this window's items with a freshly built set and refreshes
+    /// any open child submenu / context popup in place. Children whose
+    /// parent item no longer exists in the fresh set are closed.
+    /// </summary>
+    internal void RefreshItems(IReadOnlyList<PluginMenuItem> freshItems)
+    {
+        ReplaceItems(freshItems);
+        RefreshActiveSubmenu();
+    }
+
+    // Swap the ObservableCollection contents, keeping the scroll position —
+    // Clear() resets the ScrollViewer to the top, which would visibly jump
+    // a long menu the user has scrolled. The search box (if any) is a
+    // separate control and keeps its text untouched.
+    private void ReplaceItems(IReadOnlyList<PluginMenuItem> freshItems)
+    {
+        var offset = _itemsScroll?.VerticalOffset ?? 0;
+
+        Items.Clear();
+        foreach (var item in freshItems) Items.Add(item);
+
+        if (offset > 0) _itemsScroll?.ScrollToVerticalOffset(offset);
+    }
+
+    private void RefreshActiveSubmenu()
+    {
+        if (_activeSubmenu is null || _activeSubmenuFor is null) return;
+
+        var freshParent = MenuItemMatcher.FindRefreshedParent(_activeSubmenuFor, Items);
+        if (freshParent is null)
+        {
+            // The row the submenu hangs off no longer exists — close the
+            // child and everything below it.
+            _activeSubmenu.CloseChain();
+            return;
+        }
+
+        // Re-anchor the hover dedup (OpenSubmenu / the poll's leaf-row check
+        // compare by reference) to the instance that now lives in Items, so
+        // hovering the row doesn't tear down the submenu we just refreshed.
+        _activeSubmenuFor = freshParent;
+        _activeSubmenu.RefreshFromParent(freshParent, _activeSubmenuIsContext);
+    }
+
+    // Repopulate this window from the refreshed parent item it was opened
+    // from, then cascade to this window's own child.
+    private void RefreshFromParent(PluginMenuItem freshParent, bool isContext)
+    {
+        if (isContext)
+        {
+            if (freshParent.ContextItems is not { Count: > 0 } ctx)
+            {
+                CloseChain();
+                return;
+            }
+            RefreshItems(ctx);
+            return;
+        }
+
+        if (HasSearch)
+        {
+            if (freshParent.SearchProvider is null)
+            {
+                // The row stopped being searchable; this window's search box
+                // visibility was fixed at construction, so rebuild-by-close.
+                CloseChain();
+                return;
+            }
+
+            _searchProvider = freshParent.SearchProvider;
+            IReadOnlyList<PluginMenuItem> results;
+            // Preserve what the user has typed: re-run the fresh provider
+            // with the current query instead of resetting to "".
+            try { results = _searchProvider(SearchBox.Text ?? string.Empty); }
+            catch { return; }
+            RefreshItems(results);
+            return;
+        }
+
+        if (freshParent.SearchProvider is not null)
+        {
+            // Plain submenu became searchable — needs the search box, which
+            // only exists on windows constructed with a provider.
+            CloseChain();
+            return;
+        }
+
+        RefreshItems(freshParent.Children ?? Array.Empty<PluginMenuItem>());
     }
 
     // Opens at a specific screen point in PIXELS. The window's drop shadow
@@ -496,6 +607,7 @@ public partial class TrayMenuWindow : Window
 
         _activeSubmenu    = menu;
         _activeSubmenuFor = item;
+        _activeSubmenuIsContext = true;
     }
 
     private void OpenSubmenu(PluginMenuItem item, ListBoxItem row)
@@ -530,6 +642,7 @@ public partial class TrayMenuWindow : Window
         submenu.ShowAt((int)topRight.X, (int)topRight.Y, openAboveAnchor: false);
         _activeSubmenu = submenu;
         _activeSubmenuFor = item;
+        _activeSubmenuIsContext = false;
 
         // Auto-focus the search box so the user can type immediately.
         if (item.SearchProvider is not null)
