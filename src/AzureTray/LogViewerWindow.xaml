@@ -2,6 +2,8 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:logging="clr-namespace:AzureTray.Logging"
+        xmlns:shell="clr-namespace:AzureTray.Shell"
+        shell:SoftSelectionScope.IsEnabled="True"
         Title="Log Viewer"
         Width="1100" Height="600"
         MinWidth="700" MinHeight="360"
@@ -17,26 +19,22 @@
         <logging:LevelToBrushConverter x:Key="LevelToBrush"/>
         <logging:LevelToGlyphConverter x:Key="LevelToGlyph"/>
         <logging:NullToVisibilityConverter x:Key="NullToVisibility"/>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
 
-        <!-- Soften the ListBox selection so accent-blue doesn't drown out
-             the row text. Same pattern as the Plugins card on Settings. -->
-        <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}"
-                         Color="{StaticResource Color.Accent}" Opacity="0.22"/>
-        <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"
-                         Color="{StaticResource Color.Text.Primary}"/>
-        <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"
-                         Color="{StaticResource Color.Accent}" Opacity="0.16"/>
-        <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}"
-                         Color="{StaticResource Color.Text.Primary}"/>
-        <SolidColorBrush x:Key="{x:Static SystemColors.ControlBrushKey}"
-                         Color="{StaticResource Color.Accent}" Opacity="0.16"/>
+        <!-- The softened ListBox selection (SystemColors selection keys
+             aliased to the theme's Brush.Selection.* set) is applied by
+             shell:SoftSelectionScope.IsEnabled on the Window element: a
+             keyed <StaticResource> entry here crashes Baml2006Reader when
+             it pre-reads the deferred dictionary's keys, so the aliasing
+             lives in code. Bonus: it re-resolves live on a High Contrast
+             toggle — no reopen needed. -->
 
         <FontFamily x:Key="Font.Mono">Cascadia Mono, Consolas, Menlo, Monaco, Courier New, monospace</FontFamily>
 
         <!-- Form-row label style copied from SettingsWindow.xaml; localised
              here so the LogViewer doesn't take a transitive dep on it. -->
         <Style x:Key="FilterLabel" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{StaticResource Brush.Text.Secondary}"/>
+            <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}"/>
             <Setter Property="VerticalAlignment" Value="Center"/>
             <Setter Property="Margin" Value="0,0,6,0"/>
         </Style>
@@ -57,15 +55,15 @@
                        Style="{StaticResource Text.Heading}"
                        VerticalAlignment="Center"/>
             <Button DockPanel.Dock="Right"
-                    Content="Clear log"
+                    Content="Clear _log"
                     Margin="8,0,0,0"
                     Command="{Binding ClearLogCommand}"/>
             <Button DockPanel.Dock="Right"
-                    Content="Clear filters"
+                    Content="Clear _filters"
                     Margin="8,0,0,0"
                     Command="{Binding ClearFiltersCommand}"/>
             <Button DockPanel.Dock="Right"
-                    Content="Open log folder"
+                    Content="_Open log folder"
                     Margin="8,0,0,0"
                     Command="{Binding OpenLogsFolderCommand}"/>
             <CheckBox DockPanel.Dock="Right"
@@ -134,8 +132,15 @@
                 </ComboBox>
 
                 <TextBlock Grid.Column="9" Text="Search" Style="{StaticResource FilterLabel}"/>
-                <TextBox Grid.Column="10"
+                <!-- Keyboard: Enter moves focus into the entries list;
+                     Esc clears the search (immediately, skipping the typing
+                     debounce) when it has text — a second Esc then reaches
+                     the window's IsCancel Close. See OnSearchBoxPreviewKeyDown. -->
+                <TextBox x:Name="SearchBox"
+                         Grid.Column="10"
+                         AutomationProperties.Name="Search log entries"
                          Text="{Binding MessageFilter, UpdateSourceTrigger=PropertyChanged}"
+                         PreviewKeyDown="OnSearchBoxPreviewKeyDown"
                          ToolTip="Case-insensitive substring match against the message body AND any attached exception text."/>
             </Grid>
         </Border>
@@ -145,10 +150,11 @@
              secondary text. Virtualisation on for smooth scroll at 500
              rows. -->
         <Border Grid.Row="2"
-                Background="{StaticResource Brush.Surface.Panel}"
-                BorderBrush="{StaticResource Brush.Border.Subtle}"
+                Background="{DynamicResource Brush.Surface.Panel}"
+                BorderBrush="{DynamicResource Brush.Border.Subtle}"
                 BorderThickness="1"
                 CornerRadius="{StaticResource Radius.Medium}">
+            <Grid>
             <ListBox x:Name="EntriesList"
                      ItemsSource="{Binding EntriesView}"
                      Background="Transparent"
@@ -158,7 +164,9 @@
                      ScrollViewer.VerticalScrollBarVisibility="Auto"
                      VirtualizingPanel.IsVirtualizing="True"
                      VirtualizingPanel.VirtualizationMode="Recycling"
-                     VirtualizingPanel.ScrollUnit="Pixel">
+                     VirtualizingPanel.ScrollUnit="Pixel"
+                     SelectionChanged="OnEntriesSelectionChanged"
+                     ContextMenuOpening="OnEntriesContextMenuOpening">
                 <ListBox.Resources>
                     <!-- Compact padding on each row container; the template
                          below controls the actual margins. -->
@@ -254,10 +262,37 @@
                     </DataTemplate>
                 </ListBox.ItemTemplate>
             </ListBox>
+
+            <!-- Tail-paused pill: shows while Auto-scroll is on but the user
+                 has scrolled up / selected a row. Counts raw new entries and
+                 offers one-click resume; scrolling back to the bottom also
+                 resumes. Existing theme resources only — no Theme.xaml deps
+                 added here. -->
+            <Border HorizontalAlignment="Center"
+                    VerticalAlignment="Bottom"
+                    Margin="0,0,0,12"
+                    Padding="12,5"
+                    Background="{DynamicResource Brush.Surface.Card}"
+                    BorderBrush="{DynamicResource Brush.Accent}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource Radius.Large}"
+                    Visibility="{Binding IsTailPaused, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="{Binding PendingCount, StringFormat='⏸ Paused — {0} new'}"
+                               Foreground="{DynamicResource Brush.Text.Secondary}"
+                               VerticalAlignment="Center"/>
+                    <Button Content="_Resume"
+                            AutomationProperties.Name="Resume following new log entries"
+                            Margin="10,0,0,0"
+                            Padding="8,1"
+                            Command="{Binding ResumeTailCommand}"/>
+                </StackPanel>
+            </Border>
+            </Grid>
         </Border>
 
         <Button Grid.Row="3"
-                Content="Close"
+                Content="_Close"
                 Width="90"
                 HorizontalAlignment="Right"
                 Margin="0,10,0,0"

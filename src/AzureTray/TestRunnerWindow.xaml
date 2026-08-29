@@ -57,10 +57,10 @@
                                                             <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Muted}"/>
                                                             <Style.Triggers>
                                                                 <DataTrigger Binding="{Binding Status}" Value="Passed">
-                                                                    <Setter Property="Foreground" Value="#00BB66"/>
+                                                                    <Setter Property="Foreground" Value="{DynamicResource Brush.Status.Success}"/>
                                                                 </DataTrigger>
                                                                 <DataTrigger Binding="{Binding Status}" Value="Failed">
-                                                                    <Setter Property="Foreground" Value="#E04E4E"/>
+                                                                    <Setter Property="Foreground" Value="{DynamicResource Brush.Status.Error}"/>
                                                                 </DataTrigger>
                                                                 <DataTrigger Binding="{Binding Status}" Value="Running">
                                                                     <Setter Property="Foreground" Value="{DynamicResource Brush.Accent}"/>
@@ -102,6 +102,7 @@
                                                 <Grid Grid.Column="2">
                                                     <Button Content="Run"
                                                             Width="70"
+                                                            AutomationProperties.Name="{Binding Name, StringFormat='Run {0}'}"
                                                             Command="{Binding RunCommand}">
                                                         <Button.Style>
                                                             <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
@@ -116,6 +117,7 @@
                                                     </Button>
                                                     <Button Content="Cancel"
                                                             Width="70"
+                                                            AutomationProperties.Name="{Binding Name, StringFormat='Cancel {0}'}"
                                                             Command="{Binding CancelCommand}"
                                                             Visibility="{Binding IsRunning, Converter={StaticResource BoolToVisibility}}"/>
                                                 </Grid>
@@ -133,14 +135,14 @@
         <StackPanel Grid.Row="3"
                     Orientation="Horizontal"
                     Margin="0,12,0,0">
-            <Button Content="Run all"
+            <Button Content="Run _all"
                     Command="{Binding RunAllCommand}"
                     Width="100"/>
-            <Button Content="Refresh"
+            <Button Content="_Refresh"
                     Margin="8,0,0,0"
                     Command="{Binding RefreshCommand}"
                     Width="100"/>
-            <Button Content="Close"
+            <Button Content="_Close"
                     HorizontalAlignment="Right"
                     Width="90"
                     Click="CloseClick"

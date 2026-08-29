@@ -65,6 +65,19 @@ internal sealed class SeverityToBrushConverter : IValueConverter
         var wantFill = parameter is string s
             && string.Equals(s, "fill", StringComparison.OrdinalIgnoreCase);
 
+        // High Contrast: the two-tone severity palette is meaningless (and
+        // potentially unreadable — e.g. black WindowText on the dark tinted
+        // fill) against a user-chosen HC palette. Collapse to the system
+        // pair: Window for the card fill, Highlight for the accent — the
+        // action button pairs that with Brush.Text.Inverse (= HighlightText).
+        // Severity is still conveyed by the glyph and title text.
+        if (System.Windows.SystemParameters.HighContrast)
+        {
+            return wantFill
+                ? System.Windows.SystemColors.WindowBrush
+                : System.Windows.SystemColors.HighlightBrush;
+        }
+
         return value switch
         {
             NotificationSeverity.Success => wantFill ? SuccessFillBrush : SuccessBrush,

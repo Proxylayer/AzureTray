@@ -42,6 +42,22 @@ public partial class TrayMenuWindow : Window
     private static System.Windows.Controls.ListBoxItem? _hoveredSubmenuRow;
     private static TrayMenuWindow? _hoveredSubmenuParent;
 
+    // While the user is driving the menu by keyboard the cursor is usually
+    // parked outside every menu window, which the hover poll would read as
+    // "walked away" and dismiss after ~300 ms — making keyboard use
+    // impossible. Any keyboard interaction (or a keyboard tray activation)
+    // sets this; the poll then skips the outside-dismiss until the cursor
+    // re-enters a menu, at which point mouse semantics resume unchanged.
+    private static bool _keyboardNavActive;
+
+    /// <summary>
+    /// Marks the menu chain as keyboard-driven so the hover poll's
+    /// outside-the-menu auto-dismiss is suspended until the mouse re-enters
+    /// a menu. Called on keyboard interaction and by TrayIcon when the menu
+    /// was opened via keyboard activation of the tray icon.
+    /// </summary>
+    internal static void NotifyKeyboardActivation() => _keyboardNavActive = true;
+
     private readonly TrayMenuWindow? _parent;
     // Mutable (not readonly) so an in-place refresh can swap in the fresh
     // menu item's provider — the delegate closes over the plugin's data
@@ -327,6 +343,11 @@ public partial class TrayMenuWindow : Window
             // by screen bounds) so the cursor lands inside the menu.
             ClampToWorkArea(allowExtendIntoTaskbar: openAboveAnchor);
             Activate();
+            // The list must hold keyboard focus for Up/Down/Enter to work the
+            // moment the menu opens. Searchable flyouts are excluded: their
+            // SearchBox is auto-focused by OpenSubmenu and Down moves from it
+            // into the results — focusing the list here would steal that.
+            if (!HasSearch) ItemsList.Focus();
         }), System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
@@ -377,6 +398,8 @@ public partial class TrayMenuWindow : Window
         {
             _hoverTimer?.Stop();
             ResetHoverState();
+            // Next menu open starts under mouse semantics until a key is hit.
+            _keyboardNavActive = false;
         }
         base.OnClosed(e);
     }
@@ -414,6 +437,15 @@ public partial class TrayMenuWindow : Window
 
         if (menu is null)
         {
+            // Keyboard-driven session: the cursor being elsewhere is expected,
+            // not a dismissal signal. Dismissal then comes from Esc, an
+            // invoke, or focus loss (OnDeactivated) instead.
+            if (_keyboardNavActive)
+            {
+                _outsideTicks = 0;
+                return;
+            }
+
             // Cursor is outside every open menu. Wait CloseAfterTicks frames
             // (~300 ms total) before dismissing so accidental jiggles don't
             // close a menu mid-decision.
@@ -430,6 +462,9 @@ public partial class TrayMenuWindow : Window
         }
 
         _outsideTicks = 0;
+        // The cursor is back over a menu: hand control back to the mouse so
+        // hover-open/close and outside-dismiss behave exactly as before.
+        _keyboardNavActive = false;
 
         if (row?.DataContext is PluginMenuItem item && !item.IsSeparator)
         {
@@ -531,12 +566,20 @@ public partial class TrayMenuWindow : Window
         return (null, null);
     }
 
-    // ListBox raises SelectionChanged when the keyboard moves the highlight.
-    // We don't want a row to look "selected" persistently after the user has
-    // moved on — clear so hover and selection share the same accent fill.
-    private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
+    // Favorite star: a dedicated focusable ToggleButton on the right of the
+    // row. Clicking (or Space/Enter while it has focus) toggles favorite
+    // state even on disabled (greyed/active) rows, never opens the submenu,
+    // and never dismisses the menu — the glyph just flips in place.
+    // ButtonBase handles the underlying mouse events itself, so the row's
+    // MouseLeftButtonUp invoke path never sees a star click.
+    private void OnFavoriteStarClick(object sender, RoutedEventArgs e)
     {
-        if (sender is System.Windows.Controls.ListBox lb) lb.UnselectAll();
+        if (sender is FrameworkElement { DataContext: PluginMenuItem item }
+            && item.OnToggleFavorite is not null)
+        {
+            ToggleFavorite(item);
+        }
+        e.Handled = true;
     }
 
     private void OnItemMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -545,18 +588,6 @@ public partial class TrayMenuWindow : Window
         var row = FindAncestor<ListBoxItem>(element);
         if (row?.DataContext is not PluginMenuItem item) return;
         if (item.IsSeparator) return;
-
-        // Favorite star: a dedicated hit target on the right of the row.
-        // Clicking it toggles favorite state even on disabled (greyed/active)
-        // rows, never opens the submenu, and never dismisses the menu — the
-        // glyph just flips in place. Checked before the IsEnabled gate so an
-        // active grant's row is still favoritable.
-        if (item.OnToggleFavorite is not null && IsWithinNamedElement(element, row, "FavoriteStar"))
-        {
-            ToggleFavorite(item);
-            e.Handled = true;
-            return;
-        }
 
         if (!item.IsEnabled) return;
 
@@ -596,21 +627,33 @@ public partial class TrayMenuWindow : Window
 
         e.Handled = true;
 
-        // Close any open submenu/context chain, then open the context popup at
-        // the cursor. Reuses the submenu plumbing so the close/hover logic and
-        // InvokeAndDismiss-on-click all work unchanged.
+        var cursor = System.Windows.Forms.Cursor.Position;
+        OpenContextPopup(item, ctx, cursor.X, cursor.Y);
+    }
+
+    // Opens the row's ContextItems as a popup anchored at the given screen
+    // point. Reuses the submenu plumbing so the close/hover logic and
+    // InvokeAndDismiss-on-click all work unchanged. Shared by the mouse
+    // right-click path (anchored at the cursor) and the keyboard
+    // Shift+F10 / Apps path (anchored at the row).
+    private void OpenContextPopup(
+        PluginMenuItem item,
+        IReadOnlyList<PluginMenuItem> contextItems,
+        int screenX,
+        int screenY)
+    {
+        // Close any open submenu/context chain first.
         _activeSubmenu?.CloseChain();
 
-        var menu   = new TrayMenuWindow(ctx, parent: this);
-        var cursor = System.Windows.Forms.Cursor.Position;
-        menu.ShowAt(cursor.X, cursor.Y, openAboveAnchor: false);
+        var menu = new TrayMenuWindow(contextItems, parent: this);
+        menu.ShowAt(screenX, screenY, openAboveAnchor: false);
 
         _activeSubmenu    = menu;
         _activeSubmenuFor = item;
         _activeSubmenuIsContext = true;
     }
 
-    private void OpenSubmenu(PluginMenuItem item, ListBoxItem row)
+    private void OpenSubmenu(PluginMenuItem item, ListBoxItem row, bool focusFirstItem = false)
     {
         // Dedup: re-entering the same parent row while its submenu is open
         // shouldn't rebuild and re-show; it'd close and reopen on every tick.
@@ -650,6 +693,20 @@ public partial class TrayMenuWindow : Window
             submenu.Dispatcher.BeginInvoke(new Action(() =>
                 submenu.SearchBox.Focus()),
                 System.Windows.Threading.DispatcherPriority.Loaded);
+        }
+        else if (focusFirstItem)
+        {
+            // Keyboard-opened (Right arrow / Enter on a parent row): move the
+            // highlight into the child so arrows keep working there. Deferred
+            // to Loaded so the item containers exist. Mouse-opened submenus
+            // skip this — hover drives them and pre-selecting a row would add
+            // a highlight the mouse user never asked for.
+            submenu.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                var first = MenuKeyboardNavigation.FindFirstSelectableIndex(submenu.Items);
+                if (first >= 0) submenu.ItemsList.SelectedIndex = first;
+                submenu.ItemsList.Focus();
+            }), System.Windows.Threading.DispatcherPriority.Loaded);
         }
     }
 
@@ -697,13 +754,179 @@ public partial class TrayMenuWindow : Window
         }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
+    // Esc closes this level and everything below it (chain semantics as
+    // before), now also handing focus back to the parent menu's list so a
+    // keyboard user lands where they left off.
     private void OnKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         if (e.Key == Key.Escape)
         {
-            CloseChain();
+            NotifyKeyboardActivation();
+            CloseLevelAndReturnFocus();
             e.Handled = true;
         }
+    }
+
+    // ─── Keyboard navigation ─────────────────────────────────────────────
+    //
+    // PreviewKeyDown (not KeyDown) so these rules win over the ListBox's own
+    // directional navigation, which neither skips separators/disabled rows
+    // nor knows about submenus. Mouse behavior is untouched: nothing here
+    // runs until a key is pressed, and NotifyKeyboardActivation only
+    // suspends the hover poll's outside-dismiss until the cursor returns.
+    //
+    // Keys: Up/Down move the highlight (skip separators + disabled, wrap);
+    // Enter/Space invoke a leaf or open a submenu (focusing its first item);
+    // Right opens a parent row's submenu; Left closes a child level back to
+    // its parent; Esc closes the level chain; Shift+F10 / Apps opens the
+    // row's right-click context popup; Ctrl+F toggles the row's favorite.
+    // In a searchable flyout the SearchBox keeps all typing keys — Down
+    // moves into the results and Enter invokes the selected (else first)
+    // result.
+    private void OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        var inSearchBox = HasSearch && SearchBox.IsKeyboardFocusWithin;
+        // The favorite star is a real ToggleButton: while it has focus its
+        // own Space/Enter handling toggles it — don't double-handle.
+        var onFavoriteToggle = Keyboard.FocusedElement is System.Windows.Controls.Primitives.ToggleButton;
+
+        switch (e.Key)
+        {
+            case Key.Down:
+            case Key.Up:
+                if (inSearchBox && e.Key == Key.Up) return; // caret stays in the box
+                NotifyKeyboardActivation();
+                MoveSelection(e.Key == Key.Down ? +1 : -1);
+                if (inSearchBox) ItemsList.Focus();          // Down enters the results
+                e.Handled = true;
+                return;
+
+            case Key.Return:
+                if (onFavoriteToggle) return;
+                NotifyKeyboardActivation();
+                if (ActivateRowAt(inSearchBox ? SelectedOrFirstIndex() : ItemsList.SelectedIndex))
+                {
+                    e.Handled = true;
+                }
+                return;
+
+            case Key.Space:
+                if (inSearchBox || onFavoriteToggle) return; // typing / star toggle
+                NotifyKeyboardActivation();
+                if (ActivateRowAt(ItemsList.SelectedIndex)) e.Handled = true;
+                return;
+
+            case Key.Right:
+                if (inSearchBox) return;                     // caret movement
+                NotifyKeyboardActivation();
+                if (OpenSubmenuForSelectedRow()) e.Handled = true;
+                return;
+
+            case Key.Left:
+                if (inSearchBox) return;                     // caret movement
+                if (_parent is null) return;                 // root: nothing to fold into
+                NotifyKeyboardActivation();
+                CloseLevelAndReturnFocus();
+                e.Handled = true;
+                return;
+
+            case Key.F10 when Keyboard.Modifiers == ModifierKeys.Shift:
+            case Key.Apps:
+                NotifyKeyboardActivation();
+                if (OpenContextPopupForSelectedRow()) e.Handled = true;
+                return;
+
+            case Key.F when Keyboard.Modifiers == ModifierKeys.Control:
+                NotifyKeyboardActivation();
+                if (ToggleFavoriteForSelectedRow()) e.Handled = true;
+                return;
+        }
+    }
+
+    // The selected row's index when it can carry the highlight, else the
+    // first selectable row — the "Enter in the search box" target rule.
+    private int SelectedOrFirstIndex()
+        => MenuKeyboardNavigation.IsSelectable(Items, ItemsList.SelectedIndex)
+            ? ItemsList.SelectedIndex
+            : MenuKeyboardNavigation.FindFirstSelectableIndex(Items);
+
+    private void MoveSelection(int direction)
+    {
+        var next = MenuKeyboardNavigation.FindNextSelectableIndex(Items, ItemsList.SelectedIndex, direction);
+        if (next < 0) return;
+        ItemsList.SelectedIndex = next;
+        ItemsList.ScrollIntoView(ItemsList.SelectedItem);
+    }
+
+    // Same code path a click takes: invoke a leaf (InvokeAndDismiss) or open
+    // a parent row's submenu — keyboard-opened submenus also get their first
+    // item highlighted. Returns whether anything was actually activated.
+    private bool ActivateRowAt(int index)
+    {
+        if (!MenuKeyboardNavigation.IsSelectable(Items, index)) return false;
+        var item = Items[index];
+
+        if (item.HasChildren)
+        {
+            if (ItemsList.ItemContainerGenerator.ContainerFromIndex(index) is not ListBoxItem row) return false;
+            ItemsList.SelectedIndex = index;
+            OpenSubmenu(item, row, focusFirstItem: true);
+            return true;
+        }
+
+        if (item.Invoke is null) return false;
+        InvokeAndDismiss(item);
+        return true;
+    }
+
+    private bool OpenSubmenuForSelectedRow()
+    {
+        var index = ItemsList.SelectedIndex;
+        if (!MenuKeyboardNavigation.IsSelectable(Items, index)) return false;
+        if (!Items[index].HasChildren) return false;
+        return ActivateRowAt(index);
+    }
+
+    // Close this level (and everything below it) and hand focus back to the
+    // parent menu's list, which still holds the parent row's selection.
+    private void CloseLevelAndReturnFocus()
+    {
+        var parent = _parent;
+        CloseChain();
+        if (parent is { IsVisible: true })
+        {
+            parent.Activate();
+            parent.ItemsList.Focus();
+        }
+    }
+
+    // Shift+F10 / Apps: the keyboard equivalent of right-clicking the
+    // selected row — anchored at the row instead of the cursor.
+    private bool OpenContextPopupForSelectedRow()
+    {
+        var index = ItemsList.SelectedIndex;
+        if (index < 0 || index >= Items.Count) return false;
+        var item = Items[index];
+        if (item.IsSeparator || item.ContextItems is not { Count: > 0 } ctx) return false;
+        if (ItemsList.ItemContainerGenerator.ContainerFromIndex(index) is not ListBoxItem row) return false;
+
+        var anchor = row.PointToScreen(new System.Windows.Point(row.ActualWidth / 2, row.ActualHeight));
+        OpenContextPopup(item, ctx, (int)anchor.X, (int)anchor.Y);
+        return true;
+    }
+
+    private bool ToggleFavoriteForSelectedRow()
+    {
+        var index = ItemsList.SelectedIndex;
+        if (index < 0 || index >= Items.Count) return false;
+        var item = Items[index];
+        if (item.IsSeparator || item.OnToggleFavorite is null) return false;
+
+        ToggleFavorite(item);
+        // ToggleFavorite swaps the row's item instance; keep the highlight on
+        // the same row so repeated Ctrl+F keeps working.
+        ItemsList.SelectedIndex = index;
+        return true;
     }
 
 
@@ -739,19 +962,6 @@ public partial class TrayMenuWindow : Window
             element = VisualTreeHelper.GetParent(element);
         }
         return null;
-    }
-
-    // Walks up from the clicked element toward (but not past) the row,
-    // returning true if it passes through a named element — used to tell a
-    // click on the favorite star apart from a click anywhere else on the row.
-    private static bool IsWithinNamedElement(DependencyObject? element, DependencyObject stopAt, string name)
-    {
-        while (element is not null && !ReferenceEquals(element, stopAt))
-        {
-            if (element is FrameworkElement fe && fe.Name == name) return true;
-            element = VisualTreeHelper.GetParent(element);
-        }
-        return false;
     }
 
     private void ToggleFavorite(PluginMenuItem item)

@@ -25,6 +25,17 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
     // default buffer capacity so by default no entries are lost.
     private const int MaxDisplayedEntries = 500;
 
+    // Safety valve while the tail is paused: trims are deferred so rows don't
+    // crawl out from under the reader, but past 4x the cap they resume anyway.
+    // Accept the UI crawling in a sustained flood; Entries is temporarily a
+    // superset of the ring buffer while paused — deliberate, it reconverges on
+    // resume. Don't "fix" either of those.
+    private const int PausedHardCeiling = MaxDisplayedEntries * 4;
+
+    // Debounce for the free-text search box so a fast typist doesn't pay a
+    // full ICollectionView.Refresh per keystroke over 500 wrapped rows.
+    private static readonly TimeSpan SearchDebounceInterval = TimeSpan.FromMilliseconds(250);
+
     public const string AllTypesLabel = "(All types)";
 
     private readonly LogRingBuffer _buffer;
@@ -35,6 +46,9 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
     private readonly Dispatcher _dispatcher;
     private readonly CollectionViewSource _viewSource;
     private readonly CollectionViewSource _classOptionsSource;
+    private readonly TailFollowModel _tail = new();
+    private readonly DispatcherTimer _searchDebounceTimer;
+    private bool _suppressFilterRefresh;
     private bool _disposed;
 
     [ObservableProperty]
@@ -81,6 +95,31 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
     // column-header clicks; we drive filtering via the toolbar above.
     public ICollectionView EntriesView { get; }
 
+    // ---- Smart tail-follow state (decision logic lives in TailFollowModel;
+    // these are read-only bindable mirrors the window and pill consume). ----
+
+    /// <summary>True while the view stays pinned to the newest entry.</summary>
+    public bool FollowTail => _tail.FollowTail;
+
+    /// <summary>Raw entries added since the tail was paused (not filter-aware).</summary>
+    public int PendingCount => _tail.PendingCount;
+
+    /// <summary>
+    /// Drives the "Paused" pill: only meaningful while Auto-scroll (the
+    /// master switch) is checked — unchecked, the tail machinery is inert.
+    /// </summary>
+    public bool IsTailPaused => AutoScroll && !_tail.FollowTail;
+
+    /// <summary>Raised when the tail resumes so the window can scroll to the end.</summary>
+    public event Action? TailResumed;
+
+    /// <summary>
+    /// Raised whenever the entries view is refreshed (filter/search change)
+    /// so the window can suppress one follow-state recomputation and restore
+    /// the paused viewport anchor.
+    /// </summary>
+    public event Action? EntriesViewRefreshed;
+
     public IReadOnlyList<LogEventLevel> AvailableLevels { get; } = new[]
     {
         LogEventLevel.Verbose,
@@ -105,6 +144,12 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
         _logger = logger;
         _dispatcher = System.Windows.Application.Current?.Dispatcher
             ?? throw new InvalidOperationException("LogViewerViewModel requires a running WPF Application.");
+
+        _searchDebounceTimer = new DispatcherTimer(DispatcherPriority.Input, _dispatcher)
+        {
+            Interval = SearchDebounceInterval,
+        };
+        _searchDebounceTimer.Tick += OnSearchDebounceElapsed;
 
         // CRITICAL ORDERING: initialise _viewSource + EntriesView BEFORE
         // any [ObservableProperty] setters fire, because their partial
@@ -160,9 +205,87 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
         _logger.LogInformation("Log-to-disk {State}", value ? "enabled" : "disabled");
     }
 
-    partial void OnSelectedTypeFilterChanged(string value) => EntriesView.Refresh();
-    partial void OnMessageFilterChanged(string value) => EntriesView.Refresh();
-    partial void OnSelectedClassOptionChanged(ClassFilterOption? value) => EntriesView.Refresh();
+    partial void OnAutoScrollChanged(bool value) => OnPropertyChanged(nameof(IsTailPaused));
+
+    // ComboBox filters refresh immediately; the free-text search debounces
+    // (a Refresh per keystroke re-filters all 500 rows and resets the view).
+    partial void OnSelectedTypeFilterChanged(string value) => RefreshEntriesView();
+    partial void OnSelectedClassOptionChanged(ClassFilterOption? value) => RefreshEntriesView();
+
+    partial void OnMessageFilterChanged(string value)
+    {
+        if (_suppressFilterRefresh)
+        {
+            _searchDebounceTimer.Stop();
+            return;
+        }
+        _searchDebounceTimer.Stop();
+        _searchDebounceTimer.Start();
+    }
+
+    private void OnSearchDebounceElapsed(object? sender, EventArgs e)
+    {
+        _searchDebounceTimer.Stop();
+        RefreshEntriesView();
+    }
+
+    private void RefreshEntriesView()
+    {
+        if (_suppressFilterRefresh) return;
+        EntriesView.Refresh();
+        EntriesViewRefreshed?.Invoke();
+    }
+
+    // ---- Tail-follow transitions (called from the window's ScrollViewer /
+    // selection / context-menu hooks, and from the pill's Resume button). ----
+
+    /// <summary>
+    /// A user-initiated scroll settled at the given position; recompute
+    /// whether the view is at the tail.
+    /// </summary>
+    public void NotifyUserScroll(double verticalOffset, double viewportHeight, double extentHeight)
+    {
+        if (!_tail.OnUserScroll(verticalOffset, viewportHeight, extentHeight)) return;
+        if (_tail.FollowTail)
+        {
+            // Scrolled back to the bottom: rejoin the tail (applies trims).
+            ApplyResume();
+        }
+        else
+        {
+            SyncTailState();
+        }
+    }
+
+    /// <summary>Explicit pause: a row was selected or a context menu opened.</summary>
+    public void PauseTail()
+    {
+        if (_tail.Pause()) SyncTailState();
+    }
+
+    [RelayCommand]
+    private void ResumeTail() => ApplyResume();
+
+    private void ApplyResume()
+    {
+        // Apply the trims deferred while paused. If this removes the selected
+        // item, WPF clears the selection — deliberate: the user chose to
+        // rejoin the tail.
+        var trims = _tail.Resume(Entries.Count, MaxDisplayedEntries);
+        while (trims-- > 0)
+        {
+            Entries.RemoveAt(0);
+        }
+        SyncTailState();
+        TailResumed?.Invoke();
+    }
+
+    private void SyncTailState()
+    {
+        OnPropertyChanged(nameof(FollowTail));
+        OnPropertyChanged(nameof(PendingCount));
+        OnPropertyChanged(nameof(IsTailPaused));
+    }
 
     // Wired to "click the class name on a row to filter by it". Saves the
     // user from hunting through the Class dropdown when they've already
@@ -191,14 +314,48 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
             }
         }
         SelectedClassOption = ClassFilterOption.All;
+
+        // Nothing left to read, so a paused tail has nothing to anchor to:
+        // clear the deferred-trim state and rejoin the tail.
+        ApplyResume();
+    }
+
+    /// <summary>
+    /// Explicit clear gesture (Esc in the search box): empty the search text
+    /// and re-filter NOW, skipping the typing debounce — the user asked for
+    /// the reset, so there is nothing to coalesce.
+    /// </summary>
+    public void ClearSearch()
+    {
+        _suppressFilterRefresh = true;
+        try
+        {
+            MessageFilter = string.Empty;
+        }
+        finally
+        {
+            _suppressFilterRefresh = false;
+        }
+        _searchDebounceTimer.Stop();
+        RefreshEntriesView();
     }
 
     [RelayCommand]
     private void ClearFilters()
     {
-        SelectedTypeFilter = AllTypesLabel;
-        MessageFilter = string.Empty;
-        SelectedClassOption = ClassFilterOption.All;
+        // Coalesce the three property changes into one view refresh.
+        _suppressFilterRefresh = true;
+        try
+        {
+            SelectedTypeFilter = AllTypesLabel;
+            MessageFilter = string.Empty;
+            SelectedClassOption = ClassFilterOption.All;
+        }
+        finally
+        {
+            _suppressFilterRefresh = false;
+        }
+        RefreshEntriesView();
     }
 
     [RelayCommand]
@@ -274,10 +431,20 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
         {
             if (_disposed) return;
             Entries.Add(entry);
-            while (Entries.Count > MaxDisplayedEntries)
+
+            // Following: trim to the cap as always. Paused: defer trims so the
+            // viewport stays anchored on what the user is reading (deferred
+            // trims apply on resume), with a hard ceiling as a safety valve.
+            var trims = _tail.OnEntryAdded(Entries.Count, MaxDisplayedEntries, PausedHardCeiling);
+            while (trims-- > 0)
             {
                 Entries.RemoveAt(0);
             }
+            if (!_tail.FollowTail)
+            {
+                OnPropertyChanged(nameof(PendingCount));
+            }
+
             EnsureClassOption(entry.Category);
         });
     }
@@ -299,6 +466,8 @@ public sealed partial class LogViewerViewModel : ObservableObject, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _searchDebounceTimer.Stop();
+        _searchDebounceTimer.Tick -= OnSearchDebounceElapsed;
         _buffer.EntryAdded -= OnEntryAdded;
         _viewSource.Filter -= OnViewFilter;
     }

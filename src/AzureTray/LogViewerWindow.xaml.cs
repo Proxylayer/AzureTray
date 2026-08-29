@@ -1,10 +1,10 @@
 using System;
-using System.Collections.Specialized;
 using System.Globalization;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using AzureTray.Logging;
 using AzureTray.Shell;
 using AzureTray.ViewModels;
@@ -14,6 +14,13 @@ namespace AzureTray;
 public partial class LogViewerWindow : Window
 {
     private readonly LogViewerViewModel _viewModel;
+    private ScrollViewer? _entriesScrollViewer;
+
+    // Set whenever the entries view is refreshed (filter/search change) or
+    // we scroll programmatically after one: a Reset can settle the viewport
+    // near the bottom and would otherwise silently resume the tail. Cleared
+    // on the next user-scroll ScrollChanged cycle.
+    private bool _refreshPending;
 
     public LogViewerWindow(LogViewerViewModel viewModel)
     {
@@ -22,42 +29,132 @@ public partial class LogViewerWindow : Window
         DataContext = viewModel;
         this.EnableDarkTitleBar();
 
-        if (viewModel.Entries is INotifyCollectionChanged source)
-        {
-            source.CollectionChanged += OnEntriesChanged;
-        }
+        viewModel.TailResumed += OnTailResumed;
+        viewModel.EntriesViewRefreshed += OnEntriesViewRefreshed;
+
+        Loaded += OnWindowLoaded;
 
         Closed += (_, _) =>
         {
-            if (viewModel.Entries is INotifyCollectionChanged src)
+            viewModel.TailResumed -= OnTailResumed;
+            viewModel.EntriesViewRefreshed -= OnEntriesViewRefreshed;
+            if (_entriesScrollViewer is not null)
             {
-                src.CollectionChanged -= OnEntriesChanged;
+                _entriesScrollViewer.ScrollChanged -= OnEntriesScrollChanged;
             }
             (viewModel as IDisposable)?.Dispose();
         };
     }
 
-    private void OnEntriesChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    private void OnWindowLoaded(object sender, RoutedEventArgs e)
     {
-        if (!_viewModel.AutoScroll) return;
-        if (e.Action != NotifyCollectionChangedAction.Add) return;
+        _entriesScrollViewer = FindDescendant<ScrollViewer>(EntriesList);
+        if (_entriesScrollViewer is not null)
+        {
+            _entriesScrollViewer.ScrollChanged += OnEntriesScrollChanged;
+            if (_viewModel.AutoScroll && _viewModel.FollowTail)
+            {
+                _entriesScrollViewer.ScrollToEnd();
+            }
+        }
+    }
 
-        // Wait for the ListBox to realise the new row before scrolling, so
-        // ScrollIntoView lands on the right element. Background priority
-        // fires after layout / item containers materialise.
+    // Smart tail: distinguish "content grew" (extent changed — keep the pin
+    // if following, never flips the follow state) from "the user scrolled"
+    // (extent unchanged, offset moved — recompute the follow state from
+    // proximity to the bottom).
+    private void OnEntriesScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if (e.ExtentHeightChange != 0)
+        {
+            if (_viewModel.AutoScroll && _viewModel.FollowTail)
+            {
+                _entriesScrollViewer?.ScrollToEnd();
+            }
+            return;
+        }
+
+        if (e.VerticalChange == 0) return;
+
+        if (_refreshPending)
+        {
+            _refreshPending = false;
+            return;
+        }
+
+        _viewModel.NotifyUserScroll(e.VerticalOffset, e.ViewportHeight, e.ExtentHeight);
+    }
+
+    private void OnTailResumed()
+    {
+        _entriesScrollViewer?.ScrollToEnd();
+    }
+
+    private void OnEntriesViewRefreshed()
+    {
+        _refreshPending = true;
+
+        // While following, the extent-change branch re-pins to the end on
+        // its own. While paused, restore the anchor: if the selected item
+        // still passes the filter, bring it back into view — deferred so the
+        // Reset's layout has settled and item containers exist.
+        if (_viewModel.FollowTail) return;
+
         Dispatcher.BeginInvoke(new Action(() =>
         {
-            var view = _viewModel.EntriesView;
-            object? last = null;
-            foreach (var item in view) last = item;
-            if (last is not null)
-            {
-                EntriesList.ScrollIntoView(last);
-            }
+            var selected = EntriesList.SelectedItem;
+            if (selected is null || !_viewModel.EntriesView.Contains(selected)) return;
+            _refreshPending = true; // ScrollIntoView must not flip the follow state
+            EntriesList.ScrollIntoView(selected);
         }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
+    // Selecting a row is a "let me read this" gesture: pause the tail.
+    // Only user selection counts — selection cleared by a removed item
+    // (AddedItems empty) must not pause.
+    private void OnEntriesSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.AddedItems.Count > 0)
+        {
+            _viewModel.PauseTail();
+        }
+    }
+
+    private void OnEntriesContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        _viewModel.PauseTail();
+    }
+
+    private static T? FindDescendant<T>(DependencyObject root) where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is T match) return match;
+            if (FindDescendant<T>(child) is { } nested) return nested;
+        }
+        return null;
+    }
+
     private void CloseClick(object sender, RoutedEventArgs e) => Close();
+
+    // Search-box keyboard semantics: Enter hands focus to the entries list
+    // (arrow keys then walk the results); Esc clears a non-empty search
+    // immediately — marked handled so the window's IsCancel Close only fires
+    // on the SECOND Esc, once the box is already empty.
+    private void OnSearchBoxPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            EntriesList.Focus();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape && !string.IsNullOrEmpty(SearchBox.Text))
+        {
+            _viewModel.ClearSearch();
+            e.Handled = true;
+        }
+    }
 
     // Right-clicking anywhere inside a ListBoxItem should select that row
     // first so the context menu's Copy commands act on what the user

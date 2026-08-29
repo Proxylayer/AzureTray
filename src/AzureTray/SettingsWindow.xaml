@@ -1,10 +1,15 @@
-﻿<Window x:Class="AzureTray.SettingsWindow"
+<Window x:Class="AzureTray.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:shell="clr-namespace:AzureTray.Shell"
         Title="{Binding WindowTitle}"
         Width="640" Height="780"
+        MinHeight="480" MinWidth="560"
+        MaxHeight="{Binding Source={x:Static SystemParameters.WorkArea}, Path=Height}"
         WindowStartupLocation="CenterScreen"
-        ResizeMode="NoResize"
+        ResizeMode="CanResize"
+        FocusManager.FocusedElement="{Binding ElementName=LaunchAtStartupCheckBox}"
+        PreviewKeyDown="OnWindowPreviewKeyDown"
         Background="{DynamicResource Brush.Surface.Base}"
         Foreground="{DynamicResource Brush.Text.Primary}"
         FontFamily="{DynamicResource Font.Family.UI}"
@@ -15,7 +20,7 @@
         <!-- Right-aligned form label. Keeps a fixed column width so all labels
              stack flush with the inputs to their right. -->
         <Style x:Key="FormLabel" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{StaticResource Brush.Text.Secondary}"/>
+            <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Secondary}"/>
             <Setter Property="HorizontalAlignment" Value="Right"/>
             <Setter Property="VerticalAlignment" Value="Center"/>
             <Setter Property="Margin" Value="0,3,12,3"/>
@@ -27,7 +32,6 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
@@ -51,8 +55,8 @@
             <Button.Template>
                 <ControlTemplate TargetType="Button">
                     <Border x:Name="Bd"
-                            Background="#1F6FEB"
-                            BorderBrush="#2F7DF0"
+                            Background="{DynamicResource Brush.Accent}"
+                            BorderBrush="{DynamicResource Brush.Accent.Hover}"
                             BorderThickness="1"
                             CornerRadius="6"
                             Padding="14,10">
@@ -61,10 +65,10 @@
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="#2F7DF0"/>
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Brush.Accent.Hover}"/>
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Bd" Property="Background" Value="#1856B8"/>
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Brush.Accent.Pressed}"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -73,11 +77,11 @@
                 <TextBlock DockPanel.Dock="Right"
                            Text="Install now ›"
                            FontWeight="SemiBold"
-                           Foreground="White"
+                           Foreground="{DynamicResource Brush.Text.Inverse}"
                            VerticalAlignment="Center"
                            Margin="12,0,0,0"/>
                 <TextBlock Text="{Binding UpdateBannerText}"
-                           Foreground="White"
+                           Foreground="{DynamicResource Brush.Text.Inverse}"
                            VerticalAlignment="Center"
                            TextWrapping="Wrap"/>
             </DockPanel>
@@ -86,7 +90,12 @@
         <!-- All configuration cards live inside a single ScrollViewer so the
              plugin section can grow with the number of installed plugins
              without pushing the version/close row off-screen. -->
-        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <!-- SettingsScroll gets a handledEventsToo MouseWheel hook in
+             code-behind: single-line TextBoxes, ComboBoxes and the inner
+             plugin ListBoxes mark wheel events handled even when they cannot
+             scroll (any further), which would otherwise strand the wheel over
+             those controls. See OnSettingsScrollMouseWheel. -->
+        <ScrollViewer x:Name="SettingsScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel>
 
         <!-- General app-level toggles. Today this is just the launch-at-startup
@@ -97,7 +106,8 @@
                 <TextBlock Text="General"
                            Style="{StaticResource Text.Subheading}"
                            Margin="0,0,0,8"/>
-                <CheckBox Content="Launch at Windows sign-in"
+                <CheckBox x:Name="LaunchAtStartupCheckBox"
+                          Content="Launch at Windows sign-in"
                           IsChecked="{Binding LaunchAtStartup, Mode=TwoWay}"
                           ToolTip="Adds AzureTray to HKCU\Software\Microsoft\Windows\CurrentVersion\Run so it starts automatically when you sign in to Windows."/>
             </StackPanel>
@@ -145,7 +155,7 @@
                                                    Visibility="{Binding ProbeDisabled, Converter={StaticResource BoolToVisibility}}"/>
                                         <TextBlock Text="  (sign-in expired)"
                                                    FontStyle="Italic"
-                                                   Foreground="#C0392B"
+                                                   Foreground="{DynamicResource Brush.Status.Error}"
                                                    VerticalAlignment="Center"
                                                    Visibility="{Binding NeedsReauth, Converter={StaticResource BoolToVisibility}}"/>
                                     </StackPanel>
@@ -224,6 +234,7 @@
                                     </Button>
                                     <Button Content="Edit"
                                             Margin="0,0,8,0"
+                                            AutomationProperties.Name="{Binding DisplayName, StringFormat='Edit tenant {0}'}"
                                             ToolTip="Pre-fills the manual form below with this tenant's display name and client id so you can change them. Tenant ID itself is locked.">
                                         <Button.Style>
                                             <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
@@ -243,6 +254,7 @@
                                         </Button.CommandParameter>
                                     </Button>
                                     <Button Content="Remove"
+                                            AutomationProperties.Name="{Binding DisplayName, StringFormat='Remove tenant {0}'}"
                                             Command="{Binding DataContext.RemoveTenantCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                             CommandParameter="{Binding}"/>
                                 </StackPanel>
@@ -283,7 +295,7 @@
                         </Style>
                     </StackPanel.Style>
                     <TextBlock Text="No tenants yet"
-                               Foreground="{StaticResource Brush.Text.Secondary}"
+                               Foreground="{DynamicResource Brush.Text.Secondary}"
                                HorizontalAlignment="Center"
                                FontWeight="SemiBold"/>
                     <TextBlock Text="Click &quot;Sign in with Windows account&quot; below to add the tenant your Windows session is signed in to."
@@ -311,7 +323,10 @@
 
                 <!-- Split primary action button. Main half fires the
                      current mode's action (Windows sign-in OR manual save);
-                     chevron half opens a ContextMenu to switch modes. -->
+                     chevron half opens a ContextMenu to switch modes.
+                     No access-key mnemonic: the label is VM-driven
+                     (PrimaryActionLabel changes with the selected mode), so
+                     an underscore can't be placed in a literal here. -->
                 <StackPanel Orientation="Horizontal"
                             HorizontalAlignment="Right"
                             Margin="0,0,0,4">
@@ -322,6 +337,7 @@
                     <Button x:Name="ModeDropdownButton"
                             Style="{StaticResource Button.SplitPrimary.Chevron}"
                             Click="OnModeDropdownClick"
+                            AutomationProperties.Name="Change sign-in mode"
                             ToolTip="Switch between Windows sign-in and manual setup.">
                         <TextBlock Text="&#x25BE;" FontSize="11"/>
                         <Button.ContextMenu>
@@ -351,7 +367,7 @@
                                     <Setter Property="Visibility" Value="Collapsed"/>
                                 </DataTrigger>
                                 <DataTrigger Binding="{Binding AddTenantStatusIsError}" Value="True">
-                                    <Setter Property="Foreground" Value="{StaticResource Brush.Status.Error}"/>
+                                    <Setter Property="Foreground" Value="{DynamicResource Brush.Status.Error}"/>
                                 </DataTrigger>
                             </Style.Triggers>
                         </Style>
@@ -378,7 +394,13 @@
                      the user selects from the split button's dropdown.
                      Also used as the Edit form when the user clicks Edit
                      on a tenant row (pre-populated, Tenant ID locked). -->
+                <!-- IsSharedSizeScope: the two form grids below share the
+                     label column via SharedSizeGroup so their inputs stay
+                     flush with each other while the column can still grow
+                     for large system text sizes (MinWidth keeps the default
+                     look; nothing truncates any more). -->
                 <StackPanel Visibility="{Binding IsManualMode, Converter={StaticResource BoolToVisibility}}"
+                            Grid.IsSharedSizeScope="True"
                             Margin="0,12,0,0">
 
                 <!-- Edit-mode banner: tells the user they're editing an
@@ -407,7 +429,7 @@
 
                 <Grid>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="{StaticResource Width.FormLabelColumn}"/>
+                        <ColumnDefinition Width="Auto" MinWidth="110" SharedSizeGroup="FormLabelCol"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
@@ -422,6 +444,7 @@
                     <TextBlock Grid.Row="0" Grid.Column="0" Text="Domain" Style="{StaticResource FormLabel}"/>
                     <TextBox Grid.Row="0" Grid.Column="1"
                              Text="{Binding NewTenantDomain, UpdateSourceTrigger=PropertyChanged}"
+                             shell:EnterKeyBehavior.Command="{Binding LookupDomainCommand}"
                              Margin="0,3"/>
                     <Button Grid.Row="0" Grid.Column="2"
                             Content="Look up"
@@ -438,24 +461,27 @@
                     <TextBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2"
                              Text="{Binding NewTenantId, UpdateSourceTrigger=PropertyChanged}"
                              IsReadOnly="{Binding IsTenantIdReadOnly}"
+                             shell:EnterKeyBehavior.Action="MoveFocusNext"
                              Margin="0,3"
                              ToolTip="The tenant's GUID. Locked while editing — remove and re-add to change."/>
 
                     <TextBlock Grid.Row="3" Grid.Column="0" Text="Display name" Style="{StaticResource FormLabel}"/>
                     <TextBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
                              Text="{Binding NewTenantDisplayName, UpdateSourceTrigger=PropertyChanged}"
+                             shell:EnterKeyBehavior.Action="MoveFocusNext"
                              Margin="0,3"/>
 
                     <TextBlock Grid.Row="4" Grid.Column="0" Text="Client ID" Style="{StaticResource FormLabel}"/>
                     <TextBox Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2"
                              Text="{Binding NewTenantClientId, UpdateSourceTrigger=PropertyChanged}"
+                             shell:EnterKeyBehavior.Command="{Binding PrimaryActionCommand}"
                              Margin="0,3"
                              ToolTip="GUID of an app registration in this tenant. Leave blank to use the global App:Auth:ClientId, or use the search below to find one by name."/>
                 </Grid>
 
                 <Grid Margin="0,8,0,0">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="{StaticResource Width.FormLabelColumn}"/>
+                        <ColumnDefinition Width="Auto" MinWidth="110" SharedSizeGroup="FormLabelCol"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
@@ -467,6 +493,7 @@
                     <TextBlock Grid.Row="0" Grid.Column="0" Text="Search by name" Style="{StaticResource FormLabel}"/>
                     <TextBox Grid.Row="0" Grid.Column="1"
                              Text="{Binding NewTenantAppRegistrationName, UpdateSourceTrigger=PropertyChanged}"
+                             shell:EnterKeyBehavior.Command="{Binding SearchAppRegistrationsCommand}"
                              Margin="0,3"
                              ToolTip="Type a prefix and click Search to find app registrations in this tenant."/>
                     <Button Grid.Row="0" Grid.Column="2"
@@ -528,24 +555,16 @@
         <!-- Single Plugins card: NuGet tag-search at top, installed list
              in the middle, file-install + open-folder actions at the
              bottom. -->
-        <Border Style="{StaticResource Card}" Margin="{StaticResource Margin.CardGap}">
-            <Border.Resources>
-                <!-- Soften the system selection highlight so the bright
-                     accent blue doesn't render row text unreadable. Pin
-                     the foreground to Brush.Text.Primary for both active
-                     and inactive selection states. Scoped to this card
-                     so other ListBoxes elsewhere keep their behaviour. -->
-                <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}"
-                                 Color="{StaticResource Color.Accent}" Opacity="0.25"/>
-                <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"
-                                 Color="{StaticResource Color.Text.Primary}"/>
-                <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"
-                                 Color="{StaticResource Color.Accent}" Opacity="0.18"/>
-                <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}"
-                                 Color="{StaticResource Color.Text.Primary}"/>
-                <SolidColorBrush x:Key="{x:Static SystemColors.ControlBrushKey}"
-                                 Color="{StaticResource Color.Accent}" Opacity="0.18"/>
-            </Border.Resources>
+        <!-- SoftSelectionScope: softens the system selection highlight so the
+             bright accent blue doesn't render row text unreadable. Scoped to
+             this card so other ListBoxes elsewhere keep their behaviour.
+             Applied in code (aliasing the SystemColors selection keys to the
+             theme's Brush.Selection.* set) because the keyed <StaticResource>
+             XAML spelling crashes Baml2006Reader's deferred key pre-read.
+             High Contrast still remaps the set to the real Highlight pair —
+             and now live, no window reopen needed. -->
+        <Border Style="{StaticResource Card}" Margin="{StaticResource Margin.CardGap}"
+                shell:SoftSelectionScope.IsEnabled="True">
             <StackPanel>
                 <TextBlock Text="Plugins"
                            Style="{StaticResource Text.Subheading}"
@@ -559,7 +578,10 @@
                      PluginUpdateState (published by the background poll), so
                      it is here whether or not the toast was dismissed.
                      Informational only — the action lives on each installed
-                     row so the user can see exactly what is being replaced. -->
+                     row so the user can see exactly what is being replaced.
+                     Colors deliberately hard-coded as a self-consistent pair
+                     (white on dark navy) so the banner stays readable under
+                     any theme, High Contrast included. -->
                 <Border Background="#1B3A63"
                         BorderBrush="#2F7DF0"
                         BorderThickness="1"
@@ -599,7 +621,7 @@
                                       VerticalAlignment="Center"
                                       Margin="12,0,0,0"/>
                             <Button Grid.Column="2"
-                                    Content="Refresh"
+                                    Content="_Refresh"
                                     Margin="8,0,0,0"
                                     Command="{Binding RefreshOnlinePluginsCommand}"/>
                         </Grid>
@@ -634,10 +656,10 @@
                                         <StackPanel Grid.Column="0" Margin="0,0,8,0">
                                             <TextBlock TextWrapping="Wrap">
                                                 <Run Text="{Binding DisplayName}" FontWeight="SemiBold"/>
-                                                <Run Text="  by " Foreground="{StaticResource Brush.Text.Muted}"/>
-                                                <Run Text="{Binding Publisher}" Foreground="{StaticResource Brush.Text.Muted}"/>
-                                                <Run Text="  v" Foreground="{StaticResource Brush.Text.Muted}"/>
-                                                <Run Text="{Binding Versions[0].Version}" Foreground="{StaticResource Brush.Text.Muted}"/>
+                                                <Run Text="  by " Foreground="{DynamicResource Brush.Text.Muted}"/>
+                                                <Run Text="{Binding Publisher}" Foreground="{DynamicResource Brush.Text.Muted}"/>
+                                                <Run Text="  v" Foreground="{DynamicResource Brush.Text.Muted}"/>
+                                                <Run Text="{Binding Versions[0].Version}" Foreground="{DynamicResource Brush.Text.Muted}"/>
                                             </TextBlock>
                                             <TextBlock Text="{Binding Description}"
                                                        Style="{StaticResource Text.Muted}"
@@ -689,7 +711,7 @@
                                     <TextBlock Text="{Binding StatusDisplay}" Style="{StaticResource Text.Muted}" TextWrapping="Wrap"/>
                                     <!-- Only present when the feed offers a newer version. -->
                                     <TextBlock Text="{Binding UpdateHint}"
-                                               Foreground="#5A9BF6"
+                                               Foreground="{DynamicResource Brush.Text.Link}"
                                                TextWrapping="Wrap"
                                                Visibility="{Binding HasUpdate, Converter={StaticResource BoolToVisibility}}"/>
                                 </StackPanel>
@@ -736,10 +758,10 @@
                                TextWrapping="Wrap"
                                Margin="0,0,8,0"/>
                     <Button Grid.Column="1"
-                            Content="Install from file..."
+                            Content="Install from _file..."
                             Command="{Binding InstallExtensionCommand}"/>
                     <Button Grid.Column="2"
-                            Content="Open plugins folder"
+                            Content="_Open plugins folder"
                             Margin="8,0,0,0"
                             Command="{Binding OpenPluginsFolderCommand}"/>
                 </Grid>
@@ -749,9 +771,15 @@
         </StackPanel>
         </ScrollViewer>
 
-        <StackPanel Grid.Row="3"
-                    Orientation="Horizontal"
-                    Margin="0,12,0,0">
+        <!-- Footer: one standard dialog row — version + update action on the
+             left, Close right-aligned. -->
+        <Grid Grid.Row="3" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0"
+                    Orientation="Horizontal">
             <TextBlock Text="{Binding VersionDisplay}"
                        Style="{StaticResource Text.Muted}"
                        VerticalAlignment="Center"
@@ -759,7 +787,7 @@
             <!-- "Check for updates" while nothing is pending; once an update is
                  downloaded and waiting, this collapses and the accent-blue
                  "Install update" button below takes its place. -->
-            <Button Content="Check for updates"
+            <Button Content="Check for _updates"
                     Command="{Binding CheckUpdatesCommand}">
                 <Button.Style>
                     <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
@@ -771,7 +799,7 @@
                     </Style>
                 </Button.Style>
             </Button>
-            <Button Content="Install update"
+            <Button Content="_Install update"
                     Style="{StaticResource Button.Primary}"
                     Command="{Binding ApplyPendingUpdateCommand}"
                     Visibility="{Binding IsUpdateAvailable, Converter={StaticResource BoolToVisibility}}"/>
@@ -779,16 +807,14 @@
                        Style="{StaticResource Text.Muted}"
                        VerticalAlignment="Center"
                        Margin="12,0,0,0"/>
-        </StackPanel>
-
-        <StackPanel Grid.Row="4"
-                    Orientation="Horizontal"
-                    HorizontalAlignment="Right"
-                    Margin="0,12,0,0">
-            <Button Content="Close"
+            </StackPanel>
+            <Button Grid.Column="1"
+                    Content="_Close"
                     Width="90"
+                    VerticalAlignment="Center"
+                    Margin="12,0,0,0"
                     Click="CloseClick"
                     IsCancel="True"/>
-        </StackPanel>
+        </Grid>
     </Grid>
 </Window>

@@ -47,8 +47,13 @@ public sealed class UpdateService : IUpdateService
         }
     }
 
+    // Installed builds show Velopack's authoritative installed version;
+    // non-installed (dev) runs still show the assembly's own version number
+    // with a dev marker rather than a bare "dev".
     public string CurrentVersionDisplay =>
-        _manager is { IsInstalled: true, CurrentVersion: { } v } ? v.ToString() : "dev";
+        _manager is { IsInstalled: true, CurrentVersion: { } v }
+            ? v.ToString()
+            : $"{AppVersion.Display} (dev)";
 
     public bool IsInstalledBuild => _manager?.IsInstalled == true;
 

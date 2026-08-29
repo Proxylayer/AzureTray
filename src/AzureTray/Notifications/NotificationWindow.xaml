@@ -12,6 +12,7 @@
         ShowInTaskbar="False"
         Topmost="True"
         WindowStartupLocation="Manual"
+        PreviewKeyDown="OnPreviewKeyDown"
         Background="Transparent"
         AllowsTransparency="True"
         Foreground="{DynamicResource Brush.Text.Primary}"
@@ -84,6 +85,7 @@
                         Foreground="{DynamicResource Brush.Text.Muted}"
                         Cursor="Hand"
                         Command="{Binding DismissCommand}"
+                        AutomationProperties.Name="Dismiss"
                         ToolTip="Dismiss"/>
             </Grid>
 
@@ -106,8 +108,11 @@
                 <StackPanel>
                     <!-- Body indents under the glyph so the message aligns with
                          the title text. -->
+                    <!-- LiveSetting makes screen readers announce the toast's
+                         message when it appears, without stealing focus. -->
                     <TextBlock Text="{Binding Message}"
                                TextWrapping="Wrap"
+                               AutomationProperties.LiveSetting="Polite"
                                Foreground="{DynamicResource Brush.Text.Secondary}"
                                Margin="42,6,14,8"/>
 
@@ -157,7 +162,8 @@
             <StackPanel Grid.Row="2"
                         Margin="14,0,14,0"
                         Visibility="{Binding IsChoice, Converter={StaticResource BoolToVis}}">
-                <ListBox ItemsSource="{Binding Choices}"
+                <ListBox x:Name="ChoiceList"
+                         ItemsSource="{Binding Choices}"
                          SelectedItem="{Binding SelectedChoice, Mode=TwoWay}"
                          BorderBrush="{DynamicResource Brush.Border.Default}"
                          BorderThickness="1"
@@ -166,61 +172,94 @@
                          MaxHeight="120"/>
                 <StackPanel Margin="0,8,0,0"
                             Visibility="{Binding AllowOther, Converter={StaticResource BoolToVis}}">
-                    <RadioButton Content="Other:"
+                    <RadioButton x:Name="OtherRadio"
+                                 Content="Other:"
                                  IsChecked="{Binding IsOtherSelected, Mode=TwoWay}"
                                  Foreground="{DynamicResource Brush.Text.Primary}"
                                  GroupName="NotificationOther"/>
                     <TextBox Text="{Binding OtherText, UpdateSourceTrigger=PropertyChanged}"
                              IsEnabled="{Binding IsOtherSelected}"
+                             AutomationProperties.Name="Other reason"
                              Margin="20,4,0,0"
                              Padding="4,2"/>
                 </StackPanel>
             </StackPanel>
 
-            <!-- TextInput input -->
-            <TextBox Grid.Row="2"
-                     Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
-                     Padding="6,4"
-                     Margin="14,0,14,0"
-                     Visibility="{Binding IsTextInput, Converter={StaticResource BoolToVis}}"/>
+            <!-- TextInput input. The request's Placeholder renders as a
+                 watermark overlay (visible only while the box is empty) and
+                 doubles as the box's accessible name, so a screen reader says
+                 what the input is for rather than "edit, blank". -->
+            <Grid Grid.Row="2"
+                  Margin="14,0,14,0"
+                  Visibility="{Binding IsTextInput, Converter={StaticResource BoolToVis}}">
+                <TextBox x:Name="InputBox"
+                         Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
+                         AutomationProperties.Name="{Binding Placeholder, TargetNullValue=Response}"
+                         Padding="6,4"/>
+                <TextBlock Text="{Binding Placeholder}"
+                           IsHitTestVisible="False"
+                           Margin="10,0,0,0"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource Brush.Text.Muted}">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Text, ElementName=InputBox}" Value="">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+            </Grid>
 
             <!-- Action buttons -->
             <Grid Grid.Row="3" Margin="14,12,14,14">
                 <StackPanel Orientation="Horizontal"
                             HorizontalAlignment="Right"
                             Visibility="{Binding IsYesNo, Converter={StaticResource BoolToVis}}">
-                    <Button Content="Yes"
+                    <Button x:Name="YesButton"
+                            Content="_Yes"
                             Width="80"
                             Padding="0,4"
                             Margin="0,0,8,0"
+                            IsDefault="True"
                             Command="{Binding YesCommand}"/>
-                    <Button Content="No"
+                    <Button Content="_No"
                             Width="80"
                             Padding="0,4"
+                            IsCancel="True"
                             Command="{Binding NoCommand}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal"
                             HorizontalAlignment="Right"
                             Visibility="{Binding IsSubmittable, Converter={StaticResource BoolToVis}}">
-                    <Button Content="Submit"
+                    <Button Content="_Submit"
                             Width="80"
                             Padding="0,4"
                             Margin="0,0,8,0"
+                            IsDefault="True"
                             Command="{Binding SubmitCommand}"/>
-                    <Button Content="Cancel"
+                    <Button Content="_Cancel"
                             Width="80"
                             Padding="0,4"
+                            IsCancel="True"
                             Command="{Binding DismissCommand}"/>
                 </StackPanel>
                 <!-- Single-action call-to-action (ActionRequest). Primary
                      button uses the severity colour so e.g. "Update now"
-                     reads as blue. -->
+                     reads as blue. No access-key mnemonic: the label comes
+                     from the plugin's request (ActionLabel), so there is no
+                     literal to place an underscore in. -->
                 <StackPanel Orientation="Horizontal"
                             HorizontalAlignment="Right"
                             Visibility="{Binding IsAction, Converter={StaticResource BoolToVis}}">
-                    <Button Content="{Binding ActionLabel}"
+                    <Button x:Name="ActionButton"
+                            Content="{Binding ActionLabel}"
                             MinWidth="100"
                             Padding="10,4"
+                            IsDefault="True"
                             FontWeight="SemiBold"
                             Background="{Binding Severity, Converter={StaticResource SeverityToBrush}}"
                             BorderBrush="{Binding Severity, Converter={StaticResource SeverityToBrush}}"

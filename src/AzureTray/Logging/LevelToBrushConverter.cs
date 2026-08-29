@@ -29,7 +29,17 @@ internal sealed class LevelToBrushConverter : IValueConverter
     }
 
     public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
-        => value switch
+    {
+        // High Contrast: the dark-tuned severity tints can vanish against a
+        // user-chosen HC background (e.g. the near-white Info tone on HC
+        // White). Legibility beats color-coding there — the ERR/WRN/INF
+        // glyph text carries the severity, so everything maps to WindowText.
+        if (System.Windows.SystemParameters.HighContrast)
+        {
+            return System.Windows.SystemColors.WindowTextBrush;
+        }
+
+        return value switch
         {
             LogEventLevel.Fatal => FatalBrush,
             LogEventLevel.Error => ErrorBrush,
@@ -39,6 +49,7 @@ internal sealed class LevelToBrushConverter : IValueConverter
             LogEventLevel.Verbose => VerboseBrush,
             _ => InfoBrush,
         };
+    }
 
     public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         => throw new NotSupportedException();

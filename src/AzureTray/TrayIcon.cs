@@ -59,6 +59,11 @@ public sealed class TrayIcon : IDisposable
         };
 
         _notifyIcon.MouseClick += OnTrayClick;
+        // Keyboard activation (Win+B → Enter/Space on the icon) does not
+        // reach MouseClick on every Windows build; Click is the event that
+        // fires for it. Click ALSO fires for genuine left mouse clicks, so
+        // OnTrayKeyboardSelect dedups against the MouseClick timestamp.
+        _notifyIcon.Click += OnTrayKeyboardSelect;
         SubscribeToPluginMenuChanges();
         SubscribeToBadgeProviders();
 
@@ -209,6 +214,24 @@ public sealed class TrayIcon : IDisposable
         _ => 0,
     };
 
+    // Timestamp of the last genuine mouse activation, used to tell a
+    // keyboard-originated Click apart from the Click that NotifyIcon raises
+    // right after every left MouseClick.
+    private DateTime _lastMouseClickUtc = DateTime.MinValue;
+
+    // How close together a MouseClick and a Click must be to count as the
+    // same physical activation. Generous enough for a slow message pump,
+    // far below any human re-activation.
+    private static readonly TimeSpan MouseEchoWindow = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// True when a Click event at <paramref name="clickUtc"/> is just the
+    /// echo of the MouseClick at <paramref name="lastMouseClickUtc"/> rather
+    /// than an independent (keyboard) activation. Pure for unit testing.
+    /// </summary>
+    internal static bool IsMouseClickEcho(DateTime lastMouseClickUtc, DateTime clickUtc)
+        => clickUtc - lastMouseClickUtc < MouseEchoWindow;
+
     private void OnTrayClick(object? sender, WinForms.MouseEventArgs e)
     {
         // Both left and right click open the menu. The menu is at the cursor;
@@ -218,6 +241,7 @@ public sealed class TrayIcon : IDisposable
         {
             return;
         }
+        _lastMouseClickUtc = DateTime.UtcNow;
         // Hold Left Ctrl + click → admin menu with host-level actions
         // (reload plugins, open data/log folders, etc.). The regular menu
         // is plugin-driven; the admin menu is for managing the host itself.
@@ -225,12 +249,25 @@ public sealed class TrayIcon : IDisposable
         // The user asked for Fn as the modifier, but Fn is handled by
         // keyboard firmware on most laptops and never reaches the OS, so
         // GetAsyncKeyState cannot detect it. Left Ctrl is the fallback.
-        ShowMenu(admin: IsLeftCtrlDown());
+        ShowMenu(admin: IsLeftCtrlDown(), anchor: WinForms.Cursor.Position);
     }
 
-    private void ShowMenu(bool admin)
+    // Keyboard select of the tray icon (Win+B, arrows, Enter/Space). The
+    // cursor is nowhere near the icon in that flow, so the menu anchors to
+    // the icon's own screen rectangle instead of the cursor position, and
+    // the menu is told the session is keyboard-driven so its hover poll
+    // doesn't auto-dismiss it.
+    private void OnTrayKeyboardSelect(object? sender, EventArgs e)
     {
-        // Close any existing menu chain — clicking the tray again should
+        if (IsMouseClickEcho(_lastMouseClickUtc, DateTime.UtcNow)) return;
+
+        TrayMenuWindow.NotifyKeyboardActivation();
+        ShowMenu(admin: IsLeftCtrlDown(), anchor: GetIconAnchorOrCursor());
+    }
+
+    private void ShowMenu(bool admin, System.Drawing.Point anchor)
+    {
+        // Close any existing menu chain — activating the tray again should
         // restart, not stack windows.
         if (_openMenu is not null)
         {
@@ -247,8 +284,80 @@ public sealed class TrayIcon : IDisposable
         };
         _openMenu = menu;
 
-        var cursor = WinForms.Cursor.Position;
-        menu.ShowAt(cursor.X, cursor.Y, openAboveAnchor: true);
+        menu.ShowAt(anchor.X, anchor.Y, openAboveAnchor: true);
+    }
+
+    // ─── Icon screen rectangle (keyboard-activation anchor) ──────────────
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left, Top, Right, Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NOTIFYICONIDENTIFIER
+    {
+        public uint cbSize;
+        public IntPtr hWnd;
+        public uint uID;
+        public Guid guidItem;
+    }
+
+    [DllImport("shell32.dll")]
+    private static extern int Shell_NotifyIconGetRect(ref NOTIFYICONIDENTIFIER identifier, out RECT iconLocation);
+
+    // Center of the tray icon's screen rectangle, or the cursor position
+    // when the rectangle can't be resolved. WinForms doesn't expose the
+    // NotifyIcon's window handle / id, so they're read via reflection
+    // (field names cover current .NET and .NET Framework layouts); any
+    // failure just falls back to the cursor — the menu still opens.
+    private System.Drawing.Point GetIconAnchorOrCursor()
+    {
+        try
+        {
+            if (_notifyIcon is not null && TryGetNotifyIconRect(_notifyIcon, out var rect))
+            {
+                return new System.Drawing.Point((rect.Left + rect.Right) / 2, (rect.Top + rect.Bottom) / 2);
+            }
+        }
+        catch
+        {
+            // Reflection or the shell call failed — fall through to cursor.
+        }
+        return WinForms.Cursor.Position;
+    }
+
+    private static bool TryGetNotifyIconRect(WinForms.NotifyIcon icon, out RECT rect)
+    {
+        rect = default;
+
+        var type = icon.GetType();
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+
+        var windowField = type.GetField("_window", flags) ?? type.GetField("window", flags);
+        var idField = type.GetField("_id", flags) ?? type.GetField("id", flags);
+        if (windowField?.GetValue(icon) is not WinForms.NativeWindow window) return false;
+        if (window.Handle == IntPtr.Zero) return false;
+
+        // The id field has been declared as int and as uint across
+        // framework versions; accept either.
+        uint uid;
+        switch (idField?.GetValue(icon))
+        {
+            case int i: uid = (uint)i; break;
+            case uint u: uid = u; break;
+            default: return false;
+        }
+
+        var identifier = new NOTIFYICONIDENTIFIER
+        {
+            cbSize = (uint)Marshal.SizeOf<NOTIFYICONIDENTIFIER>(),
+            hWnd = window.Handle,
+            uID = uid,
+        };
+        return Shell_NotifyIconGetRect(ref identifier, out rect) == 0; // S_OK
     }
 
     [DllImport("user32.dll")]
