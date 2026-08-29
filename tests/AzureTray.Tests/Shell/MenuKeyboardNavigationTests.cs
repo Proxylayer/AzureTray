@@ -7,8 +7,10 @@ namespace AzureTray.Tests.Shell;
 
 public sealed class MenuKeyboardNavigationTests
 {
-    private static PluginMenuItem Item(string text, bool enabled = true) =>
-        new(text, IsEnabled: enabled);
+    private static PluginMenuItem Item(string text, bool enabled = true, bool withContext = false) =>
+        new(text,
+            IsEnabled: enabled,
+            ContextItems: withContext ? new List<PluginMenuItem> { new("Ctx") } : null);
 
     // ---- IsSelectable ----
 
@@ -32,6 +34,41 @@ public sealed class MenuKeyboardNavigationTests
     public void IsSelectable_DisabledItem_False()
     {
         var items = new List<PluginMenuItem> { Item("A", enabled: false) };
+
+        Assert.False(MenuKeyboardNavigation.IsSelectable(items, 0));
+    }
+
+    // Disabled rows whose ONLY actions live in ContextItems (PIM "Deactivate",
+    // JIT "Revoke access") must be reachable by keyboard so Shift+F10 can open
+    // the context popup.
+    [Fact]
+    public void IsSelectable_DisabledItemWithContextItems_True()
+    {
+        var items = new List<PluginMenuItem> { Item("A", enabled: false, withContext: true) };
+
+        Assert.True(MenuKeyboardNavigation.IsSelectable(items, 0));
+    }
+
+    [Fact]
+    public void IsSelectable_DisabledItemWithEmptyContextItems_False()
+    {
+        var items = new List<PluginMenuItem>
+        {
+            new("A", IsEnabled: false, ContextItems: new List<PluginMenuItem>()),
+        };
+
+        Assert.False(MenuKeyboardNavigation.IsSelectable(items, 0));
+    }
+
+    // A separator is never selectable, even with (hypothetical, contract-
+    // violating) context items attached.
+    [Fact]
+    public void IsSelectable_SeparatorWithContextItems_False()
+    {
+        var items = new List<PluginMenuItem>
+        {
+            new(string.Empty, IsSeparator: true, ContextItems: new List<PluginMenuItem> { new("Ctx") }),
+        };
 
         Assert.False(MenuKeyboardNavigation.IsSelectable(items, 0));
     }
@@ -62,6 +99,19 @@ public sealed class MenuKeyboardNavigationTests
         var items = new List<PluginMenuItem> { Item("A"), Item("B", enabled: false), Item("C") };
 
         Assert.Equal(2, MenuKeyboardNavigation.FindNextSelectableIndex(items, 0, +1));
+    }
+
+    [Fact]
+    public void FindNext_Down_LandsOnDisabledRowWithContextItems()
+    {
+        var items = new List<PluginMenuItem>
+        {
+            Item("A"),
+            Item("B", enabled: false, withContext: true),
+            Item("C"),
+        };
+
+        Assert.Equal(1, MenuKeyboardNavigation.FindNextSelectableIndex(items, 0, +1));
     }
 
     [Fact]

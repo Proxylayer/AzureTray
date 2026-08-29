@@ -30,6 +30,12 @@ namespace AzureTray.Plugin.Contracts;
 /// When <see cref="KeepMenuOpen"/> is <c>true</c>, clicking still fires
 /// <see cref="Invoke"/> but does not dismiss the menu. Use for refresh-style
 /// actions where the user expects to see the result land in the visible menu.
+/// The same applies inside a <see cref="ContextItems"/> popup: the popup (and
+/// the menu chain above it) stays open, and if the action fires
+/// <see cref="IMenuChangeNotifier.MenuChanged"/> the host refreshes the open
+/// popup's rows in place from the refreshed parent row's
+/// <see cref="ContextItems"/> (closing the popup only if that parent row or
+/// its context items no longer exist in the rebuilt menu).
 /// </para>
 /// <para>
 /// When <see cref="IsFavorite"/> is non-null the host renders a star at the
@@ -43,9 +49,13 @@ namespace AzureTray.Plugin.Contracts;
 /// <see cref="ContextItems"/> are shown on <strong>right-click</strong> as a
 /// popup, independent of left-click. Unlike <see cref="Children"/> (a left-click
 /// submenu that shows a chevron and auto-opens on hover), context items are only
-/// revealed by right-clicking the row — use them for secondary actions on an
-/// otherwise non-expanding row (e.g. Copy / Revoke on an active item). They work
-/// even when <see cref="IsEnabled"/> is <c>false</c>.
+/// revealed by right-clicking the row (or by keyboard: Shift+F10 / the Apps key
+/// on the highlighted row) — use them for secondary actions on an otherwise
+/// non-expanding row (e.g. Copy / Revoke on an active item). They work even when
+/// <see cref="IsEnabled"/> is <c>false</c>: a disabled row with context items
+/// remains keyboard-navigable (arrow keys can highlight it and Shift+F10 opens
+/// the popup, with a UIA hint announcing the route) while Enter/Space stay
+/// no-ops, so plugins may safely put a disabled row's only actions here.
 /// </para>
 /// </remarks>
 public sealed record PluginMenuItem(

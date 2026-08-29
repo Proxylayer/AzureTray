@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] — 2026-08-29
+
+### Fixed
+
+- **Keyboard users can now reach the right-click actions on disabled tray-menu rows** (host, TODO-0031 from the plugin accessibility audit). Plugins put critical actions in a disabled row's right-click context popup — PIM's "Deactivate" on an active role row, JIT's "Revoke access" on an active rule row — but the 0.12.0 keyboard model skipped disabled rows entirely, so the selection highlight could never land on them and Shift+F10 had nothing to fire on: those actions were mouse-only. A disabled row that carries `ContextItems` is now arrow-key navigable — it takes the same accent selection highlight as any other row (the row content keeps its dimmed disabled look on top of it), Shift+F10 / Apps opens its context popup anchored at the row exactly as right-click does, and Enter/Space remain strict no-ops (consumed, so WPF's own list handling can't act either), matching the mouse's disabled-row behavior. Screen readers get a UIA HelpText hint on such rows ("has context actions — press Shift+F10") while the automation Name stays the row's visible text; disabled rows *without* context items are skipped exactly as before, as are separators. Also verified and documented (contracts XML docs only, no behavior change): `KeepMenuOpen` on a context-popup item keeps the popup open, and a `MenuChanged` fired by the action refreshes the open popup's rows in place via the 0.11.0 refresh cascade.
+
 ## [0.12.1] — 2026-08-29
 
 ### Fixed
@@ -285,7 +291,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - This release is foundation only; no features from `Azure.PIM.Tray` have been ported yet.
 
-[Unreleased]: https://github.com/Proxylayer/AzureTray/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/Proxylayer/AzureTray/compare/v0.12.2...HEAD
+[0.12.2]: https://github.com/Proxylayer/AzureTray/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/Proxylayer/AzureTray/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/Proxylayer/AzureTray/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/Proxylayer/AzureTray/compare/v0.11.0...v0.11.1

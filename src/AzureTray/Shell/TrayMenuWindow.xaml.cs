@@ -860,11 +860,18 @@ public partial class TrayMenuWindow : Window
 
     // Same code path a click takes: invoke a leaf (InvokeAndDismiss) or open
     // a parent row's submenu — keyboard-opened submenus also get their first
-    // item highlighted. Returns whether anything was actually activated.
+    // item highlighted. Returns whether the key was consumed.
     private bool ActivateRowAt(int index)
     {
         if (!MenuKeyboardNavigation.IsSelectable(Items, index)) return false;
         var item = Items[index];
+
+        // Disabled rows are selectable only because of their ContextItems
+        // (see MenuKeyboardNavigation.IsSelectable) — Enter/Space must NOT
+        // invoke or open anything on them, matching the mouse's disabled
+        // no-op. Consume the key so the ListBox's own handling can't act
+        // either; Shift+F10 / Apps is the route to the context popup.
+        if (!item.IsEnabled) return true;
 
         if (item.HasChildren)
         {

@@ -84,6 +84,20 @@
                 <DataTrigger Binding="{Binding IsBusy}" Value="True">
                     <Setter Property="AutomationProperties.HelpText" Value="refreshing"/>
                 </DataTrigger>
+                <!-- Disabled rows whose ONLY actions live in the right-click
+                     context popup (PIM "Deactivate", JIT "Revoke access") are
+                     keyboard-navigable (MenuKeyboardNavigation.IsSelectable)
+                     but not invokable — tell assistive tech how to reach the
+                     actions. Kept in HelpText so the Name stays the row's
+                     visible text. Declared after the IsBusy trigger so a busy
+                     disabled row still announces the actionable hint. -->
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding IsEnabled}" Value="False"/>
+                        <Condition Binding="{Binding HasContextItems}" Value="True"/>
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="AutomationProperties.HelpText" Value="has context actions — press Shift+F10"/>
+                </MultiDataTrigger>
                 <!-- Separators are structurally unselectable: disabling the
                      CONTAINER keeps every WPF-internal selection/focus path
                      (typeahead, Home/End/Page keys, directional navigation)

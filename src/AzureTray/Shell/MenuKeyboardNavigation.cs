@@ -11,13 +11,19 @@ internal static class MenuKeyboardNavigation
 {
     /// <summary>
     /// True when the row at <paramref name="index"/> can carry the keyboard
-    /// highlight: a real item (not a separator) that is enabled.
+    /// highlight: a real item (not a separator) that is enabled — or disabled
+    /// but carrying <see cref="PluginMenuItem.ContextItems"/>. Disabled rows
+    /// with context actions must be reachable by arrow keys, otherwise
+    /// Shift+F10 can never fire on them and their ONLY actions (e.g. PIM
+    /// "Deactivate", JIT "Revoke access" on active rows) are mouse-only —
+    /// an accessibility blocker. Enter/Space on such a row stays a no-op
+    /// (see TrayMenuWindow.ActivateRowAt).
     /// </summary>
     internal static bool IsSelectable(IReadOnlyList<PluginMenuItem> items, int index)
     {
         if (index < 0 || index >= items.Count) return false;
         var item = items[index];
-        return !item.IsSeparator && item.IsEnabled;
+        return !item.IsSeparator && (item.IsEnabled || item.HasContextItems);
     }
 
     /// <summary>
