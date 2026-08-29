@@ -257,11 +257,26 @@ internal static class Program
         builder.Logging.ClearProviders();
         builder.Services.AddSerilog((services, lc) => lc
             .MinimumLevel.ControlledBy(levelSwitch)
-            // These two emit ~5 Information lines per HTTP request and only
-            // restate what HostPluginHttpClient already logs in one line, so they
-            // stay at Warning regardless of the app's level.
+            // System.Net.Http emits ~5 Information lines per HTTP request and
+            // Microsoft.Extensions.Http adds DefaultHttpClientFactory handler
+            // cleanup chatter at Debug — both only restate what
+            // HostPluginHttpClient already logs in one line, so they stay at
+            // Warning regardless of the app's level.
             .MinimumLevel.Override("System.Net.Http", LogEventLevel.Warning)
-            .MinimumLevel.Override("Polly", LogEventLevel.Warning)
+            .MinimumLevel.Override("Microsoft.Extensions.Http", LogEventLevel.Warning)
+            // Polly is held at Error — the visibility half of the "quiet
+            // tiers" scheme. Two knobs work together: PollyTelemetrySeverity
+            // (wired in ConfigureHttpClients) decides what severity Polly
+            // REPORTS — per-attempt timeouts and the final handled
+            // execution-attempt line are demoted to Warning because they only
+            // restate retry mechanics; this override decides what is VISIBLE.
+            // The net effect is that circuit-breaker-opened and
+            // total-request-timeout are deliberately the only Polly voices in
+            // the log. The per-request record of a finally-failed call is
+            // Tier 1 — HostPluginHttpClient's single Warning line, written
+            // after the handler's retries have resolved — plus the call
+            // site's Error describing the consequence (Tier 2).
+            .MinimumLevel.Override("Polly", LogEventLevel.Error)
             .Enrich.FromLogContext()
             .ReadFrom.Services(services)
             .WriteTo.Debug(formatProvider: CultureInfo.InvariantCulture)
@@ -284,6 +299,16 @@ internal static class Program
 
     private static void ConfigureHttpClients(HostApplicationBuilder builder)
     {
+        // Quiet tiers, reporting half (see PollyTelemetrySeverity for the full
+        // story; the visibility half is the Serilog "Polly" override in
+        // ConfigureLogging). AddStandardResilienceHandler builds its pipelines
+        // with the DI-registered IOptions<TelemetryOptions>, so this single
+        // Configure applies to every handler below without replacing any
+        // pipeline — options delegates compose, and Polly's own delegate
+        // (which sets the logger factory) still runs.
+        builder.Services.Configure<Polly.Telemetry.TelemetryOptions>(o =>
+            o.SeverityProvider = PollyTelemetrySeverity.Map);
+
         // ARM/Graph PIM write PUTs (role activation/deactivation) routinely take
         // longer than the standard handler's default 10s per-attempt timeout. When
         // an attempt times out after the server has already committed the write, the

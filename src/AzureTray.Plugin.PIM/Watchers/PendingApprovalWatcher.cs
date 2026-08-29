@@ -30,6 +30,12 @@ internal sealed class PendingApprovalWatcher
     private readonly Func<IReadOnlySet<string>>? _relevantManagementGroupScopes;
     private readonly HashSet<string> _seenKeys = new(StringComparer.OrdinalIgnoreCase);
 
+    // Once-then-quiet logging for the two per-poll fetches: an expired token
+    // makes both fail identically every interval, and only the transitions
+    // (fail once, recover once) carry information. See FetchFailureGate.
+    private readonly FetchFailureGate _graphFetchFailures = new();
+    private readonly FetchFailureGate _armFetchFailures = new();
+
     private Task? _loopTask;
     private CancellationTokenSource? _cts;
     private IReadOnlyList<UnifiedPendingApproval> _lastSnapshot = Array.Empty<UnifiedPendingApproval>();
@@ -222,6 +228,7 @@ internal sealed class PendingApprovalWatcher
         try
         {
             var requests = await _graph.ListPendingApprovalsAsync(ct).ConfigureAwait(false);
+            LogFetchRecovered(_graphFetchFailures, "Graph");
             return requests
                 .Where(r => !string.IsNullOrWhiteSpace(r.ApprovalId))
                 .Select(r => new UnifiedPendingApproval(
@@ -241,10 +248,7 @@ internal sealed class PendingApprovalWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
         catch (Exception ex)
         {
-            _context.Logger.LogWarning(
-                ex,
-                "Graph pending-approval fetch failed for tenant {TenantId}; continuing with ARM only.",
-                _tenant.TenantId);
+            LogFetchFailure(_graphFetchFailures, ex, "Graph", "ARM");
             return new();
         }
     }
@@ -277,9 +281,16 @@ internal sealed class PendingApprovalWatcher
                 scopes.AddRange(mgScopes.Where(s => !string.IsNullOrWhiteSpace(s)));
             }
 
-            if (scopes.Count == 0) return new();
+            if (scopes.Count == 0)
+            {
+                // A poll with nothing to scan is still a successful poll —
+                // the subscription listing worked.
+                LogFetchRecovered(_armFetchFailures, "ARM");
+                return new();
+            }
 
             var requests = await _arm.ListPendingApprovalsAsync(scopes, ct).ConfigureAwait(false);
+            LogFetchRecovered(_armFetchFailures, "ARM");
 
             return requests
                 .Where(r => !string.IsNullOrWhiteSpace(r.Properties?.ApprovalId))
@@ -300,11 +311,47 @@ internal sealed class PendingApprovalWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
         catch (Exception ex)
         {
-            _context.Logger.LogWarning(
-                ex,
-                "ARM pending-approval fetch failed for tenant {TenantId}; continuing with Graph only.",
-                _tenant.TenantId);
+            LogFetchFailure(_armFetchFailures, ex, "ARM", "Graph");
             return new();
+        }
+    }
+
+    private void LogFetchRecovered(FetchFailureGate gate, string source)
+    {
+        if (gate.RecordSuccess())
+        {
+            _context.Logger.LogInformation(
+                "{Source} pending-approval fetch recovered for tenant {TenantId}.",
+                source, _tenant.TenantId);
+        }
+    }
+
+    private void LogFetchFailure(FetchFailureGate gate, Exception ex, string source, string continuingWith)
+    {
+        // Azure.Identity's AuthenticationRequiredException means "the silent
+        // token path can't recover; interactive sign-in needed". The host's
+        // TenantAuthHealthService already logs that transition once at Warning
+        // and raises the re-auth prompt, so this watcher stays at Debug even
+        // for the FIRST occurrence. The plugin runs in its own load context
+        // and deliberately doesn't reference Azure.Identity (the host's copy
+        // would be a different assembly identity anyway), so the type is
+        // matched by full name.
+        var knownCondition = ex.GetType().FullName == "Azure.Identity.AuthenticationRequiredException";
+
+        switch (gate.RecordFailure(knownCondition))
+        {
+            case FetchFailureGate.FailureLog.WarnWithException:
+                _context.Logger.LogWarning(
+                    ex,
+                    "{Source} pending-approval fetch failed for tenant {TenantId}; continuing with {ContinuingWith} only.",
+                    source, _tenant.TenantId, continuingWith);
+                break;
+
+            case FetchFailureGate.FailureLog.DebugOneLine:
+                _context.Logger.LogDebug(
+                    "{Source} pending-approval fetch failing for tenant {TenantId} ({ExceptionType}: {ExceptionMessage}); continuing with {ContinuingWith} only.",
+                    source, _tenant.TenantId, ex.GetType().Name, ex.Message, continuingWith);
+                break;
         }
     }
 
