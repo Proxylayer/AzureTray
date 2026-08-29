@@ -394,7 +394,7 @@ internal sealed class EligibleRolesWatcher
             var durationChoice = await _context.Notifier.ShowAsync(
                 new ChoiceRequest(
                     Title: $"Activate {role.RoleName}",
-                    Message: $"on {role.ScopeDisplay}. How long?",
+                    Message: $"Activate on {role.ScopeDisplay}. Choose a duration.",
                     Choices: choices.Select(c => c.Label).ToArray()),
                 cancellationToken).ConfigureAwait(false);
 
@@ -411,7 +411,7 @@ internal sealed class EligibleRolesWatcher
                 new TextInputRequest(
                     Title: $"Justification — {role.RoleName}",
                     Message: $"Why are you activating {role.RoleName}?",
-                    Placeholder: "Required"),
+                    Placeholder: "Reason for activating (required)"),
                 cancellationToken).ConfigureAwait(false);
 
             if (justification is not TextInputResult { Text: { } justText } || string.IsNullOrWhiteSpace(justText))

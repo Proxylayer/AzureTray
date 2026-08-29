@@ -21,8 +21,8 @@ namespace AzureTray.Tests.PimPlugin;
 // must never be printed as if it were the role's own policy.
 public sealed class PimPluginCapRowTests : IDisposable
 {
-    private const string EntraRowPrefix = "    Owner  (Entra ID directory)";
-    private const string ArmRowPrefix = "    Reader  (Dev sub)";
+    private const string EntraRowPrefix = "Owner (Entra ID directory)";
+    private const string ArmRowPrefix = "Reader (Dev sub)";
 
     private readonly string _dataDir = Path.Combine(
         Path.GetTempPath(), "azuretray-tests", Guid.NewGuid().ToString("N"));
@@ -41,7 +41,7 @@ public sealed class PimPluginCapRowTests : IDisposable
             "Owner",
             new Scenario { GraphEligible = EntraOwnerJson, GraphPolicies = EntraPolicyJson("PT2H") });
 
-        Assert.Equal($"{EntraRowPrefix}  ·  max 2h", row.Text);
+        Assert.Equal($"{EntraRowPrefix} (max 2h)", row.Text);
     }
 
     // The cap could not be read (403 / missing rule). Entra activation still
@@ -78,7 +78,7 @@ public sealed class PimPluginCapRowTests : IDisposable
             "Owner",
             new Scenario { GraphEligible = EntraOwnerJson, GraphPolicies = EntraPolicyJson("PT30M") });
 
-        Assert.Equal($"{EntraRowPrefix}  ·  max 30 min", row.Text);
+        Assert.Equal($"{EntraRowPrefix} (max 30 min)", row.Text);
     }
 
     // The documented example, on the ARM side: caps read from
@@ -95,7 +95,7 @@ public sealed class PimPluginCapRowTests : IDisposable
                 ArmPolicies = ArmPolicyJson("PT2H"),
             });
 
-        Assert.Equal($"{ArmRowPrefix}  ·  max 2h", row.Text);
+        Assert.Equal($"{ArmRowPrefix} (max 2h)", row.Text);
     }
 
     // Regression pin for the countdown that shipped last session: an active row
@@ -115,7 +115,7 @@ public sealed class PimPluginCapRowTests : IDisposable
                 GraphPolicies = EntraPolicyJson("PT2H"),
             });
 
-        Assert.Equal($"{EntraRowPrefix}  ✓ active · 3h 42m left", row.Text);
+        Assert.Equal($"{EntraRowPrefix} — active, 3h 42m left", row.Text);
         Assert.DoesNotContain("max", row.Text, StringComparison.Ordinal);
         Assert.False(row.IsEnabled);
     }
@@ -137,7 +137,7 @@ public sealed class PimPluginCapRowTests : IDisposable
                 GraphPolicies = null,
             });
 
-        Assert.Equal($"{EntraRowPrefix}  ✓ active · 47m left", row.Text);
+        Assert.Equal($"{EntraRowPrefix} — active, 47m left", row.Text);
     }
 
     // The same role reached through a group and directly comes back twice from
@@ -155,7 +155,7 @@ public sealed class PimPluginCapRowTests : IDisposable
                 GraphPolicies = EntraPolicyJson("PT2H"),
             });
 
-        Assert.Equal($"{EntraRowPrefix}  ·  max 2h", row.Text);
+        Assert.Equal($"{EntraRowPrefix} (max 2h)", row.Text);
     }
 
     // ---- canned payloads --------------------------------------------------

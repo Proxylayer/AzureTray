@@ -170,9 +170,9 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
         return new[]
         {
             new PluginMenuItem(
-                Text: "🔐  LAPS Passwords",
+                Text: "LAPS Passwords",
                 IsBusy: anyLoading,
-                Icon: anyLoading ? "↻" : null,
+                Icon: anyLoading ? "↻" : "🔐",
                 SearchProvider: query => BuildDeviceRows(tenants, query),
                 SearchPlaceholder: "Search devices…"),
         };
@@ -204,25 +204,25 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
 
             // Show per-tenant status rows so a failing or loading tenant is
             // visible alongside successful ones in multi-tenant setups.
-            var tenantHeader = multiTenant ? $"— {state.Tenant.DisplayName} —" : null;
+            var tenantHeader = multiTenant ? state.Tenant.DisplayName : null;
 
             if (isLoading && source.Count == 0)
             {
                 if (tenantHeader is not null) rows.Add(new PluginMenuItem(tenantHeader, IsEnabled: false));
-                rows.Add(new PluginMenuItem("    (loading…)", IsEnabled: false));
+                rows.Add(new PluginMenuItem("Loading…", IsEnabled: false));
                 continue;
             }
             if (status == LoadStatus.AccessDenied)
             {
                 if (tenantHeader is not null) rows.Add(new PluginMenuItem(tenantHeader, IsEnabled: false));
-                rows.Add(new PluginMenuItem("    (no access — grant DeviceLocalCredential.Read.All)", IsEnabled: false));
+                rows.Add(new PluginMenuItem("No access — grant DeviceLocalCredential.Read.All", IsEnabled: false));
                 AddRetry(rows, state);
                 continue;
             }
             if (status == LoadStatus.Failed)
             {
                 if (tenantHeader is not null) rows.Add(new PluginMenuItem(tenantHeader, IsEnabled: false));
-                rows.Add(new PluginMenuItem("    (failed to load — see logs)", IsEnabled: false));
+                rows.Add(new PluginMenuItem("Failed to load — see logs", IsEnabled: false));
                 AddRetry(rows, state);
                 continue;
             }
@@ -238,7 +238,7 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
                 if (hasQuery) continue;
 
                 if (tenantHeader is not null) rows.Add(new PluginMenuItem(tenantHeader, IsEnabled: false));
-                rows.Add(new PluginMenuItem("    (no LAPS devices)", IsEnabled: false));
+                rows.Add(new PluginMenuItem("No LAPS devices", IsEnabled: false));
                 AddRetry(rows, state);
                 continue;
             }
@@ -252,7 +252,9 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
                 var tenantId = state.Tenant.TenantId;
                 var capturedState = state;
                 rows.Add(new PluginMenuItem(
-                    Text: multiTenant ? $"    {captured.DisplayName}" : captured.DisplayName,
+                    Text: multiTenant
+                        ? $"{captured.DisplayName} — {state.Tenant.DisplayName}"
+                        : captured.DisplayName,
                     Invoke: () => _ = CopyPasswordAsync(tenantId, captured),
                     // Right-click secondary actions. Left-click still copies the
                     // password; these add the device name and an explicit refresh.
@@ -269,7 +271,8 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
                             Icon: "↻",
                             KeepMenuOpen: true,
                             Invoke: () => _ = LoadDevicesAsync(capturedState)),
-                    }));
+                    })
+                { Key = $"laps.device.{tenantId}.{captured.DirectoryRecordId}" });
                 matched++;
             }
 
@@ -278,13 +281,13 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
 
         if (rows.Count == 0)
         {
-            return new[] { new PluginMenuItem("(no matches)", IsEnabled: false) };
+            return new[] { new PluginMenuItem("No matches", IsEnabled: false) };
         }
 
         if (truncated)
         {
             rows.Add(new PluginMenuItem(
-                Text: $"(more results — refine search)",
+                Text: "More results — refine search",
                 IsEnabled: false));
         }
 
@@ -294,10 +297,11 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
     private void AddRetry(List<PluginMenuItem> rows, TenantDevices state)
     {
         rows.Add(new PluginMenuItem(
-            Text: "    Retry",
+            Text: $"Retry — {state.Tenant.DisplayName}",
             Icon: "↻",
             KeepMenuOpen: true,
-            Invoke: () => _ = LoadDevicesAsync(state)));
+            Invoke: () => _ = LoadDevicesAsync(state))
+        { Key = $"laps.retry.{state.Tenant.TenantId}" });
     }
 
     public Task InitializeAsync(IPluginContext context, CancellationToken cancellationToken)
@@ -455,7 +459,7 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
             await _context.Notifier.ShowAsync(
                 new InformationRequest(
                     Title: "LAPS password copied",
-                    Message: $"🔐 Password for {device.DisplayName} is on the clipboard.{expiryNote}"),
+                    Message: $"Password for {device.DisplayName} is on the clipboard.{expiryNote}"),
                 CancellationToken.None).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { /* shutdown */ }

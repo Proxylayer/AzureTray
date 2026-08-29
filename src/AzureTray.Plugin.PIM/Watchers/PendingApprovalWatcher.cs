@@ -397,7 +397,7 @@ internal sealed class PendingApprovalWatcher
                 new TextInputRequest(
                     Title: $"Justification — {decision}",
                     Message: $"Why are you {(decision == ApprovalDecision.Approve ? "approving" : "rejecting")} {approval.RoleDisplay}?",
-                    Placeholder: "Required"),
+                    Placeholder: "Reason for this decision (required)"),
                 cancellationToken).ConfigureAwait(false);
 
             if (justification is not TextInputResult { Text: { } justText } || string.IsNullOrWhiteSpace(justText))

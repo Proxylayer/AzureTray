@@ -1,4 +1,4 @@
-﻿<Window x:Class="AzureTray.Shell.TrayMenuWindow"
+<Window x:Class="AzureTray.Shell.TrayMenuWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:contracts="clr-namespace:AzureTray.Plugin.Contracts;assembly=AzureTray.Plugin.Contracts"
@@ -15,6 +15,17 @@
         PreviewKeyDown="OnPreviewKeyDown"
         Deactivated="OnDeactivated">
     <Window.Resources>
+        <!-- THEME BRUSH RULE for this file: StaticResource, deliberately.
+             This window is TRANSIENT — a new instance is constructed for
+             every menu open and closed on dismiss, so its visual tree never
+             lives across a High Contrast (or any theme) switch; the next
+             open resolves the then-current Brush.* values, including the
+             HighContrastTheme overrides merged into App.Resources. Static
+             lookups avoid the per-element DynamicResource listener cost
+             that the v0.12.0 HC pass introduced here (measured as a large
+             share of menu-open latency). PERSISTENT windows (Settings, Log
+             Viewer, ...) and the long-lived templates in Theme.xaml must
+             keep DynamicResource so a live HC toggle reaches them. -->
         <!-- Shared item template for a single menu row. Renders either a
              6px transparent spacer (separator) or a full row with the
              3-column grid [icon][text][chevron/shortcut].
@@ -24,7 +35,7 @@
              the menu stays still, no full-row redraw. -->
         <Style x:Key="TrayMenuRow" TargetType="ListBoxItem">
             <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Foreground" Value="{DynamicResource Brush.Text.Primary}"/>
+            <Setter Property="Foreground" Value="{StaticResource Brush.Text.Primary}"/>
             <Setter Property="Padding" Value="0"/>
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
             <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
@@ -42,12 +53,28 @@
                             <ContentPresenter/>
                         </Border>
                         <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Brush.Accent}"/>
-                            </Trigger>
-                            <Trigger Property="IsSelected" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Brush.Accent}"/>
-                            </Trigger>
+                            <!-- Accent fill for hover/selection, multi-condition so a
+                                 separator row can NEVER paint the fill even if some WPF
+                                 path (typeahead, Home/End, programmatic selection)
+                                 selects it — belt-and-braces on top of the structural
+                                 Focusable/IsEnabled block in the style triggers below.
+                                 Regression guard: v0.12.0's keyboard work removed the
+                                 old UnselectAll and a selected separator rendered as a
+                                 full-width accent bar. -->
+                            <MultiDataTrigger>
+                                <MultiDataTrigger.Conditions>
+                                    <Condition Binding="{Binding IsMouseOver, RelativeSource={RelativeSource Self}}" Value="True"/>
+                                    <Condition Binding="{Binding IsSeparator}" Value="False"/>
+                                </MultiDataTrigger.Conditions>
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource Brush.Accent}"/>
+                            </MultiDataTrigger>
+                            <MultiDataTrigger>
+                                <MultiDataTrigger.Conditions>
+                                    <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource Self}}" Value="True"/>
+                                    <Condition Binding="{Binding IsSeparator}" Value="False"/>
+                                </MultiDataTrigger.Conditions>
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource Brush.Accent}"/>
+                            </MultiDataTrigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
@@ -56,6 +83,18 @@
                 <!-- Busy rows announce their refreshing state to assistive tech. -->
                 <DataTrigger Binding="{Binding IsBusy}" Value="True">
                     <Setter Property="AutomationProperties.HelpText" Value="refreshing"/>
+                </DataTrigger>
+                <!-- Separators are structurally unselectable: disabling the
+                     CONTAINER keeps every WPF-internal selection/focus path
+                     (typeahead, Home/End/Page keys, directional navigation)
+                     off them, not just our own arrow handling in
+                     MenuKeyboardNavigation. The data record's IsEnabled stays
+                     true, so the DataTemplate's disabled-row opacity trigger
+                     (which binds the ITEM's IsEnabled) does not fire — the
+                     6px transparent spacer renders exactly as before. -->
+                <DataTrigger Binding="{Binding IsSeparator}" Value="True">
+                    <Setter Property="Focusable" Value="False"/>
+                    <Setter Property="IsEnabled" Value="False"/>
                 </DataTrigger>
             </Style.Triggers>
         </Style>
@@ -83,14 +122,14 @@
                                Text="{Binding Icon}"
                                FontSize="14"
                                VerticalAlignment="Center"
-                               Foreground="{DynamicResource Brush.Text.Secondary}"
+                               Foreground="{StaticResource Brush.Text.Secondary}"
                                Margin="0,0,10,0"/>
                     <TextBlock x:Name="LabelText"
                                Grid.Column="1"
                                Text="{Binding Text}"
                                VerticalAlignment="Center"
                                TextTrimming="CharacterEllipsis"
-                               Foreground="{DynamicResource Brush.Text.Primary}"/>
+                               Foreground="{StaticResource Brush.Text.Primary}"/>
                     <!-- Favorite star. A real focusable ToggleButton so keyboard
                          users can Tab/arrow to it and Space-toggle; its Click
                          handler toggles without firing the row's primary action
@@ -121,22 +160,22 @@
                                                            Text="&#x2606;"
                                                            FontSize="15"
                                                            VerticalAlignment="Center"
-                                                           Foreground="{DynamicResource Brush.Text.Muted}"/>
+                                                           Foreground="{StaticResource Brush.Text.Muted}"/>
                                             </Border>
                                             <ControlTemplate.Triggers>
                                                 <DataTrigger Binding="{Binding IsFavorite}" Value="True">
                                                     <Setter TargetName="StarGlyph" Property="Text" Value="&#x2605;"/>
-                                                    <Setter TargetName="StarGlyph" Property="Foreground" Value="{DynamicResource Brush.Accent}"/>
+                                                    <Setter TargetName="StarGlyph" Property="Foreground" Value="{StaticResource Brush.Accent}"/>
                                                 </DataTrigger>
                                                 <!-- Contrast: on the accent row fill the muted/accent
                                                      glyph is ~1.3:1; switch to the inverse text brush.
                                                      Declared after the IsFavorite trigger so it wins
                                                      while the row is hovered/selected. -->
                                                 <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-                                                    <Setter TargetName="StarGlyph" Property="Foreground" Value="{DynamicResource Brush.Text.Inverse}"/>
+                                                    <Setter TargetName="StarGlyph" Property="Foreground" Value="{StaticResource Brush.Text.Inverse}"/>
                                                 </DataTrigger>
                                                 <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-                                                    <Setter TargetName="StarGlyph" Property="Foreground" Value="{DynamicResource Brush.Text.Inverse}"/>
+                                                    <Setter TargetName="StarGlyph" Property="Foreground" Value="{StaticResource Brush.Text.Inverse}"/>
                                                 </DataTrigger>
                                             </ControlTemplate.Triggers>
                                         </ControlTemplate>
@@ -156,7 +195,7 @@
                                FontSize="10"
                                Margin="12,0,0,0"
                                VerticalAlignment="Center"
-                               Foreground="{DynamicResource Brush.Text.Muted}"
+                               Foreground="{StaticResource Brush.Text.Muted}"
                                Visibility="{Binding HasChildren, Converter={StaticResource BoolToVisibility}}"/>
                 </Grid>
             </Grid>
@@ -182,12 +221,12 @@
                      deliberately left alone — the IsBusy storyboard animates
                      its Foreground brush in place. -->
                 <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-                    <Setter TargetName="Chevron" Property="Foreground" Value="{DynamicResource Brush.Text.Inverse}"/>
-                    <Setter TargetName="LabelText" Property="Foreground" Value="{DynamicResource Brush.Text.Inverse}"/>
+                    <Setter TargetName="Chevron" Property="Foreground" Value="{StaticResource Brush.Text.Inverse}"/>
+                    <Setter TargetName="LabelText" Property="Foreground" Value="{StaticResource Brush.Text.Inverse}"/>
                 </DataTrigger>
                 <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-                    <Setter TargetName="Chevron" Property="Foreground" Value="{DynamicResource Brush.Text.Inverse}"/>
-                    <Setter TargetName="LabelText" Property="Foreground" Value="{DynamicResource Brush.Text.Inverse}"/>
+                    <Setter TargetName="Chevron" Property="Foreground" Value="{StaticResource Brush.Text.Inverse}"/>
+                    <Setter TargetName="LabelText" Property="Foreground" Value="{StaticResource Brush.Text.Inverse}"/>
                 </DataTrigger>
 
                 <!-- IsBusy: cycle the icon glyph through ◐ ◓ ◑ ◒ on a
@@ -229,14 +268,21 @@
     <!-- Bordered surface with subtle drop shadow, rounded corners. The
          Border IS the menu — the Window itself is transparent so we get
          proper rounded edges without OS chrome. -->
-    <Border Background="{DynamicResource Brush.Surface.Panel}"
-            BorderBrush="{DynamicResource Brush.Border.Default}"
+    <Border Background="{StaticResource Brush.Surface.Panel}"
+            BorderBrush="{StaticResource Brush.Border.Default}"
             BorderThickness="1"
-            CornerRadius="{DynamicResource Radius.Large}"
+            CornerRadius="{StaticResource Radius.Large}"
             MinWidth="280"
             MaxWidth="520"
             Padding="0,4"
             Margin="12">
+        <!-- Latency note (measured 2026-08): the layered window that
+             AllowsTransparency requires costs ~130 ms per open and this
+             shadow ~30 ms on top of WPF's ~280 ms base window-creation
+             cost — kept deliberately, they are the menu's visual identity;
+             the win came from the StaticResource rule above, fixing the
+             double-open echo in TrayIcon, and pre-warming WPF's first-
+             window costs at startup. -->
         <Border.Effect>
             <DropShadowEffect Color="Black"
                               Opacity="0.55"
@@ -260,7 +306,7 @@
                            IsHitTestVisible="False"
                            Margin="10,0,0,0"
                            VerticalAlignment="Center"
-                           Foreground="{DynamicResource Brush.Text.Muted}">
+                           Foreground="{StaticResource Brush.Text.Muted}">
                     <TextBlock.Style>
                         <Style TargetType="TextBlock">
                             <Setter Property="Visibility" Value="Collapsed"/>
@@ -295,14 +341,14 @@
                 <Border x:Name="ScrollUpArrow"
                         Grid.Row="0"
                         Visibility="Collapsed"
-                        Background="{DynamicResource Brush.Surface.Panel}"
+                        Background="{StaticResource Brush.Surface.Panel}"
                         Padding="0,3"
                         Cursor="Hand"
                         MouseEnter="OnScrollUpArrowMouseEnter"
                         MouseLeave="OnScrollArrowMouseLeave">
                     <TextBlock Text="&#x25B2;"
                                FontSize="8"
-                               Foreground="{DynamicResource Brush.Text.Muted}"
+                               Foreground="{StaticResource Brush.Text.Muted}"
                                HorizontalAlignment="Center"/>
                 </Border>
 
@@ -324,14 +370,14 @@
                 <Border x:Name="ScrollDownArrow"
                         Grid.Row="2"
                         Visibility="Collapsed"
-                        Background="{DynamicResource Brush.Surface.Panel}"
+                        Background="{StaticResource Brush.Surface.Panel}"
                         Padding="0,3"
                         Cursor="Hand"
                         MouseEnter="OnScrollDownArrowMouseEnter"
                         MouseLeave="OnScrollArrowMouseLeave">
                     <TextBlock Text="&#x25BC;"
                                FontSize="8"
-                               Foreground="{DynamicResource Brush.Text.Muted}"
+                               Foreground="{StaticResource Brush.Text.Muted}"
                                HorizontalAlignment="Center"/>
                 </Border>
             </Grid>

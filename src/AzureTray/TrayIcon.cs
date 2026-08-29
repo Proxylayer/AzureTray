@@ -86,6 +86,36 @@ public sealed class TrayIcon : IDisposable
         {
             _pluginUpdateNotifier.OpenSettingsRequested += OnOpenSettingsRequested;
         }
+
+        // Pre-warm the menu machinery once the app is idle: the FIRST
+        // TrayMenuWindow of the process pays JIT, BAML load, font/glyph and
+        // layered-window setup — measured at ~1.3 s against ~0.4 s for every
+        // later open. Constructing and showing a throwaway instance
+        // off-screen (never activated, closed immediately) moves that cost
+        // from the user's first click to startup idle time.
+        System.Windows.Application.Current?.Dispatcher.BeginInvoke(
+            new Action(WarmUpMenuWindow),
+            System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+    }
+
+    private void WarmUpMenuWindow()
+    {
+        try
+        {
+            var warmup = new TrayMenuWindow(BuildMenuItems())
+            {
+                ShowActivated = false,   // never steal focus at startup
+            };
+            // Show() (not ShowAt) keeps it parked at the off-screen position
+            // its OnSourceInitialized sets, so nothing flashes on screen.
+            warmup.Show();
+            warmup.Close();
+        }
+        catch (Exception ex)
+        {
+            // Purely an optimization — a failure must never hurt startup.
+            _logger.LogDebug(ex, "Tray menu warm-up failed; first open will pay the one-time cost.");
+        }
     }
 
     private void OnOpenSettingsRequested()
@@ -234,9 +264,12 @@ public sealed class TrayIcon : IDisposable
 
     private void OnTrayClick(object? sender, WinForms.MouseEventArgs e)
     {
-        // Both left and right click open the menu. The menu is at the cursor;
-        // tray icons live at the bottom-right corner of the primary monitor
-        // on the standard Win11 layout so the menu opens above-and-left.
+        // Both left and right click open the menu, anchored to the tray
+        // icon's own screen rectangle — NOT the cursor position at open
+        // time. The cursor read used to happen after the click had already
+        // been dispatched, so if the mouse moved away quickly the menu
+        // opened wherever the cursor had ended up (observed mid-screen).
+        // ShowMenu resolves the icon rect itself.
         if (e.Button != WinForms.MouseButtons.Left && e.Button != WinForms.MouseButtons.Right)
         {
             return;
@@ -249,24 +282,64 @@ public sealed class TrayIcon : IDisposable
         // The user asked for Fn as the modifier, but Fn is handled by
         // keyboard firmware on most laptops and never reaches the OS, so
         // GetAsyncKeyState cannot detect it. Left Ctrl is the fallback.
-        ShowMenu(admin: IsLeftCtrlDown(), anchor: WinForms.Cursor.Position);
+        ShowMenu(admin: IsLeftCtrlDown());
+        // Re-stamp AFTER the menu is up: NotifyIcon raises Click only once
+        // this handler returns, so the echo window must be measured from the
+        // end of the (possibly slow) open, not its start. Before this, any
+        // open slower than the 250 ms echo window made the echo Click look
+        // like an independent keyboard activation — every mouse click then
+        // closed and reopened the menu a second time.
+        _lastMouseClickUtc = DateTime.UtcNow;
     }
 
-    // Keyboard select of the tray icon (Win+B, arrows, Enter/Space). The
-    // cursor is nowhere near the icon in that flow, so the menu anchors to
-    // the icon's own screen rectangle instead of the cursor position, and
-    // the menu is told the session is keyboard-driven so its hover poll
-    // doesn't auto-dismiss it.
+    // Keyboard select of the tray icon (Win+B, arrows, Enter/Space). Same
+    // icon-rect anchor as a mouse click; the menu is additionally told the
+    // session is keyboard-driven so its hover poll doesn't auto-dismiss it
+    // while the cursor sits elsewhere.
+    //
+    // Dedup against mouse clicks: measured with the open-latency trace,
+    // NotifyIcon raises Click BEFORE MouseClick for a physical click, so
+    // the timestamp echo check alone never caught the first event of the
+    // pair — every mouse click opened the menu here first (as a "keyboard"
+    // activation) and then again in OnTrayClick, a visible close-and-reopen
+    // that read as the menu being slow. A physical click necessarily has
+    // the cursor ON the icon, and a keyboard activation almost never does,
+    // so cursor-inside-the-icon-rect is the primary discriminator; the
+    // timestamp check stays as the fallback for when the rect can't be
+    // resolved (it still catches Click events that FOLLOW a MouseClick).
     private void OnTrayKeyboardSelect(object? sender, EventArgs e)
     {
+        if (IsCursorOverTrayIcon()) return;   // mouse click — OnTrayClick handles it
         if (IsMouseClickEcho(_lastMouseClickUtc, DateTime.UtcNow)) return;
 
         TrayMenuWindow.NotifyKeyboardActivation();
-        ShowMenu(admin: IsLeftCtrlDown(), anchor: GetIconAnchorOrCursor());
+        ShowMenu(admin: IsLeftCtrlDown());
     }
 
-    private void ShowMenu(bool admin, System.Drawing.Point anchor)
+    // True when the mouse cursor currently sits inside the tray icon's
+    // screen rectangle — the signature of a physical click on the icon.
+    private bool IsCursorOverTrayIcon()
     {
+        try
+        {
+            if (_notifyIcon is not null && TryGetNotifyIconRect(_notifyIcon, out var rect))
+            {
+                var p = WinForms.Cursor.Position;
+                return p.X >= rect.Left && p.X <= rect.Right
+                    && p.Y >= rect.Top && p.Y <= rect.Bottom;
+            }
+        }
+        catch
+        {
+            // Rect unavailable — fall back to the timestamp heuristic.
+        }
+        return false;
+    }
+
+    private void ShowMenu(bool admin)
+    {
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+
         // Close any existing menu chain — activating the tray again should
         // restart, not stack windows.
         if (_openMenu is not null)
@@ -275,9 +348,18 @@ public sealed class TrayIcon : IDisposable
             _openMenu = null;
         }
 
+        // Anchor to the tray icon's screen rectangle for every activation
+        // (mouse and keyboard alike); cursor position is only the fallback
+        // when the shell refuses the rect. ShowAt converts px → DIPs.
+        var anchor = GetIconAnchorOrCursor();
+        var anchorMs = timer.ElapsedMilliseconds;
+
         var items = admin ? BuildAdminMenuItems() : BuildMenuItems();
+        var buildMs = timer.ElapsedMilliseconds - anchorMs;
+
         _openMenuIsAdmin = admin;
         var menu = new TrayMenuWindow(items);
+        var ctorMs = timer.ElapsedMilliseconds - anchorMs - buildMs;
         menu.Closed += (_, _) =>
         {
             if (ReferenceEquals(_openMenu, menu)) _openMenu = null;
@@ -285,9 +367,23 @@ public sealed class TrayIcon : IDisposable
         _openMenu = menu;
 
         menu.ShowAt(anchor.X, anchor.Y, openAboveAnchor: true);
+
+        // Cheap open-latency trace (one line per open, Debug): "ctor" is the
+        // window construction (XAML load), "show" is Show()'s synchronous
+        // window creation + first layout, where template/resource cost lands.
+        // Kept in place deliberately — it is what made the open-latency
+        // regression diagnosable.
+        timer.Stop();
+        _logger.LogDebug(
+            "Tray menu opened in {TotalMs} ms (anchor {AnchorMs} ms, build {BuildMs} ms, ctor {CtorMs} ms, show {ShowMs} ms).",
+            timer.ElapsedMilliseconds,
+            anchorMs,
+            buildMs,
+            ctorMs,
+            timer.ElapsedMilliseconds - anchorMs - buildMs - ctorMs);
     }
 
-    // ─── Icon screen rectangle (keyboard-activation anchor) ──────────────
+    // ─── Icon screen rectangle (menu anchor for every activation) ────────
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT

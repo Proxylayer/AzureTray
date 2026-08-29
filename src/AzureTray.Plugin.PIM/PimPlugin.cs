@@ -144,12 +144,14 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
                 Invoke: () => _ = w.PollAsync(CancellationToken.None),
                 IsBusy: w.IsPolling,
                 KeepMenuOpen: true,
-                Icon: "↻"));
+                Icon: "↻")
+            { Key = $"pim.pending.refresh.{w.TenantId}" });
 
             var pending = w.CurrentApprovals;
             if (pending.Count == 0)
             {
-                children.Add(new PluginMenuItem("    (none)", IsEnabled: false));
+                children.Add(new PluginMenuItem("No pending approvals", IsEnabled: false)
+                { Key = $"pim.pendingNone.{w.TenantId}" });
             }
             else
             {
@@ -157,17 +159,19 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
                 {
                     var a = approval;
                     children.Add(new PluginMenuItem(
-                        Text: $"    {a.PrincipalDisplay} — {a.RoleDisplay}",
-                        Invoke: () => _ = w.HandleNewApprovalAsync(a, CancellationToken.None)));
+                        Text: $"{a.PrincipalDisplay} — {a.RoleDisplay}",
+                        Invoke: () => _ = w.HandleNewApprovalAsync(a, CancellationToken.None))
+                    { Key = $"pim.approval.{a.ApprovalId}" });
                 }
             }
         }
 
         var label = totalPending > 0
-            ? $"⏳  Pending Approvals  ({totalPending})"
-            : "⏳  Pending Approvals";
+            ? $"Pending Approvals ({totalPending})"
+            : "Pending Approvals";
 
-        return new PluginMenuItem(Text: label, Children: children);
+        return new PluginMenuItem(Text: label, Icon: "⏳", Children: children)
+        { Key = "pim.pendingApprovals" };
     }
 
     private PluginMenuItem BuildOpenRequestMenu()
@@ -194,12 +198,14 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
                 Invoke: () => _ = w.PollAsync(CancellationToken.None),
                 IsBusy: w.IsPolling,
                 KeepMenuOpen: true,
-                Icon: "↻"));
+                Icon: "↻")
+            { Key = $"pim.eligible.refresh.{w.TenantId}" });
 
             var roles = w.CurrentEligibleRoles;
             if (roles.Count == 0)
             {
-                children.Add(new PluginMenuItem("    (none)", IsEnabled: false));
+                children.Add(new PluginMenuItem("No eligible roles", IsEnabled: false)
+                { Key = $"pim.eligibleNone.{w.TenantId}" });
                 continue;
             }
 
@@ -217,10 +223,11 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         }
 
         var label = totalEligible > 0
-            ? $"🔑  Open Request  ({totalEligible} role(s))"
-            : "🔑  Open Request";
+            ? $"Open Request ({totalEligible} role{(totalEligible == 1 ? "" : "s")})"
+            : "Open Request";
 
-        return new PluginMenuItem(Text: label, Children: children);
+        return new PluginMenuItem(Text: label, Icon: "🔑", Children: children)
+        { Key = "pim.openRequest" };
     }
 
     private void AppendSourceGroup(
@@ -231,11 +238,17 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
     {
         if (roles.Count == 0) return;
 
-        target.Add(new PluginMenuItem($"    — {sourceLabel} —", IsEnabled: false));
+        target.Add(new PluginMenuItem(sourceLabel, IsEnabled: false));
 
         foreach (var role in roles)
         {
             var r = role;
+
+            // Stable re-anchoring identity: tenant + source + role definition +
+            // the scope the eligibility applies at. Role names alone collide
+            // (same role at multiple scopes) and change form when the
+            // active/cap markers come and go.
+            var roleKey = $"pim.role.{watcher.TenantId}.{r.Source}.{r.RoleDefinitionId}.{r.ArmScope ?? r.DirectoryScopeId ?? "/"}";
 
             // Right-click "Copy role name" is offered on every row. Active rows
             // are otherwise non-actionable (the left-click is disabled), so the
@@ -249,22 +262,25 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             if (active is not null)
             {
                 target.Add(new PluginMenuItem(
-                    Text: $"    {r.RoleName}  ({r.ScopeDisplay})  {ActiveMarker(active)}",
+                    Text: $"{r.RoleName} ({r.ScopeDisplay}) — {ActiveMarker(active)}",
                     IsEnabled: false,
+                    Icon: "✓",
                     ContextItems: new[]
                     {
                         copyName,
                         new PluginMenuItem(
                             Text: "Deactivate",
                             Invoke: () => _ = watcher.HandleDeactivationAsync(r, CancellationToken.None)),
-                    }));
+                    })
+                { Key = roleKey });
             }
             else
             {
                 target.Add(new PluginMenuItem(
-                    Text: $"    {r.RoleName}  ({r.ScopeDisplay}){CapMarker(r)}",
+                    Text: $"{r.RoleName} ({r.ScopeDisplay}){CapMarker(r)}",
                     Invoke: () => _ = watcher.HandleActivationAsync(r, CancellationToken.None),
-                    ContextItems: new[] { copyName }));
+                    ContextItems: new[] { copyName })
+                { Key = roleKey });
             }
         }
     }
@@ -277,20 +293,22 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
     // bare marker.
     // Suffix on an eligible (inactive) row when the role's PIM policy caps
     // activation tighter than the longest duration otherwise offered — the row
-    // then reads "Reader  (Dev sub)  ·  max 2h". Roles with no known cap, or a
+    // then reads "Reader (Dev sub) (max 2h)". Roles with no known cap, or a
     // cap that doesn't restrict the choices, get nothing so the list stays quiet.
     private static string CapMarker(UnifiedEligibleRole role)
     {
         var hint = ActivationDurationChoices.CapHint(role);
-        return hint is null ? string.Empty : $"  ·  max {hint}";
+        return hint is null ? string.Empty : $" (max {hint})";
     }
 
+    // Spoken as part of the accessible name — plain words, no glyphs (the ✓
+    // lives in the row's Icon slot, outside AutomationProperties.Name).
     private static string ActiveMarker(ActiveRoleAssignment active)
     {
         var remaining = active.EndDateTime is { } end
             ? EligibleRolesWatcher.FormatRemaining(end)
             : null;
-        return remaining is null ? "✓ active" : $"✓ active · {remaining}";
+        return remaining is null ? "active" : $"active, {remaining}";
     }
 
     // Tests exposed to the host's admin Test Runner.

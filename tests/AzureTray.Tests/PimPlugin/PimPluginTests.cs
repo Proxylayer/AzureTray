@@ -37,23 +37,23 @@ public sealed class PimPluginTests
             Assert.Equal(2, items.Count);
 
             var pending = items[0];
-            Assert.StartsWith("⏳", pending.Text, StringComparison.Ordinal);
+            Assert.Equal("⏳", pending.Icon);
             Assert.Contains("Pending Approvals", pending.Text, StringComparison.Ordinal);
             Assert.NotNull(pending.Children);
             // Refresh rows carry the tenant name in Text and the spinner
             // glyph in Icon (a separate field the host animates).
             Assert.Contains(pending.Children!, c => c.Text == "Contoso" && c.Icon == "↻" && c.Invoke is not null);
             Assert.Contains(pending.Children!, c => c.Text == "Fabrikam" && c.Icon == "↻" && c.Invoke is not null);
-            Assert.Contains(pending.Children!, c => c.Text == "    (none)" && !c.IsEnabled);
+            Assert.Contains(pending.Children!, c => c.Text == "No pending approvals" && !c.IsEnabled);
             Assert.Contains(pending.Children!, c => c.IsSeparator);
 
             var openRequest = items[1];
-            Assert.StartsWith("🔑", openRequest.Text, StringComparison.Ordinal);
+            Assert.Equal("🔑", openRequest.Icon);
             Assert.Contains("Open Request", openRequest.Text, StringComparison.Ordinal);
             Assert.NotNull(openRequest.Children);
             Assert.Contains(openRequest.Children!, c => c.Text == "Contoso" && c.Icon == "↻" && c.Invoke is not null);
             Assert.Contains(openRequest.Children!, c => c.Text == "Fabrikam" && c.Icon == "↻" && c.Invoke is not null);
-            Assert.Contains(openRequest.Children!, c => c.Text == "    (none)" && !c.IsEnabled);
+            Assert.Contains(openRequest.Children!, c => c.Text == "No eligible roles" && !c.IsEnabled);
         }
         finally
         {

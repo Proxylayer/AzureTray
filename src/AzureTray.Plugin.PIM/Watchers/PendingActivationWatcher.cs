@@ -196,7 +196,7 @@ internal sealed class PendingActivationWatcher
         _ = _context.Notifier.ShowAsync(
             new InformationRequest(
                 Title: $"Approved: {request.RoleName}",
-                Message: $"on {request.ScopeDisplay} — the role is active now.")
+                Message: $"The role is now active on {request.ScopeDisplay}.")
             {
                 Severity = NotificationSeverity.Success,
             },
@@ -214,7 +214,7 @@ internal sealed class PendingActivationWatcher
         await _context.Notifier.ShowAsync(
             new InformationRequest(
                 Title: $"Not activated: {request.RoleName}",
-                Message: $"the request for {request.ScopeDisplay} ended as {status}.")
+                Message: $"The request for {request.ScopeDisplay} ended as {status}.")
             {
                 Severity = NotificationSeverity.Warning,
             },

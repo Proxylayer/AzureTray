@@ -18,7 +18,7 @@ namespace AzureTray.Tests.PimPlugin;
 // countdown are baked into it — these tests pin the exact strings.
 public sealed class PimPluginActiveRowTests : IDisposable
 {
-    private const string RowPrefix = "    Owner  (Entra ID directory)";
+    private const string RowPrefix = "Owner (Entra ID directory)";
 
     private readonly string _dataDir = Path.Combine(
         Path.GetTempPath(), "azuretray-tests", Guid.NewGuid().ToString("N"));
@@ -37,7 +37,8 @@ public sealed class PimPluginActiveRowTests : IDisposable
 
         var row = await RoleRowAsync(ActivesJson(end));
 
-        Assert.Equal($"{RowPrefix}  ✓ active · 3h 42m left", row.Text);
+        Assert.Equal($"{RowPrefix} — active, 3h 42m left", row.Text);
+        Assert.Equal("✓", row.Icon);
     }
 
     // Unchanged from before the countdown existed: an inactive row is clickable
@@ -61,7 +62,8 @@ public sealed class PimPluginActiveRowTests : IDisposable
     {
         var row = await RoleRowAsync(ActivesJson(end: null));
 
-        Assert.Equal($"{RowPrefix}  ✓ active", row.Text);
+        Assert.Equal($"{RowPrefix} — active", row.Text);
+        Assert.Equal("✓", row.Icon);
     }
 
     // An end time already in the past must never render as a negative duration.
@@ -70,7 +72,7 @@ public sealed class PimPluginActiveRowTests : IDisposable
     {
         var row = await RoleRowAsync(ActivesJson(DateTimeOffset.UtcNow.AddMinutes(-5)));
 
-        Assert.Equal($"{RowPrefix}  ✓ active", row.Text);
+        Assert.Equal($"{RowPrefix} — active", row.Text);
     }
 
     [Fact]
@@ -92,7 +94,7 @@ public sealed class PimPluginActiveRowTests : IDisposable
 
         var row = await RoleRowAsync(ActivesJson(end));
 
-        Assert.Equal($"{RowPrefix}  ✓ active · 47m left", row.Text);
+        Assert.Equal($"{RowPrefix} — active, 47m left", row.Text);
     }
 
     // ---- harness ----------------------------------------------------------

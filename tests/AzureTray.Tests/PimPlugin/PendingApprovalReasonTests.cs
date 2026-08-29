@@ -218,7 +218,7 @@ public sealed class PendingApprovalReasonTests
         // Second prompt, unchanged: the approver's mandatory justification.
         var prompt = Assert.IsType<TextInputRequest>(Shown(notifier)[1]);
         Assert.Equal("Justification — Approve", prompt.Title);
-        Assert.Equal("Required", prompt.Placeholder);
+        Assert.Equal("Reason for this decision (required)", prompt.Placeholder);
     }
 
     [Fact]
