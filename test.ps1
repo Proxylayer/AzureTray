@@ -15,6 +15,17 @@
                             expanded to FullyQualifiedName~<name>. Combine with
                             -Detailed to diagnose just the failing thing.
 
+    -NoBuild is an orthogonal switch, not a mode: it adds --no-build
+    --no-restore so the run executes the binaries already on disk instead of
+    restoring and walking all five projects again. Pair it with a preceding
+    ./build.ps1 - that is the fast edit-test loop:
+
+        ./build.ps1; ./test.ps1 -NoBuild
+
+    Without a successful build first it will either run stale binaries or fail
+    outright, so the default (no switch) still builds and stays safe for a bare
+    ./test.ps1. -NoBuild composes with -Target and -Detailed.
+
     Always runs --configuration Release. Before testing it silently stops any
     running AzureTray.exe so file locks do not break MSBuild.
 
@@ -23,10 +34,13 @@
     ./test.ps1 -Detailed
     ./test.ps1 -Target ActiveRoleAssignmentTests
     ./test.ps1 -Target "FullyQualifiedName~FormatRemaining" -Detailed
+    ./build.ps1; ./test.ps1 -NoBuild
+    ./build.ps1; ./test.ps1 -NoBuild -Target LapsClipboardTests
 #>
 [CmdletBinding()]
 param(
     [switch]$Detailed,
+    [switch]$NoBuild,
     [string]$Target
 )
 
@@ -49,6 +63,10 @@ $project = Join-Path $root 'tests/AzureTray.Tests/AzureTray.Tests.csproj'
 try { Get-Process -Name 'AzureTray' -ErrorAction Stop | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
 
 $dotnetArgs = @($project, '--configuration', 'Release', '--nologo')
+
+# Skip the restore + up-to-date walk of all five projects. Only correct when
+# build.ps1 has already produced current binaries; see the help above.
+if ($NoBuild) { $dotnetArgs += @('--no-build', '--no-restore') }
 
 if ($Target) {
     $filter = if ($Target -match '[=~!]') { $Target } else { "FullyQualifiedName~$Target" }

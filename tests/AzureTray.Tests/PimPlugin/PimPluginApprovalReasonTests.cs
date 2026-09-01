@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -102,7 +102,7 @@ public sealed class PimPluginApprovalReasonTests : IDisposable
             Assert.NotNull(row.Invoke);
 
             row.Invoke!();
-            await Settle();
+            await Settle.UntilAsync(() => ApprovalPopups(notifier).Count >= 1);
 
             var popups = ApprovalPopups(notifier);
             Assert.NotEmpty(popups);
@@ -193,8 +193,10 @@ public sealed class PimPluginApprovalReasonTests : IDisposable
     private const string EmptyJson = """{ "value": [] }""";
 
     // Boots the plugin against the fixture, forces one pending-approval poll
-    // through the plugin's own Test Runner entry, lets the fire-and-forget
-    // notification tasks settle, then hands the plugin to the assertions.
+    // through the plugin's own Test Runner entry, waits for the fire-and-forget
+    // notification tasks to produce their popup, then hands the plugin to the
+    // assertions. Every caller expects at least one approval popup from the
+    // poll, so that is the signal worth waiting on.
     private async Task WithPolledPluginAsync(
         StubHttp http, INotifier notifier, Func<AzureTray.Plugin.PIM.PimPlugin, Task> assert)
     {
@@ -205,7 +207,7 @@ public sealed class PimPluginApprovalReasonTests : IDisposable
             var poll = plugin.Tests.Single(t => t.Name == "Force pending-approval poll");
             var result = await poll.Run(CancellationToken.None);
             Assert.True(result.Passed, result.Message);
-            await Settle();
+            await Settle.UntilAsync(() => ApprovalPopups(notifier).Count >= 1);
 
             await assert(plugin);
         }
@@ -247,10 +249,6 @@ public sealed class PimPluginApprovalReasonTests : IDisposable
             .OfType<ChoiceRequest>()
             .Where(r => r.Title.StartsWith("PIM approval", StringComparison.Ordinal))
             .ToList();
-
-    // HandleNewApprovalAsync is fired with `_ = ...` from the poll and from the
-    // menu row, so completion is out-of-band.
-    private static Task Settle() => Task.Delay(300);
 
     private sealed class StubHttp : IPluginHttpClient
     {

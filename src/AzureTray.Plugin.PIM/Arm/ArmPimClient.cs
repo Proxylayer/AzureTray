@@ -424,6 +424,7 @@ internal sealed class ArmPimClient : IArmPimClient
         if (distinct.Count == 0) return Array.Empty<(string, T)>();
 
         var combined = new List<(string Scope, T Item)>();
+        var processed = 0;
         foreach (var batch in distinct.Chunk(FanOutBatchSize))
         {
             var tasks = batch.Select(async scope =>
@@ -436,7 +437,13 @@ internal sealed class ArmPimClient : IArmPimClient
             {
                 foreach (var item in items) combined.Add((scope, item));
             }
-            if (batch.Length == FanOutBatchSize)
+            processed += batch.Length;
+
+            // The pause spaces out consecutive batches so ARM is not hit with
+            // the whole fan-out at once. Pausing after the final batch throttles
+            // nothing - there is no following request - it only delays the
+            // caller, so only pause while scopes remain.
+            if (processed < distinct.Count)
             {
                 try { await Task.Delay(FanOutBatchPause, cancellationToken).ConfigureAwait(false); }
                 catch (OperationCanceledException) { break; }

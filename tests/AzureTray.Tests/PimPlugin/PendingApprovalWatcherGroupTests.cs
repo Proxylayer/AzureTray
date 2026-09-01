@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,6 +14,7 @@ using AzureTray.Plugin.PIM.Groups;
 using AzureTray.Plugin.PIM.Groups.Dto;
 using AzureTray.Plugin.PIM.Watchers;
 using Xunit;
+using static AzureTray.Tests.SubstituteCalls;
 
 namespace AzureTray.Tests.PimPlugin;
 
@@ -37,7 +38,7 @@ public sealed class PendingApprovalWatcherGroupTests
             NewNotifier());
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => watcher.CurrentApprovals.Count >= 2);
 
         Assert.Equal(2, watcher.CurrentApprovals.Count);
         var group = Assert.Single(watcher.CurrentApprovals, a => a.Source == PimSource.EntraGroup);
@@ -66,7 +67,7 @@ public sealed class PendingApprovalWatcherGroupTests
             NewNotifier());
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => watcher.CurrentApprovals.Count >= 1);
 
         var only = Assert.Single(watcher.CurrentApprovals);
         Assert.Equal(PimSource.EntraId, only.Source);
@@ -86,7 +87,7 @@ public sealed class PendingApprovalWatcherGroupTests
             NewNotifier());
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => watcher.CurrentApprovals.Count >= 1);
 
         var only = Assert.Single(watcher.CurrentApprovals);
         Assert.Equal(PimSource.EntraGroup, only.Source);
@@ -106,7 +107,7 @@ public sealed class PendingApprovalWatcherGroupTests
         var watcher = NewWatcher(graph, arm, groups, notifier);
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Reviews(groups) >= 1);
 
         await groups.Received(1).ReviewAsync(
             "req-g1", ApprovalDecision.Approve, "on call rotation", Arg.Any<CancellationToken>());
@@ -133,7 +134,7 @@ public sealed class PendingApprovalWatcherGroupTests
         var watcher = NewWatcher(NewGraph(), NewArm(), groups, notifier);
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Shown<InformationRequest>(notifier) >= 1);
 
         await notifier.Received(1).ShowAsync(
             Arg.Is<NotificationRequest>(r =>
@@ -235,7 +236,4 @@ public sealed class PendingApprovalWatcherGroupTests
             TimeSpan.FromMilliseconds(50));
     }
 
-    // PollAsync fires HandleNewApprovalAsync with `_ = ...` so completion is
-    // out-of-band. Give those tasks a short slice to run before assertions.
-    private static Task Settle() => Task.Delay(150);
 }

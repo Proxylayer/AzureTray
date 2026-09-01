@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A multi-scope PIM read no longer sits idle for half a second after its last request** (`AzureTray.Plugin.PIM` 0.12.0 → 0.12.1). ARM fan-out reads scopes two at a time and waits 500 ms between batches so ARM is not hit with the whole set at once. The wait was applied after *every* full batch, including the last one — and since the batch size is 2, any fan-out over an even number of scopes ended by pausing 500 ms with no request left to space out. It throttled nothing; it just delayed the caller, on every eligibility, assignment and policy read. The pause is now taken only while scopes remain, so an even-numbered fan-out returns half a second sooner and an odd-numbered one is unchanged. The spacing between consecutive batches — the part that does the throttling — is untouched.
+
 ## [0.13.0] — 2026-08-31
 
 ### Added

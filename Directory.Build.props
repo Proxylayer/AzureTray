@@ -14,6 +14,20 @@
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
   </PropertyGroup>
 
+  <!-- WPF's XAML markup compiler spins up a throwaway project
+       (<Name>_<hash>_wpftmp.csproj) to build a temporary target assembly
+       whenever a XAML file references a type from its own project. That
+       temp compilation is discarded, and every diagnostic it could emit is
+       emitted again by the real compilation of the same sources - so running
+       the analyzer and code-style pipeline over it is pure duplicated cost.
+       Turning it off here loses no enforcement. -->
+  <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('_wpftmp'))">
+    <RunAnalyzers>false</RunAnalyzers>
+    <EnableNETAnalyzers>false</EnableNETAnalyzers>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
   <PropertyGroup>
     <!-- Host EXE version. Plugin packages each declare their own
          <Version> in their csproj so they're decoupled from this. -->

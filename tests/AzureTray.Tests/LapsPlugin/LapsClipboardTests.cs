@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -59,8 +60,10 @@ public sealed class LapsClipboardTests
         plugin.ClipboardClearDelayOverride = TimeSpan.FromMilliseconds(100);
         plugin.ScheduleClipboardClear("hunter2");
 
-        // Generous margin over the 100 ms delay; the timer fires well before.
-        await Task.Delay(TimeSpan.FromMilliseconds(600));
+        // Poll for the clear rather than outwaiting the worst case: this returns
+        // as soon as the 100 ms timer fires, and still tolerates a loaded
+        // machine taking far longer than a fixed margin would have allowed.
+        await Settle.UntilAsync(() => Cleared(clipboard) >= 1, TimeSpan.FromSeconds(5));
 
         // ClearIfMatches only wipes if the value is still ours, so passing the
         // exact password is what makes the expiry safe (no clobbering).
@@ -76,16 +79,27 @@ public sealed class LapsClipboardTests
         var plugin = new AzureTray.Plugin.LAPS.LapsPlugin();
         await plugin.InitializeAsync(NewContext(clipboard), CancellationToken.None);
 
-        // Long delay so it can't fire on its own within the test window.
-        plugin.ClipboardClearDelayOverride = TimeSpan.FromSeconds(5);
+        // Long delay so it can't fire on its own within the test window. It only
+        // has to outlast the wait below, and the wait is bounded, so seconds of
+        // headroom buy nothing that milliseconds do not.
+        plugin.ClipboardClearDelayOverride = TimeSpan.FromMilliseconds(500);
         plugin.ScheduleClipboardClear("hunter2");
 
         // Shutdown cancels the lifetime token the pending clear awaits on.
         await plugin.ShutdownAsync(CancellationToken.None);
-        await Task.Delay(TimeSpan.FromMilliseconds(300));
+
+        // Proving an absence has no condition to poll for, so this is a plain
+        // bounded wait - long enough for a cancelled clear to have surfaced.
+        await Settle.QuietAsync();
 
         clipboard.DidNotReceive().ClearIfMatches(Arg.Any<string>());
     }
+
+    // A poll condition for the scheduled clear. NSubstitute's Received(1)
+    // asserts instead of reporting, so it cannot be used to wait on.
+    private static int Cleared(IClipboard clipboard)
+        => clipboard.ReceivedCalls().Count(c =>
+            c.GetMethodInfo().Name == nameof(IClipboard.ClearIfMatches));
 
     private static IPluginContext NewContext(IClipboard clipboard)
     {

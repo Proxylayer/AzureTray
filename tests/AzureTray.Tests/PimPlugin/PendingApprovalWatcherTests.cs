@@ -12,6 +12,7 @@ using AzureTray.Plugin.PIM.Graph;
 using AzureTray.Plugin.PIM.Groups;
 using AzureTray.Plugin.PIM.Watchers;
 using Xunit;
+using static AzureTray.Tests.SubstituteCalls;
 
 namespace AzureTray.Tests.PimPlugin;
 
@@ -27,7 +28,7 @@ public sealed class PendingApprovalWatcherTests
 
         await watcher.PollAsync(CancellationToken.None);
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Shown<ChoiceRequest>(notifier) >= 1);
 
         await notifier.Received(1).ShowAsync(
             Arg.Is<NotificationRequest>(r => r is ChoiceRequest && r.Title.Contains("PIM approval")),
@@ -46,7 +47,7 @@ public sealed class PendingApprovalWatcherTests
         var watcher = NewWatcher(graph, arm, notifier);
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Reviews(graph) >= 1);
 
         await graph.Received(1).ReviewAsync(
             "approval-1", ApprovalDecision.Approve,
@@ -70,7 +71,7 @@ public sealed class PendingApprovalWatcherTests
         var watcher = NewWatcher(graph, arm, notifier);
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Reviews(arm) >= 1);
 
         await arm.Received(1).ReviewAsync(
             "approval-arm-1",
@@ -96,7 +97,7 @@ public sealed class PendingApprovalWatcherTests
         var watcher = NewWatcher(graph, arm, notifier);
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Reviews(arm) >= 1);
 
         await arm.Received(1).ReviewAsync(
             "approval-arm-1",
@@ -116,7 +117,7 @@ public sealed class PendingApprovalWatcherTests
         var watcher = NewWatcher(graph, arm, notifier);
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Shown<ChoiceRequest>(notifier) >= 2);
 
         await notifier.Received(2).ShowAsync(
             Arg.Is<NotificationRequest>(r => r is ChoiceRequest),
@@ -133,7 +134,7 @@ public sealed class PendingApprovalWatcherTests
         var watcher = NewWatcher(graph, arm, notifier);
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Shown<ChoiceRequest>(notifier) >= 1);
 
         await graph.DidNotReceive().ReviewAsync(
             Arg.Any<string>(), Arg.Any<ApprovalDecision>(),
@@ -152,7 +153,7 @@ public sealed class PendingApprovalWatcherTests
         var watcher = NewWatcher(graph, arm, notifier);
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Shown<TextInputRequest>(notifier) >= 1);
 
         await graph.DidNotReceive().ReviewAsync(
             Arg.Any<string>(), Arg.Any<ApprovalDecision>(),
@@ -176,7 +177,7 @@ public sealed class PendingApprovalWatcherTests
         await watcher.PollAsync(CancellationToken.None); // notifies once
         await watcher.PollAsync(CancellationToken.None); // drops from seen
         await watcher.PollAsync(CancellationToken.None); // notifies again
-        await Settle();
+        await Settle.UntilAsync(() => Shown<ChoiceRequest>(notifier) >= 2);
 
         await notifier.Received(2).ShowAsync(
             Arg.Is<NotificationRequest>(r => r is ChoiceRequest),
@@ -224,7 +225,7 @@ public sealed class PendingApprovalWatcherTests
         var watcher = NewWatcher(graph, arm, notifier);
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Shown<ChoiceRequest>(notifier) >= 1);
 
         await notifier.Received(1).ShowAsync(
             Arg.Is<NotificationRequest>(r => r is ChoiceRequest),
@@ -247,7 +248,7 @@ public sealed class PendingApprovalWatcherTests
         var watcher = NewWatcher(graph, arm, notifier);
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Shown<ChoiceRequest>(notifier) >= 1);
 
         await notifier.Received(1).ShowAsync(
             Arg.Is<NotificationRequest>(r => r is ChoiceRequest),
@@ -266,7 +267,7 @@ public sealed class PendingApprovalWatcherTests
         var watcher = NewWatcher(graph, arm, notifier);
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Shown<ChoiceRequest>(notifier) >= 1);
 
         await notifier.Received(1).ShowAsync(
             Arg.Is<NotificationRequest>(r => r is ChoiceRequest),
@@ -303,7 +304,7 @@ public sealed class PendingApprovalWatcherTests
             relevantManagementGroupScopes: () => ScopeSet(MgScope));
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Shown<ChoiceRequest>(notifier) >= 1);
 
         Assert.NotNull(capturedScopes);
         Assert.Contains(MgScope, capturedScopes!);
@@ -334,7 +335,7 @@ public sealed class PendingApprovalWatcherTests
             relevantManagementGroupScopes: () => ScopeSet(MgScope));
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Shown<ChoiceRequest>(notifier) >= 1);
 
         await notifier.Received(1).ShowAsync(
             Arg.Is<NotificationRequest>(r => r is ChoiceRequest),
@@ -393,7 +394,7 @@ public sealed class PendingApprovalWatcherTests
             relevantManagementGroupScopes: () => ScopeSet(MgScope));
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.UntilAsync(() => Reviews(arm) >= 1);
 
         await arm.Received(1).ReviewAsync(
             "approval-mg-1",
@@ -427,7 +428,7 @@ public sealed class PendingApprovalWatcherTests
             relevantManagementGroupScopes: () => ScopeSet(MgScope));
 
         await watcher.PollAsync(CancellationToken.None);
-        await Settle();
+        await Settle.QuietAsync();
 
         await notifier.DidNotReceive().ShowAsync(
             Arg.Is<NotificationRequest>(r => r is ChoiceRequest),
@@ -543,8 +544,4 @@ public sealed class PendingApprovalWatcherTests
 
     private static HashSet<string> ScopeSet(params string[] scopes)
         => new(scopes, StringComparer.OrdinalIgnoreCase);
-
-    // PollAsync fires HandleNewApprovalAsync with `_ = ...` so completion is
-    // out-of-band. Give those tasks a short slice to run before assertions.
-    private static Task Settle() => Task.Delay(150);
 }
