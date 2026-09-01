@@ -44,6 +44,29 @@ internal static class PimRequiredPermissions
             "RoleManagement.Read.Directory",
             "741c54c3-0c1e-44a1-818b-3f97ab4e8c83",
             "Read PIM policies and poll activation request status"),
+        // PIM for Groups. Separate scopes from the directory-role ones above:
+        // the AzureADGroup suffix governs identityGovernance/privilegedAccess/
+        // group, and no amount of RoleManagement.*.Directory grants it.
+        new PluginPermissionRequirement(
+            PermissionApi.MicrosoftGraph,
+            "PrivilegedEligibilitySchedule.Read.AzureADGroup",
+            "8f44f93d-ecef-46ae-a9bf-338508d44d6b",
+            "List eligible PIM group memberships and ownerships"),
+        // The ReadWrite assignment scope also covers the corresponding reads
+        // (active assignments, request status) and the approver-side approve /
+        // deny, so the matching .Read scope would be redundant and is not
+        // requested. PrivilegedAccess.*.AzureADGroup would work too but grants
+        // considerably more than this plugin uses.
+        new PluginPermissionRequirement(
+            PermissionApi.MicrosoftGraph,
+            "PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup",
+            "06dbc45d-6708-4ef0-a797-f797ee68bf4b",
+            "Activate and deactivate group membership, and approve group activation requests"),
+        new PluginPermissionRequirement(
+            PermissionApi.MicrosoftGraph,
+            "RoleManagementPolicy.Read.AzureADGroup",
+            "7e26fdff-9cb1-4e56-bede-211fe0e420e8",
+            "Read PIM for Groups activation policies (maximum duration, approval requirement)"),
         new PluginPermissionRequirement(
             PermissionApi.AzureResourceManager,
             "user_impersonation",

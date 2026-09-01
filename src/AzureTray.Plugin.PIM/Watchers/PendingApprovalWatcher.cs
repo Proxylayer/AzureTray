@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -7,22 +7,25 @@ using Microsoft.Extensions.Logging;
 using AzureTray.Plugin.Contracts;
 using AzureTray.Plugin.PIM.Arm;
 using AzureTray.Plugin.PIM.Graph;
+using AzureTray.Plugin.PIM.Groups;
 
 namespace AzureTray.Plugin.PIM.Watchers;
 
-// One watcher per tenant. Polls both Microsoft Graph (Entra ID PIM) and ARM
-// (Azure RBAC PIM) for pending approvals. New approvals (not seen on the
-// previous poll, regardless of source) surface as interactive notifications;
-// the user's decision is routed back to the source that produced the approval.
+// One watcher per tenant. Polls Microsoft Graph (Entra ID directory-role PIM),
+// ARM (Azure RBAC PIM) and Graph again (PIM for Groups) for pending approvals.
+// New approvals (not seen on the previous poll, regardless of source) surface as
+// interactive notifications; the user's decision is routed back to the source
+// that produced the approval.
 //
 // Acted-upon approvals fall out of the seen-set automatically once they no
-// longer appear in either feed.
+// longer appear in any feed.
 internal sealed class PendingApprovalWatcher
 {
     private static readonly string[] ApproveOrRejectChoices = { "Approve", "Reject" };
 
     private readonly IGraphPimClient _graph;
     private readonly IArmPimClient _arm;
+    private readonly IGraphGroupPimClient _groups;
     private readonly IPluginContext _context;
     private readonly PluginTenant _tenant;
     private readonly TimeSpan _interval;
@@ -30,11 +33,14 @@ internal sealed class PendingApprovalWatcher
     private readonly Func<IReadOnlySet<string>>? _relevantManagementGroupScopes;
     private readonly HashSet<string> _seenKeys = new(StringComparer.OrdinalIgnoreCase);
 
-    // Once-then-quiet logging for the two per-poll fetches: an expired token
-    // makes both fail identically every interval, and only the transitions
-    // (fail once, recover once) carry information. See FetchFailureGate.
+    // Once-then-quiet logging for the three per-poll fetches: an expired token
+    // makes all of them fail identically every interval, and only the
+    // transitions (fail once, recover once) carry information. One gate per
+    // source, so a failing source stays quiet without muting a healthy one.
+    // See FetchFailureGate.
     private readonly FetchFailureGate _graphFetchFailures = new();
     private readonly FetchFailureGate _armFetchFailures = new();
+    private readonly FetchFailureGate _groupFetchFailures = new();
 
     private Task? _loopTask;
     private CancellationTokenSource? _cts;
@@ -51,6 +57,7 @@ internal sealed class PendingApprovalWatcher
     public PendingApprovalWatcher(
         IGraphPimClient graph,
         IArmPimClient arm,
+        IGraphGroupPimClient groups,
         IPluginContext context,
         PluginTenant tenant,
         TimeSpan interval,
@@ -59,6 +66,7 @@ internal sealed class PendingApprovalWatcher
     {
         _graph = graph;
         _arm = arm;
+        _groups = groups;
         _context = context;
         _tenant = tenant;
         _interval = interval;
@@ -135,9 +143,11 @@ internal sealed class PendingApprovalWatcher
 
             var graphTask = FetchGraphAsync(cancellationToken);
             var armTask = FetchArmAsync(cancellationToken);
+            var groupTask = FetchGroupsAsync(cancellationToken);
 
             var graphPending = await graphTask.ConfigureAwait(false);
             var armPending = await armTask.ConfigureAwait(false);
+            var groupPending = await groupTask.ConfigureAwait(false);
 
             // Drop self-authored requests before they ever enter the snapshot
             // or the seen-set — surfacing "approve your own request" is
@@ -151,7 +161,7 @@ internal sealed class PendingApprovalWatcher
             // from both the MG query and every descendant subscription query.
             // Collapse on the dedup key here so a cross-scope duplicate never
             // reaches the snapshot (menu) or the notify loop below.
-            var all = graphPending.Concat(armPending)
+            var all = graphPending.Concat(armPending).Concat(groupPending)
                 .Where(a => !IsSelfAuthored(a))
                 .DistinctBy(a => a.DedupKey, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
@@ -248,7 +258,7 @@ internal sealed class PendingApprovalWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
         catch (Exception ex)
         {
-            LogFetchFailure(_graphFetchFailures, ex, "Graph", "ARM");
+            LogFetchFailure(_graphFetchFailures, ex, "Graph", "ARM and PIM for Groups");
             return new();
         }
     }
@@ -311,7 +321,45 @@ internal sealed class PendingApprovalWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
         catch (Exception ex)
         {
-            LogFetchFailure(_armFetchFailures, ex, "ARM", "Graph");
+            LogFetchFailure(_armFetchFailures, ex, "ARM", "Graph and PIM for Groups");
+            return new();
+        }
+    }
+
+    // PIM for Groups approvals. Unlike the directory-role feed there is no
+    // scope fan-out and no beta route: one call returns every group activation
+    // request waiting on the signed-in user as an approver, and the client has
+    // already joined each approval to the request that carries the requestor,
+    // the group, and the reason they typed.
+    private async Task<List<UnifiedPendingApproval>> FetchGroupsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var requests = await _groups.ListPendingApprovalsAsync(ct).ConfigureAwait(false);
+            LogFetchRecovered(_groupFetchFailures, "PIM for Groups");
+
+            return requests
+                .Where(r => !string.IsNullOrWhiteSpace(r.Id))
+                .Select(r => new UnifiedPendingApproval(
+                    Source: PimSource.EntraGroup,
+                    // A group approval's id IS its schedule request's id, so no
+                    // separate approval id has to be carried or parsed out of a
+                    // resource path the way ARM's does.
+                    ApprovalId: r.Id!,
+                    PrincipalDisplay: r.Principal?.DisplayName ?? r.Principal?.UserPrincipalName ?? "(unknown user)",
+                    // Access id in the role slot, group in the scope slot —
+                    // the same split the eligible-role rows use.
+                    RoleDisplay: GroupAccess.DisplayFor(r.AccessId),
+                    ScopeDisplay: r.Group?.DisplayName ?? r.GroupId ?? "(unknown group)",
+                    ArmScope: null,
+                    RequestorPrincipalId: r.Principal?.Id ?? r.PrincipalId,
+                    RequestorJustification: r.Justification))
+                .ToList();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
+        catch (Exception ex)
+        {
+            LogFetchFailure(_groupFetchFailures, ex, "PIM for Groups", "Graph and ARM");
             return new();
         }
     }
@@ -343,13 +391,13 @@ internal sealed class PendingApprovalWatcher
             case FetchFailureGate.FailureLog.WarnWithException:
                 _context.Logger.LogWarning(
                     ex,
-                    "{Source} pending-approval fetch failed for tenant {TenantId}; continuing with {ContinuingWith} only.",
+                    "{Source} pending-approval fetch failed for tenant {TenantId}; continuing with {ContinuingWith}.",
                     source, _tenant.TenantId, continuingWith);
                 break;
 
             case FetchFailureGate.FailureLog.DebugOneLine:
                 _context.Logger.LogDebug(
-                    "{Source} pending-approval fetch failing for tenant {TenantId} ({ExceptionType}: {ExceptionMessage}); continuing with {ContinuingWith} only.",
+                    "{Source} pending-approval fetch failing for tenant {TenantId} ({ExceptionType}: {ExceptionMessage}); continuing with {ContinuingWith}.",
                     source, _tenant.TenantId, ex.GetType().Name, ex.Message, continuingWith);
                 break;
         }
@@ -425,9 +473,37 @@ internal sealed class PendingApprovalWatcher
                         justText,
                         cancellationToken).ConfigureAwait(false);
                     break;
+
+                case PimSource.EntraGroup:
+                    await _groups.ReviewAsync(
+                        approval.ApprovalId,
+                        decision.Value,
+                        justText,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
             }
         }
         catch (OperationCanceledException) { /* shutdown */ }
+        catch (ApprovalAlreadyDecidedException ex)
+        {
+            // Not a failure: an approval stage can list several approvers and
+            // the first decision closes it for everyone, so a user who was
+            // simply beaten to it should be told that, not shown an error they
+            // can do nothing about.
+            _context.Logger.LogInformation(
+                "{Source} approval {ApprovalId} on tenant {TenantId} was already decided by another approver; no action taken.",
+                approval.Source, approval.ApprovalId, _tenant.TenantId);
+
+            await _context.Notifier.ShowAsync(
+                new InformationRequest(
+                    Title: $"Already decided: {approval.RoleDisplay}",
+                    Message: $"Another approver has already answered {approval.PrincipalDisplay}'s request on {approval.ScopeDisplay}.")
+                {
+                    Severity = NotificationSeverity.Info,
+                    Details = new[] { new NotificationDetail("Detail", ex.Message) },
+                },
+                CancellationToken.None).ConfigureAwait(false);
+        }
         catch (Exception ex)
         {
             _context.Logger.LogError(

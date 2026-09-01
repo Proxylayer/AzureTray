@@ -245,6 +245,33 @@ public sealed class ActivationDurationChoicesTests
             fallback.Select(c => c.Label));
     }
 
+    // PIM for Groups is Graph-served and time-bound by the service to the same
+    // 8 hours, so an unreadable group policy clamps to the documented ceiling
+    // exactly as a directory role does — not to the unbounded ARM behaviour.
+    [Fact]
+    public void EffectiveCap_EntraGroupWithUnknownCap_FallsBackToTheDocumentedEightHourCeiling()
+    {
+        Assert.Equal(
+            TimeSpan.FromHours(8),
+            ActivationDurationChoices.EffectiveCap(GroupRole(cap: null)));
+    }
+
+    [Fact]
+    public void EffectiveCap_EntraGroupWithAKnownPolicyValue_UsesIt()
+    {
+        Assert.Equal(
+            TimeSpan.FromHours(2),
+            ActivationDurationChoices.EffectiveCap(GroupRole(TimeSpan.FromHours(2))));
+    }
+
+    [Fact]
+    public void For_EntraGroupWithUnknownCap_OffersTheSameListAsAnEightHourPolicy()
+    {
+        var fallback = ActivationDurationChoices.For(GroupRole(cap: null));
+
+        Assert.Equal(new[] { "1 hour", "4 hours", "8 hours" }, fallback.Select(c => c.Label));
+    }
+
     [Fact]
     public void For_ArmWithATightCap_ClampsThePrompt()
     {
@@ -309,6 +336,19 @@ public sealed class ActivationDurationChoicesTests
 
     private static string[] Labels(TimeSpan? cap)
         => ActivationDurationChoices.Build(cap).Select(c => c.Label).ToArray();
+
+    // A PIM for Groups row: the access id fills the role-definition slot and
+    // the group is the scope, so neither ArmScope nor DirectoryScopeId is set.
+    private static UnifiedEligibleRole GroupRole(TimeSpan? cap)
+        => new(
+            Source: PimSource.EntraGroup,
+            RoleName: "Member",
+            RoleDefinitionId: "member",
+            ScopeDisplay: "Contoso SQL Admins",
+            ArmScope: null,
+            EligibilityId: "elig-group-1",
+            MaxActivationDuration: cap,
+            GroupId: "group-1");
 
     private static UnifiedEligibleRole Role(PimSource source, TimeSpan? cap)
         => new(

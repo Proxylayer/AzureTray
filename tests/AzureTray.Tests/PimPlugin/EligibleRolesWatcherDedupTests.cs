@@ -11,6 +11,7 @@ using AzureTray.Plugin.PIM.Arm;
 using AzureTray.Plugin.PIM.Arm.Dto;
 using AzureTray.Plugin.PIM.Dto;
 using AzureTray.Plugin.PIM.Graph;
+using AzureTray.Plugin.PIM.Groups;
 using AzureTray.Plugin.PIM.Policies;
 using AzureTray.Plugin.PIM.Watchers;
 using Xunit;
@@ -475,7 +476,7 @@ public sealed class EligibleRolesWatcherDedupTests : IDisposable
         ctx.Tenants.Returns(new List<PluginTenant> { Tenant });
 
         return new EligibleRolesWatcher(
-            graph, arm, ctx, Tenant,
+            graph, arm, Substitute.For<IGraphGroupPimClient>(), ctx, Tenant,
             TimeSpan.FromMilliseconds(50),
             new PendingActivationStore(ctx, Tenant));
     }

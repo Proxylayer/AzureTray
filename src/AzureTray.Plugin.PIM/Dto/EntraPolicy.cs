@@ -13,11 +13,24 @@ internal sealed record EntraPolicyAssignment(
     string? ScopeType,
     EntraRoleManagementPolicy? Policy);
 
-// EffectiveRules rather than Rules: effective rules account for policy the
-// tenant enforces directory-wide on top of the role's own policy.
+// Two navigation properties carry the same rule shapes, and which one a caller
+// gets back depends on which one it expanded. Directory roles expand
+// effectiveRules — effective rules account for policy the tenant enforces
+// directory-wide on top of the role's own policy. PIM for Groups expands rules:
+// that is the form Microsoft documents for a Group-scoped policy assignment and
+// the form verified to parse against a live tenant, and groups have no
+// directory-wide overlay for effectiveRules to fold in. Exactly one of the two
+// is ever populated on a given response — read them through RulesToRead.
 internal sealed record EntraRoleManagementPolicy(
     string? Id,
-    List<EntraPolicyRule>? EffectiveRules);
+    List<EntraPolicyRule>? EffectiveRules,
+    List<EntraPolicyRule>? Rules = null)
+{
+    // Whichever rule collection this response actually expanded, or null when
+    // the request expanded neither (rules stay unknown; the caller must not
+    // read that as "no restrictions").
+    public List<EntraPolicyRule>? RulesToRead => EffectiveRules ?? Rules;
+}
 
 // Union of the rule shapes we read, kept flat rather than modelled as a
 // polymorphic hierarchy: Graph's effectiveRules array mixes 17 rule types,

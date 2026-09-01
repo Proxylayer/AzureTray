@@ -151,6 +151,86 @@ public sealed class ActiveRoleAssignmentTests
         Assert.True(active.Matches(EntraRole("Owner", "role-owner")));
     }
 
+    // ---- PIM for Groups ---------------------------------------------------
+
+    // A group assignment is identified by the group plus the access id. Both
+    // halves are compared case-insensitively, because Graph's casing of an
+    // object id or an access id is not something to depend on.
+    [Fact]
+    public void Group_SameGroupAndAccess_Matches_CaseInsensitively()
+    {
+        var active = GroupActive("GROUP-1", "Member");
+
+        Assert.True(active.Matches(GroupRole("group-1", "member")));
+    }
+
+    // Every group row in the tenant reads "Member" or "Owner", so without the
+    // group id one activation would gray out every other group's row.
+    [Fact]
+    public void Group_DifferentGroup_SameAccess_DoesNotMatch()
+    {
+        var active = GroupActive("group-1", "member");
+
+        Assert.False(active.Matches(GroupRole("group-2", "member")));
+    }
+
+    [Fact]
+    public void Group_SameGroup_DifferentAccess_DoesNotMatch()
+    {
+        var active = GroupActive("group-1", "member");
+
+        Assert.False(active.Matches(GroupRole("group-1", "owner")));
+    }
+
+    // A row or an assignment with no group id cannot be matched to anything:
+    // there is no scope left to compare, and guessing would gray out the wrong
+    // row.
+    [Fact]
+    public void Group_MissingGroupIdOnEitherSide_DoesNotMatch()
+    {
+        Assert.False(GroupActive(groupId: null, "member").Matches(GroupRole("group-1", "member")));
+        Assert.False(GroupActive("group-1", "member").Matches(GroupRole(groupId: null, "member")));
+    }
+
+    // The cross-provider guard, group edition: a group named after a directory
+    // role (or an access id that collides with a role definition id) must not
+    // cross-match in either direction.
+    [Fact]
+    public void Group_AndEntraDirectoryRow_DoNotCrossMatch_EvenWhenNamesCoincide()
+    {
+        var groupActive = GroupActive("group-1", "member", roleName: "Member");
+        var entraActive = Active(PimSource.EntraId, "Member", "member", scope: "/");
+
+        Assert.False(groupActive.Matches(EntraRole("Member", "member")));
+        Assert.False(entraActive.Matches(GroupRole("group-1", "member", roleName: "Member")));
+    }
+
+    [Fact]
+    public void Group_AndArmRow_DoNotCrossMatch()
+    {
+        var groupActive = GroupActive("group-1", "owner", roleName: "Owner");
+        var armActive = Active(PimSource.AzureRbac, "Owner", "owner", "/subscriptions/sub-1");
+
+        Assert.False(groupActive.Matches(ArmRole("Owner", "owner", "/subscriptions/sub-1")));
+        Assert.False(armActive.Matches(GroupRole("group-1", "owner", roleName: "Owner")));
+    }
+
+    // ARM's ancestor-prefix logic must never run for a group: there is no
+    // inheritance between groups, and a group assignment carries no Scope at
+    // all — a stray one must not become a prefix match.
+    [Fact]
+    public void Group_ScopeIsIgnored_AndTheAncestorPrefixRuleDoesNotApply()
+    {
+        var withStrayScope = new ActiveRoleAssignment(
+            PimSource.EntraGroup, "Member", "member", Scope: "/subscriptions/sub-1",
+            EndDateTime: null, GroupId: "group-1");
+
+        // The stray scope neither helps nor hinders: the group id and access id
+        // still decide the match.
+        Assert.True(withStrayScope.Matches(GroupRole("group-1", "member")));
+        Assert.False(withStrayScope.Matches(GroupRole("group-2", "member")));
+    }
+
     // ---- builders ---------------------------------------------------------
 
     private static ActiveRoleAssignment Active(
@@ -169,6 +249,29 @@ public sealed class ActiveRoleAssignmentTests
             ScopeDisplay: "Entra ID directory",
             ArmScope: null,
             EligibilityId: "elig-1");
+
+    // A group assignment carries no Scope: the group id is its scope, and the
+    // access id ("member" / "owner") fills the role-definition slot.
+    private static ActiveRoleAssignment GroupActive(
+        string? groupId, string accessId, string roleName = "Member")
+        => new(
+            PimSource.EntraGroup,
+            roleName,
+            accessId,
+            Scope: null,
+            EndDateTime: null,
+            GroupId: groupId);
+
+    private static UnifiedEligibleRole GroupRole(
+        string? groupId, string accessId, string roleName = "Member")
+        => new(
+            Source: PimSource.EntraGroup,
+            RoleName: roleName,
+            RoleDefinitionId: accessId,
+            ScopeDisplay: "Contoso SQL Admins",
+            ArmScope: null,
+            EligibilityId: "elig-group-1",
+            GroupId: groupId);
 
     private static UnifiedEligibleRole ArmRole(string roleName, string roleDefinitionId, string? armScope)
         => new(

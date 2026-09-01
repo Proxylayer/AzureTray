@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using AzureTray.Plugin.Contracts;
 using AzureTray.Plugin.PIM.Arm;
 using AzureTray.Plugin.PIM.Graph;
+using AzureTray.Plugin.PIM.Groups;
 
 namespace AzureTray.Plugin.PIM.Watchers;
 
@@ -24,6 +25,7 @@ internal sealed class PendingActivationWatcher
 
     private readonly IGraphPimClient _graph;
     private readonly IArmPimClient _arm;
+    private readonly IGraphGroupPimClient _groups;
     private readonly IPluginContext _context;
     private readonly PluginTenant _tenant;
     private readonly TimeSpan _interval;
@@ -36,6 +38,7 @@ internal sealed class PendingActivationWatcher
     public PendingActivationWatcher(
         IGraphPimClient graph,
         IArmPimClient arm,
+        IGraphGroupPimClient groups,
         IPluginContext context,
         PluginTenant tenant,
         TimeSpan interval,
@@ -44,6 +47,7 @@ internal sealed class PendingActivationWatcher
     {
         _graph = graph;
         _arm = arm;
+        _groups = groups;
         _context = context;
         _tenant = tenant;
         _interval = interval;
@@ -149,6 +153,11 @@ internal sealed class PendingActivationWatcher
                     await _graph.GetActivationStatusAsync(request.RequestId, ct).ConfigureAwait(false),
                 PimSource.AzureRbac when !string.IsNullOrWhiteSpace(request.ArmScope) =>
                     await _arm.GetActivationStatusAsync(request.ArmScope!, request.RequestId, ct).ConfigureAwait(false),
+                // The group request is addressed by its own id alone — the URL
+                // carries no group segment — so PendingActivationRequest needs
+                // nothing beyond what it already persists for the other sources.
+                PimSource.EntraGroup =>
+                    await _groups.GetActivationStatusAsync(request.RequestId, ct).ConfigureAwait(false),
                 _ => null,
             };
         }

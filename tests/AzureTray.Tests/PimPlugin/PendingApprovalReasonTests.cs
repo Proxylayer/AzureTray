@@ -10,6 +10,7 @@ using AzureTray.Plugin.PIM.Arm;
 using AzureTray.Plugin.PIM.Arm.Dto;
 using AzureTray.Plugin.PIM.Dto;
 using AzureTray.Plugin.PIM.Graph;
+using AzureTray.Plugin.PIM.Groups;
 using AzureTray.Plugin.PIM.Watchers;
 using Xunit;
 
@@ -333,6 +334,7 @@ public sealed class PendingApprovalReasonTests
         return new PendingApprovalWatcher(
             graph,
             arm,
+            Substitute.For<IGraphGroupPimClient>(),
             context,
             new PluginTenant("tenant-1", "Contoso"),
             TimeSpan.FromMilliseconds(50));

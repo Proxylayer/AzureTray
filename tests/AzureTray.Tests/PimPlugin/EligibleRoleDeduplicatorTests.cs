@@ -131,7 +131,87 @@ public sealed class EligibleRoleDeduplicatorTests
         Assert.Single(result);
     }
 
+    // ---- group keying -----------------------------------------------------
+
+    // A group row's "role definition" is only ever "member" or "owner", so the
+    // group id is what makes two rows distinguishable. Dropping it from the key
+    // would collapse every "Member" row in the tenant into a single menu entry.
+    [Fact]
+    public void Deduplicate_GroupRowsOnDifferentGroups_StayApart()
+    {
+        var result = EligibleRoleDeduplicator.Deduplicate(new[]
+        {
+            GroupRow("group-1", "member"),
+            GroupRow("group-2", "member"),
+        });
+
+        Assert.Equal(2, result.Count);
+        Assert.Contains(result, r => r.GroupId == "group-1");
+        Assert.Contains(result, r => r.GroupId == "group-2");
+    }
+
+    // Member and owner of the same group are two separate grants with two
+    // separate policies — one row each.
+    [Fact]
+    public void Deduplicate_MemberAndOwnerOfTheSameGroup_StayApart()
+    {
+        var result = EligibleRoleDeduplicator.Deduplicate(new[]
+        {
+            GroupRow("group-1", "member"),
+            GroupRow("group-1", "owner"),
+        });
+
+        Assert.Equal(2, result.Count);
+        Assert.Contains(result, r => r.RoleDefinitionId == "member");
+        Assert.Contains(result, r => r.RoleDefinitionId == "owner");
+    }
+
+    // The multi-path grant, group-side: the same group access reachable through
+    // two eligibilities comes back twice and must collapse to one row.
+    [Fact]
+    public void Deduplicate_GroupRowsSameGroupAndAccess_DifferentEligibilityIds_CollapseToOne()
+    {
+        var result = EligibleRoleDeduplicator.Deduplicate(new[]
+        {
+            GroupRow("group-1", "member", eligibilityId: "elig-a"),
+            GroupRow("group-1", "member", eligibilityId: "elig-b"),
+        });
+
+        var row = Assert.Single(result);
+        Assert.Equal("group-1", row.GroupId);
+    }
+
+    // Graph does not guarantee stable casing on either half of the key.
+    [Fact]
+    public void Deduplicate_GroupRowsDifferingOnlyByCasing_CollapseToOne()
+    {
+        var result = EligibleRoleDeduplicator.Deduplicate(new[]
+        {
+            GroupRow("group-1", "member", eligibilityId: "elig-a"),
+            GroupRow("GROUP-1", "Member", eligibilityId: "elig-b"),
+        });
+
+        Assert.Single(result);
+    }
+
     // ---- cross-provider guard ---------------------------------------------
+
+    // A group row and a directory row can carry the same "role" text — an Entra
+    // directory role literally named "Member" is possible — so the Source split
+    // has to hold here as much as it does for Entra versus ARM.
+    [Fact]
+    public void Deduplicate_GroupAndEntraRowsSharingNameAndRoleDefinitionId_StayApart()
+    {
+        var result = EligibleRoleDeduplicator.Deduplicate(new[]
+        {
+            GroupRow("group-1", "member", roleName: "Member"),
+            EntraRow(roleName: "Member", roleDefinitionId: "member", directoryScopeId: "/"),
+        });
+
+        Assert.Equal(2, result.Count);
+        Assert.Contains(result, r => r.Source == PimSource.EntraGroup);
+        Assert.Contains(result, r => r.Source == PimSource.EntraId);
+    }
 
     // "Owner" exists in both Entra ID and Azure RBAC, and ActiveRoleAssignment
     // .Matches relies on the Source split, so the provider is part of the key —
@@ -367,6 +447,27 @@ public sealed class EligibleRoleDeduplicatorTests
             MaxActivationDuration: cap,
             MemberType: memberType,
             DirectoryScopeId: null);
+
+    // A PIM for Groups row: the access id sits in the role-definition slot and
+    // the group is the scope, so both belong to the dedup key.
+    private static UnifiedEligibleRole GroupRow(
+        string groupId,
+        string accessId,
+        string roleName = "Member",
+        string? eligibilityId = "elig-group",
+        string? memberType = "Direct",
+        TimeSpan? cap = null)
+        => new(
+            Source: PimSource.EntraGroup,
+            RoleName: roleName,
+            RoleDefinitionId: accessId,
+            ScopeDisplay: "Contoso SQL Admins",
+            ArmScope: null,
+            EligibilityId: eligibilityId,
+            MaxActivationDuration: cap,
+            MemberType: memberType,
+            DirectoryScopeId: null,
+            GroupId: groupId);
 
     private static UnifiedEligibleRole EntraRow(
         string roleName = "Global Reader",

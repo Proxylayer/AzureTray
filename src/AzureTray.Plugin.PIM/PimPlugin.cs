@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Linq;
@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using AzureTray.Plugin.Contracts;
 using AzureTray.Plugin.PIM.Arm;
 using AzureTray.Plugin.PIM.Graph;
+using AzureTray.Plugin.PIM.Groups;
 using AzureTray.Plugin.PIM.Permissions;
 using AzureTray.Plugin.PIM.Watchers;
 
@@ -217,9 +218,18 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
                 .Where(r => r.Source == PimSource.AzureRbac)
                 .OrderBy(r => r.RoleName, StringComparer.OrdinalIgnoreCase)
                 .ToList();
+            // Group rows all read "Member" or "Owner", so the role name is a
+            // near-useless sort key on its own — order by the group first so
+            // a group's member and owner rows sit together.
+            var entraGroups = roles
+                .Where(r => r.Source == PimSource.EntraGroup)
+                .OrderBy(r => r.ScopeDisplay, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(r => r.RoleName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
 
             AppendSourceGroup(children, "Entra ID", entra, w);
             AppendSourceGroup(children, "Azure RBAC", arm, w);
+            AppendSourceGroup(children, "Entra Groups", entraGroups, w);
         }
 
         var label = totalEligible > 0
@@ -247,8 +257,12 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             // Stable re-anchoring identity: tenant + source + role definition +
             // the scope the eligibility applies at. Role names alone collide
             // (same role at multiple scopes) and change form when the
-            // active/cap markers come and go.
-            var roleKey = $"pim.role.{watcher.TenantId}.{r.Source}.{r.RoleDefinitionId}.{r.ArmScope ?? r.DirectoryScopeId ?? "/"}";
+            // active/cap markers come and go. Exactly one of the three scope
+            // members is set per source — ArmScope for Azure RBAC,
+            // DirectoryScopeId for Entra ID, GroupId for a group row, whose
+            // role definition is only ever "member" or "owner" and so cannot
+            // carry the identity by itself.
+            var roleKey = $"pim.role.{watcher.TenantId}.{r.Source}.{r.RoleDefinitionId}.{r.ArmScope ?? r.DirectoryScopeId ?? r.GroupId ?? "/"}";
 
             // Right-click "Copy role name" is offered on every row. Active rows
             // are otherwise non-actionable (the left-click is disabled), so the
@@ -435,6 +449,9 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             // is scoped to that specific tenant — no cross-tenant leakage.
             var graph = new GraphPimClient(_context, tenant.TenantId);
             var arm = new ArmPimClient(_context, tenant.TenantId);
+            // PIM for Groups is a separate Graph resource family, not more
+            // surface on the directory-role client — see IGraphGroupPimClient.
+            var groups = new GraphGroupPimClient(_context, tenant.TenantId);
 
             // Activations awaiting an approver are recorded here by the
             // eligibility watcher and polled by the activation watcher, so the
@@ -444,13 +461,13 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             // Eligibility runs first so its subscription set is available to
             // the pending watcher's relevant-subs filter (captured by Func).
             var eligible = new EligibleRolesWatcher(
-                graph, arm, _context, tenant, EligiblePollInterval, pendingActivations);
+                graph, arm, groups, _context, tenant, EligiblePollInterval, pendingActivations);
             eligible.PollStarted += OnWatcherPollStarted;
             eligible.PollCompleted += OnWatcherPollCompleted;
             eligible.Start(_lifetimeCts.Token);
 
             var pending = new PendingApprovalWatcher(
-                graph, arm, _context, tenant, PendingPollInterval,
+                graph, arm, groups, _context, tenant, PendingPollInterval,
                 relevantSubscriptions: () => eligible.RelevantSubscriptionIds,
                 relevantManagementGroupScopes: () => eligible.RelevantManagementGroupScopes);
             pending.PollStarted += OnWatcherPollStarted;
@@ -458,7 +475,7 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             pending.Start(_lifetimeCts.Token);
 
             var activations = new PendingActivationWatcher(
-                graph, arm, _context, tenant, PendingPollInterval, pendingActivations,
+                graph, arm, groups, _context, tenant, PendingPollInterval, pendingActivations,
                 refreshActiveRoles: ct => eligible.PollAsync(ct));
             activations.ActivationProvisioned += OnActivationProvisioned;
             activations.Start(_lifetimeCts.Token);

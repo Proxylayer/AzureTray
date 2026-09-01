@@ -27,4 +27,12 @@ internal sealed record UnifiedEligibleRole(
     // Null for ARM rows, which carry their scope in ArmScope. Activation must
     // send this, not a hardcoded "/", or an administrative-unit-scoped role
     // activates directory-wide (or is rejected).
-    string? DirectoryScopeId = null);
+    string? DirectoryScopeId = null,
+    // Object id of the PIM-onboarded group an EntraGroup row grants access to —
+    // the scope of that row, the way ArmScope is an ARM row's. Null for every
+    // other source. For a group row, RoleDefinitionId holds the access id
+    // ("member" / "owner") instead of a role definition, so the group id is
+    // what makes two rows distinguishable: without it, "Member of group A" and
+    // "Member of group B" are the same row. Trailing and optional so cache
+    // files written before PIM for Groups existed still deserialize.
+    string? GroupId = null);

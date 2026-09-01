@@ -10,6 +10,7 @@ using AzureTray.Plugin.PIM.Arm;
 using AzureTray.Plugin.PIM.Arm.Dto;
 using AzureTray.Plugin.PIM.Dto;
 using AzureTray.Plugin.PIM.Graph;
+using AzureTray.Plugin.PIM.Groups;
 using AzureTray.Plugin.PIM.Watchers;
 using Xunit;
 
@@ -262,7 +263,7 @@ public sealed class EligibleRolesWatcherCacheTests : IDisposable
 
         var effectiveGraph = graph ?? Substitute.For<IGraphPimClient>();
         return new EligibleRolesWatcher(
-            effectiveGraph, arm, ctx, Tenant,
+            effectiveGraph, arm, Substitute.For<IGraphGroupPimClient>(), ctx, Tenant,
             TimeSpan.FromMilliseconds(50),
             new PendingActivationStore(ctx, Tenant));
     }

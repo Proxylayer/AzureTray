@@ -8,6 +8,7 @@ using NSubstitute;
 using AzureTray.Plugin.Contracts;
 using AzureTray.Plugin.PIM.Arm;
 using AzureTray.Plugin.PIM.Graph;
+using AzureTray.Plugin.PIM.Groups;
 using AzureTray.Plugin.PIM.Watchers;
 using Xunit;
 
@@ -267,7 +268,50 @@ public sealed class PendingActivationWatcherTests : IDisposable
         await context.DidNotReceive().RefreshTokenAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
+    // A group activation is polled through the group client, addressed by the
+    // request id alone — the URL carries no group segment, so a tracked group
+    // request needs nothing the other sources do not already persist. Sending
+    // it to the directory-role client instead would 404 forever and the user's
+    // approved access would never trigger the token refresh.
+    [Fact]
+    public async Task PollAsync_GroupRequest_PollsTheGroupClient_NotTheDirectoryRoleOne()
+    {
+        var graph = Substitute.For<IGraphPimClient>();
+        var arm = Substitute.For<IArmPimClient>();
+        var groups = Substitute.For<IGraphGroupPimClient>();
+        groups.GetActivationStatusAsync("req-g1", Arg.Any<CancellationToken>()).Returns("Provisioned");
+
+        var context = NewContext();
+        var store = NewStore(context);
+        store.Track(GroupRequest("req-g1", DateTimeOffset.UtcNow));
+
+        var refreshes = 0;
+        var watcher = NewWatcher(
+            graph, context, store, _ => { refreshes++; return Task.CompletedTask; }, arm, groups);
+
+        await watcher.PollAsync(CancellationToken.None);
+
+        await groups.Received(1).GetActivationStatusAsync("req-g1", Arg.Any<CancellationToken>());
+        await graph.DidNotReceive().GetActivationStatusAsync(
+            Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await arm.DidNotReceive().GetActivationStatusAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+
+        // Provisioned is terminal: the token is refreshed and tracking stops.
+        Assert.Equal(1, refreshes);
+        Assert.Equal(0, watcher.TrackedCount);
+    }
+
     // ---- helpers ----------------------------------------------------------
+
+    private static PendingActivationRequest GroupRequest(string requestId, DateTimeOffset submittedAt)
+        => new(
+            Source: PimSource.EntraGroup,
+            RequestId: requestId,
+            RoleName: "Member",
+            ScopeDisplay: "Contoso SQL Admins",
+            ArmScope: null,
+            SubmittedAt: submittedAt);
 
     private static PendingActivationRequest EntraRequest(string requestId, DateTimeOffset submittedAt)
         => new(
@@ -286,10 +330,12 @@ public sealed class PendingActivationWatcherTests : IDisposable
         IPluginContext context,
         PendingActivationStore store,
         Func<CancellationToken, Task>? refreshActiveRoles = null,
-        IArmPimClient? arm = null)
+        IArmPimClient? arm = null,
+        IGraphGroupPimClient? groups = null)
         => new(
             graph,
             arm ?? Substitute.For<IArmPimClient>(),
+            groups ?? Substitute.For<IGraphGroupPimClient>(),
             context,
             Tenant,
             TimeSpan.FromMilliseconds(50),

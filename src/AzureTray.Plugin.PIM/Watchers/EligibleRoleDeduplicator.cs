@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using AzureTray.Plugin.PIM.Arm;
+using AzureTray.Plugin.PIM.Groups;
 
 namespace AzureTray.Plugin.PIM.Watchers;
 
@@ -42,6 +43,18 @@ internal static class EligibleRoleDeduplicator
         {
             var policyKey = ArmRolePolicyKey.For(role.ArmScope, role.RoleDefinitionId);
             return (role.Source, policyKey.Scope, policyKey.RoleDefinitionId);
+        }
+
+        // Group rows key on the group plus the access id, which is also their
+        // policy key: each onboarded group carries one policy per access id, so
+        // rows that collapse together are provably governed by the same policy.
+        // RoleDefinitionId holds the access id here, and it is far from unique —
+        // dropping the group id would collapse every "Member" row in the tenant
+        // into one.
+        if (role.Source == PimSource.EntraGroup)
+        {
+            var policyKey = GroupRolePolicyKey.For(role.GroupId, role.RoleDefinitionId);
+            return (role.Source, policyKey.GroupId, policyKey.AccessId);
         }
 
         return (

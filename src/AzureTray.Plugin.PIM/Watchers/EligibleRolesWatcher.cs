@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -10,19 +10,26 @@ using Microsoft.Extensions.Logging;
 using AzureTray.Plugin.Contracts;
 using AzureTray.Plugin.PIM.Arm;
 using AzureTray.Plugin.PIM.Graph;
+using AzureTray.Plugin.PIM.Groups;
 using AzureTray.Plugin.PIM.Policies;
 
 namespace AzureTray.Plugin.PIM.Watchers;
 
-// One watcher per tenant. Polls eligible roles from both Graph (Entra ID) and
-// ARM (Azure RBAC) on a slow cadence (30 minutes by default — eligibility
-// changes infrequently). The user can force an immediate refresh from the
-// tray menu's "↻ <Tenant>" entry. Activation is initiated by clicking a role:
-// duration prompt → justification prompt → call the matching API.
+// One watcher per tenant. Polls eligible roles from Graph (Entra ID directory
+// roles), ARM (Azure RBAC) and Graph again (PIM for Groups membership and
+// ownership) on a slow cadence (30 minutes by default — eligibility changes
+// infrequently). The user can force an immediate refresh from the tray menu's
+// "↻ <Tenant>" entry. Activation is initiated by clicking a role: duration
+// prompt → justification prompt → call the matching API.
+//
+// The three sources are fetched concurrently and each is wrapped in its own
+// try/catch: one provider failing degrades that provider's rows to empty and
+// must never blank the other two.
 internal sealed class EligibleRolesWatcher
 {
     private readonly IGraphPimClient _graph;
     private readonly IArmPimClient _arm;
+    private readonly IGraphGroupPimClient _groups;
     private readonly IPluginContext _context;
     private readonly PluginTenant _tenant;
     private readonly TimeSpan _interval;
@@ -39,6 +46,7 @@ internal sealed class EligibleRolesWatcher
     public EligibleRolesWatcher(
         IGraphPimClient graph,
         IArmPimClient arm,
+        IGraphGroupPimClient groups,
         IPluginContext context,
         PluginTenant tenant,
         TimeSpan interval,
@@ -46,6 +54,7 @@ internal sealed class EligibleRolesWatcher
     {
         _graph = graph;
         _arm = arm;
+        _groups = groups;
         _context = context;
         _tenant = tenant;
         _interval = interval;
@@ -65,7 +74,8 @@ internal sealed class EligibleRolesWatcher
     public bool IsPolling { get; private set; }
 
     // Role assignments currently in force for the signed-in user in this tenant,
-    // fetched per provider (Graph for Entra ID, ARM for Azure RBAC). The menu
+    // fetched per provider (Graph for Entra ID directory roles and for PIM group
+    // access, ARM for Azure RBAC). The menu
     // uses these to gray out eligible roles that are already activated and to
     // show how long each activation has left.
     public IReadOnlyList<ActiveRoleAssignment> CurrentActiveAssignments => _activeAssignments;
@@ -245,14 +255,19 @@ internal sealed class EligibleRolesWatcher
 
             var graphTask = FetchGraphAsync(principalId, cancellationToken);
             var armTask = FetchArmAsync(principalId, cancellationToken);
+            var groupTask = FetchGroupsAsync(cancellationToken);
             var graphActiveTask = FetchGraphActiveAssignmentsAsync(principalId, cancellationToken);
 
             var graphRoles = await graphTask.ConfigureAwait(false);
             var arm = await armTask.ConfigureAwait(false);
+            var groups = await groupTask.ConfigureAwait(false);
             var graphActives = await graphActiveTask.ConfigureAwait(false);
 
-            _lastSnapshot = graphRoles.Concat(arm.Roles).ToArray();
-            _activeAssignments = graphActives.Concat(arm.ActiveAssignments).ToArray();
+            _lastSnapshot = graphRoles.Concat(arm.Roles).Concat(groups.Roles).ToArray();
+            _activeAssignments = graphActives
+                .Concat(arm.ActiveAssignments)
+                .Concat(groups.ActiveAssignments)
+                .ToArray();
             _relevantSubscriptionIds = ExtractSubscriptionIds(arm.Roles);
             _relevantManagementGroupScopes = ExtractManagementGroupScopes(arm.Roles);
             SaveToCache();
@@ -471,6 +486,31 @@ internal sealed class EligibleRolesWatcher
                     // rebuilds the URL from it, so pass the name rather than the full id.
                     TrackIfAwaitingApproval(role, armRequest.Name ?? LastSegment(armRequest.Id), status);
                     break;
+
+                case PimSource.EntraGroup:
+                {
+                    if (string.IsNullOrWhiteSpace(role.GroupId))
+                    {
+                        // The group id is the row's scope; without it there is
+                        // nothing to activate against. Only reachable from a
+                        // hand-edited cache file.
+                        _context.Logger.LogError(
+                            "Group access {RoleName} on tenant {TenantId} has no group id; cannot activate.",
+                            role.RoleName, _tenant.TenantId);
+                        await NotifyActivationErrorAsync(role, "Cannot activate — the row has no group to act on.", ex: null, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+                    var groupRequest = await _groups.ActivateAsync(
+                        principalId,
+                        role.GroupId!,
+                        role.RoleDefinitionId,
+                        duration,
+                        justText,
+                        cancellationToken).ConfigureAwait(false);
+                    status = groupRequest.Status;
+                    TrackIfAwaitingApproval(role, groupRequest.Id, status);
+                    break;
+                }
             }
 
             // Surface the outcome so the user knows the request landed, and
@@ -592,6 +632,28 @@ internal sealed class EligibleRolesWatcher
                     await _arm.DeactivateRoleAsync(
                         role.ArmScope,
                         principalId,
+                        role.RoleDefinitionId,
+                        justification,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+
+                case PimSource.EntraGroup:
+                    if (string.IsNullOrWhiteSpace(role.GroupId))
+                    {
+                        _context.Logger.LogError(
+                            "Group access {RoleName} on tenant {TenantId} has no group id; cannot deactivate.",
+                            role.RoleName, _tenant.TenantId);
+                        await NotifyOperationErrorAsync("Deactivation", role, "Cannot deactivate — the row has no group to act on.", ex: null, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+                    // A 2xx is not a guarantee the access is gone: when dropping
+                    // the last active owner would leave the group ownerless, PIM
+                    // accepts the request and then silently retries the removal
+                    // for up to 30 days. The refresh below is what tells the
+                    // truth — the row stays marked active if it did not take.
+                    await _groups.DeactivateAsync(
+                        principalId,
+                        role.GroupId!,
                         role.RoleDefinitionId,
                         justification,
                         cancellationToken).ConfigureAwait(false);
@@ -780,27 +842,30 @@ internal sealed class EligibleRolesWatcher
         }
     }
 
-    // Eligibility and active assignments come from the same subscription list,
-    // so they are fetched together rather than enumerating subscriptions twice.
-    private sealed record ArmPollResult(
+    // What one provider contributes to a poll. Eligibility and active
+    // assignments are fetched together per provider: ARM's come from the same
+    // subscription list (so it is not enumerated twice), and a group's come from
+    // two calls against the same root that only make sense as a pair — an active
+    // row is meaningless without the eligible row it grays out.
+    private sealed record SourcePollResult(
         List<UnifiedEligibleRole> Roles,
         List<ActiveRoleAssignment> ActiveAssignments)
     {
-        public static ArmPollResult Empty() => new(new(), new());
+        public static SourcePollResult Empty() => new(new(), new());
     }
 
-    private async Task<ArmPollResult> FetchArmAsync(string principalId, CancellationToken ct)
+    private async Task<SourcePollResult> FetchArmAsync(string principalId, CancellationToken ct)
     {
         try
         {
             var subs = await _arm.ListSubscriptionsAsync(ct).ConfigureAwait(false);
-            if (subs.Count == 0) return ArmPollResult.Empty();
+            if (subs.Count == 0) return SourcePollResult.Empty();
 
             var scopes = subs
                 .Where(s => !string.IsNullOrWhiteSpace(s.SubscriptionId))
                 .Select(s => $"/subscriptions/{s.SubscriptionId}")
                 .ToList();
-            if (scopes.Count == 0) return ArmPollResult.Empty();
+            if (scopes.Count == 0) return SourcePollResult.Empty();
 
             var schedules = await _arm.ListEligibleRolesAsync(principalId, scopes, ct).ConfigureAwait(false);
 
@@ -820,17 +885,141 @@ internal sealed class EligibleRolesWatcher
                     MemberType: s.Properties.MemberType)));
 
             var actives = await FetchArmActiveAssignmentsAsync(principalId, scopes, ct).ConfigureAwait(false);
-            return new ArmPollResult(await AttachArmCapsAsync(roles, ct).ConfigureAwait(false), actives);
+            return new SourcePollResult(await AttachArmCapsAsync(roles, ct).ConfigureAwait(false), actives);
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return ArmPollResult.Empty(); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return SourcePollResult.Empty(); }
         catch (Exception ex)
         {
             _context.Logger.LogWarning(
                 ex,
                 "ARM eligible-role fetch failed for tenant {TenantId}; continuing with Graph only.",
                 _tenant.TenantId);
-            return ArmPollResult.Empty();
+            return SourcePollResult.Empty();
         }
+    }
+
+    // PIM for Groups. No principal id is passed: Graph's
+    // filterByCurrentUser(on='principal') resolves the signed-in user
+    // server-side for both the eligible and the active list.
+    //
+    // A group row's "role" is its access id — RoleName is the display form
+    // ("Member" / "Owner") and RoleDefinitionId the wire form ("member" /
+    // "owner"), so the row reads "Member (Contoso SQL Admins)" with the group's
+    // display name in the scope slot.
+    private async Task<SourcePollResult> FetchGroupsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var eligibilities = await _groups.ListEligibleGroupsAsync(ct).ConfigureAwait(false);
+
+            // Collapsed before the caps are attached, so the policy join runs
+            // once per distinct row rather than once per grant path — the same
+            // multi-path duplication that affects directory roles applies here
+            // (a group can be reachable through more than one eligibility).
+            var roles = EligibleRoleDeduplicator.Deduplicate(eligibilities
+                .Where(e => !string.IsNullOrWhiteSpace(e.GroupId))
+                .Select(e => new UnifiedEligibleRole(
+                    Source: PimSource.EntraGroup,
+                    RoleName: GroupAccess.DisplayFor(e.AccessId),
+                    RoleDefinitionId: GroupAccess.Normalize(e.AccessId),
+                    // The client guarantees a usable display name here, falling
+                    // back to the group id when Graph would not give one up.
+                    ScopeDisplay: e.Group?.DisplayName ?? e.GroupId!,
+                    ArmScope: null,
+                    EligibilityId: e.Id,
+                    MemberType: e.MemberType,
+                    DirectoryScopeId: null,
+                    GroupId: e.GroupId)));
+
+            var actives = await FetchGroupActiveAssignmentsAsync(ct).ConfigureAwait(false);
+            return new SourcePollResult(await AttachGroupCapsAsync(roles, ct).ConfigureAwait(false), actives);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return SourcePollResult.Empty(); }
+        catch (Exception ex)
+        {
+            _context.Logger.LogWarning(
+                ex,
+                "PIM for Groups eligible-access fetch failed for tenant {TenantId}; continuing with Entra ID and Azure RBAC only.",
+                _tenant.TenantId);
+            return SourcePollResult.Empty();
+        }
+    }
+
+    private async Task<List<ActiveRoleAssignment>> FetchGroupActiveAssignmentsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var actives = await _groups.ListActiveGroupAssignmentsAsync(ct).ConfigureAwait(false);
+            return actives
+                .Where(a => !string.IsNullOrWhiteSpace(a.GroupId))
+                .Select(a => new ActiveRoleAssignment(
+                    Source: PimSource.EntraGroup,
+                    RoleName: GroupAccess.DisplayFor(a.AccessId),
+                    RoleDefinitionId: GroupAccess.Normalize(a.AccessId),
+                    // Scope stays null: a group assignment is matched on GroupId,
+                    // and the ARM scope-prefix logic must never see a value here.
+                    Scope: null,
+                    // Flat on this resource, unlike the request shapes where it
+                    // nests under scheduleInfo.expiration. Null means permanent.
+                    EndDateTime: a.EndDateTime,
+                    GroupId: a.GroupId))
+                .ToList();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
+        catch (Exception ex)
+        {
+            // Caught separately from the eligibility read so a failure here
+            // still leaves the group rows listed (just not grayed out).
+            _context.Logger.LogWarning(
+                ex,
+                "PIM for Groups active-access fetch failed for tenant {TenantId}; group rows will not gray out this cycle.",
+                _tenant.TenantId);
+            return new();
+        }
+    }
+
+    // One request per group — PIM for Groups has no tenant-wide bulk policy
+    // form, and each request returns that group's member and owner policy
+    // together. Only groups that appeared in the eligibility list are asked
+    // about, so the fan-out is bounded by what the user can actually activate.
+    private async Task<List<UnifiedEligibleRole>> AttachGroupCapsAsync(
+        List<UnifiedEligibleRole> roles, CancellationToken ct)
+    {
+        var groupIds = roles
+            .Select(r => r.GroupId)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (groupIds.Count == 0) return roles;
+
+        IReadOnlyDictionary<GroupRolePolicyKey, RolePolicy>? policies = null;
+        try
+        {
+            policies = await _groups.GetGroupPoliciesAsync(groupIds, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _context.Logger.LogWarning(
+                ex,
+                "PIM for Groups policy read failed for tenant {TenantId}; group activation durations fall back to the last known caps.",
+                _tenant.TenantId);
+        }
+
+        for (var i = 0; i < roles.Count; i++)
+        {
+            TimeSpan? cap = null;
+            if (policies is not null
+                && policies.TryGetValue(
+                    GroupRolePolicyKey.For(roles[i].GroupId, roles[i].RoleDefinitionId),
+                    out var policy))
+            {
+                cap = policy.MaxActivationDuration;
+            }
+            roles[i] = roles[i] with { MaxActivationDuration = CarryForwardCap(roles[i], cap) };
+        }
+        return roles;
     }
 
     // One request per poll cycle for every directory-scoped role's policy — not
@@ -918,6 +1107,10 @@ internal sealed class EligibleRolesWatcher
     // break the menu or block activation. When the cap for a role cannot be
     // read this cycle, keep whatever the last successful cycle knew rather
     // than downgrading a known cap to "unknown".
+    //
+    // GroupId is part of the match, not an optional extra: a group row's
+    // RoleDefinitionId is only ever "member" or "owner", so without it every
+    // group row in the tenant would inherit the first one's cap.
     private TimeSpan? CarryForwardCap(UnifiedEligibleRole role, TimeSpan? fetched)
     {
         if (fetched is not null) return fetched;
@@ -926,7 +1119,8 @@ internal sealed class EligibleRolesWatcher
         {
             if (previous.Source == role.Source
                 && string.Equals(previous.RoleDefinitionId, role.RoleDefinitionId, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(previous.ArmScope, role.ArmScope, StringComparison.OrdinalIgnoreCase))
+                && string.Equals(previous.ArmScope, role.ArmScope, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(previous.GroupId, role.GroupId, StringComparison.OrdinalIgnoreCase))
             {
                 return previous.MaxActivationDuration;
             }

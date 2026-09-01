@@ -24,21 +24,24 @@ internal static class ActivationDurationChoices
         TimeSpan.FromHours(8),
     };
 
-    // Entra ID role activation is time-bound to at most 8 hours by the service
-    // itself; a role's policy can lower that but not raise it. So when an Entra
-    // policy read fails or omits the rule, 8h is a documented ceiling rather
-    // than a guess. Azure RBAC has no documented equivalent, so an ARM role with
-    // an unknown cap keeps the full standard list.
-    private static readonly TimeSpan EntraActivationCeiling = TimeSpan.FromHours(8);
+    // Both Graph-served sources — Entra ID directory roles and PIM for Groups
+    // membership/ownership — are time-bound to at most 8 hours by the service
+    // itself; a policy can lower that but not raise it. So when a policy read
+    // fails or omits the rule, 8h is a documented ceiling rather than a guess.
+    // Azure RBAC has no documented equivalent, so an ARM role with an unknown
+    // cap keeps the full standard list.
+    private static readonly TimeSpan GraphActivationCeiling = TimeSpan.FromHours(8);
 
     public static IReadOnlyList<ActivationDurationChoice> For(UnifiedEligibleRole role)
         => Build(EffectiveCap(role));
 
     // The cap to clamp against: the role's policy value when known, otherwise
-    // the provider's documented ceiling (Entra) or nothing (ARM).
+    // the provider's documented ceiling (Graph-served sources) or nothing (ARM).
     internal static TimeSpan? EffectiveCap(UnifiedEligibleRole role)
         => role.MaxActivationDuration
-            ?? (role.Source == PimSource.EntraId ? EntraActivationCeiling : null);
+            ?? (role.Source is PimSource.EntraId or PimSource.EntraGroup
+                ? GraphActivationCeiling
+                : null);
 
     // Standard steps at or below the cap, plus the cap itself when it is not
     // already one of them. Never empty and never above the cap: a cap tighter
