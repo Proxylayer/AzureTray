@@ -414,7 +414,7 @@ public sealed class TrayIcon : IDisposable
         {
             if (_notifyIcon is not null && TryGetNotifyIconRect(_notifyIcon, out var rect))
             {
-                return new System.Drawing.Point((rect.Left + rect.Right) / 2, (rect.Top + rect.Bottom) / 2);
+                return new System.Drawing.Point(rect.Right, rect.Bottom);
             }
         }
         catch
