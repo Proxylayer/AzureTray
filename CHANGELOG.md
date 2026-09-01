@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two of the PIM plugin's declared Graph permissions were consenting to the wrong thing** (`AzureTray.Plugin.PIM`). `PluginPermissionRequirement.ScopeId` is written verbatim into the app registration's `requiredResourceAccess` as `ResourceAccessDto(id, "Scope")`, so the GUID — not the human-readable name beside it — is what the tenant actually grants. Two of the six shipped ids were wrong, and because the consent screen renders whatever the id resolves to, the mismatch was invisible unless you read the registration afterwards: `RoleEligibilitySchedule.Read.Directory` carried `ed8d2a04-…`, which is Graph's delegated **`User-LifeCycleInfo.Read.All`** scope, and `RoleManagement.Read.Directory` carried `483bed4a-…`, which is that permission's **application app-role** id rather than its delegated scope. A tenant that ran **Settings → Fix permissions** therefore ended up consented to an unrelated user-lifecycle scope and to nothing usable for policy reads, while the eligibility and policy calls the plugin actually makes fell back to whatever the signed-in user's directory roles allowed — which is why the failure looked like an intermittent 403 rather than a missing grant. Both are now the verified delegated scope ids (`eb0788c2-…` and `741c54c3-…`); the other four verify correct and are unchanged. The declaration list also gained a comment spelling out that an id must come from the resource service principal's `oauth2PermissionScopes` (never `appRoles`), with the `az ad sp show` query to check one. Existing registrations need one more **Fix permissions** pass to drop the stale entries and request the right ones.
+
 ## [0.12.2] — 2026-08-29
 
 ### Fixed
