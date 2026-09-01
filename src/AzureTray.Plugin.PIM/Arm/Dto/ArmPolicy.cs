@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using AzureTray.Plugin.PIM.Policies;
 
 namespace AzureTray.Plugin.PIM.Arm.Dto;
 
@@ -25,7 +27,26 @@ internal sealed record ArmPolicyRule(
     string? RuleType,
     string? MaximumDuration,
     bool? IsExpirationRequired,
-    ArmPolicyRuleSetting? Setting);
+    ArmPolicyRuleSetting? Setting) : IPolicyRule
+{
+    // Explicit so System.Text.Json never sees it: the rule shape is
+    // deserialize-only and this is a projection, not a wire member.
+    bool? IPolicyRule.IsApprovalRequired => Setting?.IsApprovalRequired;
+
+    // ARM names the rule type exactly, with none of Graph's namespacing and no
+    // case for an absent value, so this is an exact match rather than a
+    // substring check.
+    public bool MatchesRuleType(PolicyRuleKind kind)
+    {
+        var expected = kind switch
+        {
+            PolicyRuleKind.Expiration => "RoleManagementPolicyExpirationRule",
+            _ => "RoleManagementPolicyApprovalRule",
+        };
+
+        return string.Equals(RuleType, expected, StringComparison.OrdinalIgnoreCase);
+    }
+}
 
 internal sealed record ArmPolicyRuleSetting(
     bool? IsApprovalRequired,

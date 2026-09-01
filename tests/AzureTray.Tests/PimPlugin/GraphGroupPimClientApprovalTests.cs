@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using AzureTray.Plugin.Contracts;
+using AzureTray.Plugin.PIM;
 using AzureTray.Plugin.PIM.Graph;
 using AzureTray.Plugin.PIM.Groups;
 using Xunit;

@@ -19,16 +19,18 @@ namespace AzureTray.Plugin.PIM.Watchers;
 //
 // Acted-upon approvals fall out of the seen-set automatically once they no
 // longer appear in any feed.
-internal sealed class PendingApprovalWatcher
+internal sealed class PendingApprovalWatcher : PollingWatcher
 {
     private static readonly string[] ApproveOrRejectChoices = { "Approve", "Reject" };
+
+    // Names the three fetches in the once-then-quiet log lines.
+    private const string GraphFetch = "Graph pending-approval fetch";
+    private const string ArmFetch = "ARM pending-approval fetch";
+    private const string GroupFetch = "PIM for Groups pending-approval fetch";
 
     private readonly IGraphPimClient _graph;
     private readonly IArmPimClient _arm;
     private readonly IGraphGroupPimClient _groups;
-    private readonly IPluginContext _context;
-    private readonly PluginTenant _tenant;
-    private readonly TimeSpan _interval;
     private readonly Func<IReadOnlySet<string>>? _relevantSubscriptions;
     private readonly Func<IReadOnlySet<string>>? _relevantManagementGroupScopes;
     private readonly HashSet<string> _seenKeys = new(StringComparer.OrdinalIgnoreCase);
@@ -42,8 +44,6 @@ internal sealed class PendingApprovalWatcher
     private readonly FetchFailureGate _armFetchFailures = new();
     private readonly FetchFailureGate _groupFetchFailures = new();
 
-    private Task? _loopTask;
-    private CancellationTokenSource? _cts;
     private IReadOnlyList<UnifiedPendingApproval> _lastSnapshot = Array.Empty<UnifiedPendingApproval>();
 
     // Cached lazily on first poll. The signed-in user's objectId in this tenant
@@ -63,16 +63,16 @@ internal sealed class PendingApprovalWatcher
         TimeSpan interval,
         Func<IReadOnlySet<string>>? relevantSubscriptions = null,
         Func<IReadOnlySet<string>>? relevantManagementGroupScopes = null)
+        : base(context, tenant, interval)
     {
         _graph = graph;
         _arm = arm;
         _groups = groups;
-        _context = context;
-        _tenant = tenant;
-        _interval = interval;
         _relevantSubscriptions = relevantSubscriptions;
         _relevantManagementGroupScopes = relevantManagementGroupScopes;
     }
+
+    protected override string PollKind => "Pending-approval";
 
     // Raised at the start and end of each PollAsync so the host can spin a
     // refresh indicator and rebuild the menu. May fire on a thread-pool thread;
@@ -80,8 +80,7 @@ internal sealed class PendingApprovalWatcher
     public event Action? PollStarted;
     public event Action? PollCompleted;
 
-    public string TenantId => _tenant.TenantId;
-    public string TenantDisplayName => _tenant.DisplayName;
+    public string TenantDisplayName => Tenant.DisplayName;
 
     public bool IsPolling { get; private set; }
 
@@ -89,51 +88,7 @@ internal sealed class PendingApprovalWatcher
     // next PollAsync completes, so callers don't need to copy.
     public IReadOnlyList<UnifiedPendingApproval> CurrentApprovals => _lastSnapshot;
 
-    public void Start(CancellationToken stopToken)
-    {
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(stopToken);
-        _loopTask = Task.Run(() => LoopAsync(_cts.Token), _cts.Token);
-    }
-
-    public async Task StopAsync()
-    {
-        _cts?.Cancel();
-        if (_loopTask is not null)
-        {
-            try { await _loopTask.ConfigureAwait(false); }
-            catch (OperationCanceledException) { }
-        }
-        _cts?.Dispose();
-        _cts = null;
-        _loopTask = null;
-    }
-
-    private async Task LoopAsync(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                await PollAsync(ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                _context.Logger.LogWarning(
-                    ex,
-                    "Pending-approval poll failed for tenant {TenantId}; will retry next interval.",
-                    _tenant.TenantId);
-            }
-
-            try { await Task.Delay(_interval, ct).ConfigureAwait(false); }
-            catch (OperationCanceledException) { return; }
-        }
-    }
-
-    internal async Task PollAsync(CancellationToken cancellationToken)
+    internal override async Task PollAsync(CancellationToken cancellationToken)
     {
         IsPolling = true;
         PollStarted?.Invoke();
@@ -177,7 +132,7 @@ internal sealed class PendingApprovalWatcher
                     // never appeared" indistinguishable from "the feed never saw
                     // the request" in the log. One Information line per newly
                     // surfaced approval.
-                    _context.Logger.LogInformation(
+                    Context.Logger.LogInformation(
                         "New {Source} pending approval {ApprovalId}: {Requestor} ({RequestorId}) requesting {Role} at {Scope} (tenant {TenantId}).",
                         approval.Source,
                         approval.ApprovalId,
@@ -185,7 +140,7 @@ internal sealed class PendingApprovalWatcher
                         approval.RequestorPrincipalId ?? "(unknown id)",
                         approval.RoleDisplay,
                         approval.ArmScope ?? approval.ScopeDisplay,
-                        _tenant.TenantId);
+                        Tenant.TenantId);
                     _ = HandleNewApprovalAsync(approval, cancellationToken);
                 }
             }
@@ -208,9 +163,9 @@ internal sealed class PendingApprovalWatcher
             _signedInUserIdResolved = true;
             if (string.IsNullOrWhiteSpace(_signedInUserId))
             {
-                _context.Logger.LogDebug(
+                Context.Logger.LogDebug(
                     "PIM self-approval filter disabled for tenant {TenantId}: Graph /me returned no id.",
-                    _tenant.TenantId);
+                    Tenant.TenantId);
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { /* shutdown */ }
@@ -219,10 +174,10 @@ internal sealed class PendingApprovalWatcher
             // Leave _signedInUserIdResolved=false so the next poll retries.
             // A persistent failure just keeps the legacy "show everything"
             // behaviour, which is the safer default.
-            _context.Logger.LogDebug(
+            Context.Logger.LogDebug(
                 ex,
                 "PIM self-approval filter could not resolve signed-in user for tenant {TenantId}; will retry.",
-                _tenant.TenantId);
+                Tenant.TenantId);
         }
     }
 
@@ -238,7 +193,7 @@ internal sealed class PendingApprovalWatcher
         try
         {
             var requests = await _graph.ListPendingApprovalsAsync(ct).ConfigureAwait(false);
-            LogFetchRecovered(_graphFetchFailures, "Graph");
+            LogFetchRecovered(_graphFetchFailures, GraphFetch);
             return requests
                 .Where(r => !string.IsNullOrWhiteSpace(r.ApprovalId))
                 .Select(r => new UnifiedPendingApproval(
@@ -258,7 +213,7 @@ internal sealed class PendingApprovalWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
         catch (Exception ex)
         {
-            LogFetchFailure(_graphFetchFailures, ex, "Graph", "ARM and PIM for Groups");
+            LogFetchFailure(_graphFetchFailures, ex, GraphFetch, "continuing with ARM and PIM for Groups");
             return new();
         }
     }
@@ -295,18 +250,18 @@ internal sealed class PendingApprovalWatcher
             {
                 // A poll with nothing to scan is still a successful poll —
                 // the subscription listing worked.
-                LogFetchRecovered(_armFetchFailures, "ARM");
+                LogFetchRecovered(_armFetchFailures, ArmFetch);
                 return new();
             }
 
             var requests = await _arm.ListPendingApprovalsAsync(scopes, ct).ConfigureAwait(false);
-            LogFetchRecovered(_armFetchFailures, "ARM");
+            LogFetchRecovered(_armFetchFailures, ArmFetch);
 
             return requests
                 .Where(r => !string.IsNullOrWhiteSpace(r.Properties?.ApprovalId))
                 .Select(r => new UnifiedPendingApproval(
                     Source: PimSource.AzureRbac,
-                    ApprovalId: ParseArmApprovalId(r.Properties!.ApprovalId!),
+                    ApprovalId: ArmResourceId.LastSegment(r.Properties!.ApprovalId)!,
                     PrincipalDisplay: r.Properties.ExpandedProperties?.Principal?.DisplayName ?? "(unknown user)",
                     RoleDisplay: r.Properties.ExpandedProperties?.RoleDefinition?.DisplayName ?? "(unknown role)",
                     ScopeDisplay: r.Properties.ExpandedProperties?.Scope?.DisplayName ?? r.Properties.Scope ?? "(unknown scope)",
@@ -321,7 +276,7 @@ internal sealed class PendingApprovalWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
         catch (Exception ex)
         {
-            LogFetchFailure(_armFetchFailures, ex, "ARM", "Graph and PIM for Groups");
+            LogFetchFailure(_armFetchFailures, ex, ArmFetch, "continuing with Graph and PIM for Groups");
             return new();
         }
     }
@@ -336,7 +291,7 @@ internal sealed class PendingApprovalWatcher
         try
         {
             var requests = await _groups.ListPendingApprovalsAsync(ct).ConfigureAwait(false);
-            LogFetchRecovered(_groupFetchFailures, "PIM for Groups");
+            LogFetchRecovered(_groupFetchFailures, GroupFetch);
 
             return requests
                 .Where(r => !string.IsNullOrWhiteSpace(r.Id))
@@ -359,47 +314,8 @@ internal sealed class PendingApprovalWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
         catch (Exception ex)
         {
-            LogFetchFailure(_groupFetchFailures, ex, "PIM for Groups", "Graph and ARM");
+            LogFetchFailure(_groupFetchFailures, ex, GroupFetch, "continuing with Graph and ARM");
             return new();
-        }
-    }
-
-    private void LogFetchRecovered(FetchFailureGate gate, string source)
-    {
-        if (gate.RecordSuccess())
-        {
-            _context.Logger.LogInformation(
-                "{Source} pending-approval fetch recovered for tenant {TenantId}.",
-                source, _tenant.TenantId);
-        }
-    }
-
-    private void LogFetchFailure(FetchFailureGate gate, Exception ex, string source, string continuingWith)
-    {
-        // Azure.Identity's AuthenticationRequiredException means "the silent
-        // token path can't recover; interactive sign-in needed". The host's
-        // TenantAuthHealthService already logs that transition once at Warning
-        // and raises the re-auth prompt, so this watcher stays at Debug even
-        // for the FIRST occurrence. The plugin runs in its own load context
-        // and deliberately doesn't reference Azure.Identity (the host's copy
-        // would be a different assembly identity anyway), so the type is
-        // matched by full name.
-        var knownCondition = ex.GetType().FullName == "Azure.Identity.AuthenticationRequiredException";
-
-        switch (gate.RecordFailure(knownCondition))
-        {
-            case FetchFailureGate.FailureLog.WarnWithException:
-                _context.Logger.LogWarning(
-                    ex,
-                    "{Source} pending-approval fetch failed for tenant {TenantId}; continuing with {ContinuingWith}.",
-                    source, _tenant.TenantId, continuingWith);
-                break;
-
-            case FetchFailureGate.FailureLog.DebugOneLine:
-                _context.Logger.LogDebug(
-                    "{Source} pending-approval fetch failing for tenant {TenantId} ({ExceptionType}: {ExceptionMessage}); continuing with {ContinuingWith}.",
-                    source, _tenant.TenantId, ex.GetType().Name, ex.Message, continuingWith);
-                break;
         }
     }
 
@@ -413,9 +329,9 @@ internal sealed class PendingApprovalWatcher
             // copy had to be truncated.
             var reason = ApprovalReason.From(approval.RequestorJustification);
 
-            var choice = await _context.Notifier.ShowAsync(
+            var choice = await Context.Notifier.ShowAsync(
                 new ChoiceRequest(
-                    Title: $"PIM approval — {_tenant.DisplayName}",
+                    Title: $"PIM approval — {Tenant.DisplayName}",
                     Message: $"{approval.PrincipalDisplay} is requesting {approval.RoleDisplay} on {approval.ScopeDisplay}.\n\n{reason.MessageLine}",
                     Choices: ApproveOrRejectChoices)
                 {
@@ -427,9 +343,9 @@ internal sealed class PendingApprovalWatcher
 
             if (choice is not ChoiceResult { SelectedChoice: { } picked })
             {
-                _context.Logger.LogDebug(
+                Context.Logger.LogDebug(
                     "{Source} approval {ApprovalId} dismissed without decision on tenant {TenantId}.",
-                    approval.Source, approval.ApprovalId, _tenant.TenantId);
+                    approval.Source, approval.ApprovalId, Tenant.TenantId);
                 return;
             }
 
@@ -441,7 +357,7 @@ internal sealed class PendingApprovalWatcher
             };
             if (decision is null) return;
 
-            var justification = await _context.Notifier.ShowAsync(
+            var justification = await Context.Notifier.ShowAsync(
                 new TextInputRequest(
                     Title: $"Justification — {decision}",
                     Message: $"Why are you {(decision == ApprovalDecision.Approve ? "approving" : "rejecting")} {approval.RoleDisplay}?",
@@ -450,9 +366,9 @@ internal sealed class PendingApprovalWatcher
 
             if (justification is not TextInputResult { Text: { } justText } || string.IsNullOrWhiteSpace(justText))
             {
-                _context.Logger.LogInformation(
+                Context.Logger.LogInformation(
                     "{Source} approval {ApprovalId} on tenant {TenantId}: user dismissed at justification prompt; no action taken.",
-                    approval.Source, approval.ApprovalId, _tenant.TenantId);
+                    approval.Source, approval.ApprovalId, Tenant.TenantId);
                 return;
             }
 
@@ -490,11 +406,11 @@ internal sealed class PendingApprovalWatcher
             // the first decision closes it for everyone, so a user who was
             // simply beaten to it should be told that, not shown an error they
             // can do nothing about.
-            _context.Logger.LogInformation(
+            Context.Logger.LogInformation(
                 "{Source} approval {ApprovalId} on tenant {TenantId} was already decided by another approver; no action taken.",
-                approval.Source, approval.ApprovalId, _tenant.TenantId);
+                approval.Source, approval.ApprovalId, Tenant.TenantId);
 
-            await _context.Notifier.ShowAsync(
+            await Context.Notifier.ShowAsync(
                 new InformationRequest(
                     Title: $"Already decided: {approval.RoleDisplay}",
                     Message: $"Another approver has already answered {approval.PrincipalDisplay}'s request on {approval.ScopeDisplay}.")
@@ -506,22 +422,10 @@ internal sealed class PendingApprovalWatcher
         }
         catch (Exception ex)
         {
-            _context.Logger.LogError(
+            Context.Logger.LogError(
                 ex,
                 "Failed to handle {Source} approval {ApprovalId} on tenant {TenantId}.",
-                approval.Source, approval.ApprovalId, _tenant.TenantId);
+                approval.Source, approval.ApprovalId, Tenant.TenantId);
         }
-    }
-
-    // ARM returns approvalId as a scope-relative resource path such as
-    // "/providers/Microsoft.Authorization/roleAssignmentApprovals/{guid}".
-    // Extract the trailing GUID segment so URL construction in ReviewAsync
-    // doesn't double-up the provider path.
-    private static string ParseArmApprovalId(string approvalId)
-    {
-        var last = approvalId.LastIndexOf('/');
-        return last >= 0 && last < approvalId.Length - 1
-            ? approvalId[(last + 1)..]
-            : approvalId;
     }
 }

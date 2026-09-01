@@ -59,6 +59,11 @@ internal interface IArmPimClient
     // Role assignment approvals are a tenant-level ARM collection (no scope
     // segment in the URL), so no scope is taken: the approvalId alone
     // identifies the approval wherever the underlying request was made.
+    //
+    // Throws ApprovalAlreadyDecidedException when another approver in the same
+    // stage got there first (no stage still in progress, or ARM answers 409);
+    // that is an outcome, not a fault, and the caller is expected to report it
+    // as such.
     Task ReviewAsync(
         string approvalId,
         ApprovalDecision decision,

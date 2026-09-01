@@ -79,28 +79,12 @@ internal sealed class GraphGroupPimClient : GraphHttpClientBase, IGraphGroupPimC
             "eligible group memberships",
             cancellationToken).ConfigureAwait(false);
 
-        RememberNames(instances.Select(i => i.Group));
-
-        var resolved = await ResolveGroupNamesAsync(
-            instances
-                .Where(i => string.IsNullOrWhiteSpace(i.Group?.DisplayName))
-                .Select(i => i.GroupId),
+        await BackfillGroupNamesAsync(
+            instances,
+            i => i.Group,
+            i => i.GroupId,
+            (i, group) => i with { Group = group },
             cancellationToken).ConfigureAwait(false);
-
-        // A name that could not be resolved degrades to the bare group id. It
-        // reads poorly, but a row the user can still activate beats a row that
-        // silently vanished because a display name was unavailable.
-        for (var i = 0; i < instances.Count; i++)
-        {
-            var instance = instances[i];
-            if (!string.IsNullOrWhiteSpace(instance.Group?.DisplayName)) continue;
-            if (string.IsNullOrWhiteSpace(instance.GroupId)) continue;
-
-            var name = resolved.TryGetValue(instance.GroupId!, out var found)
-                ? found
-                : instance.GroupId!;
-            instances[i] = instance with { Group = new GroupRef(instance.GroupId, name) };
-        }
 
         return instances;
     }
@@ -162,8 +146,8 @@ internal sealed class GraphGroupPimClient : GraphHttpClientBase, IGraphGroupPimC
                 if (rules is null) continue;
 
                 policies[GroupRolePolicyKey.For(groupId, accessId)] = new RolePolicy(
-                    ApprovalRequired: ReadApprovalRequired(rules),
-                    MaxActivationDuration: ReadMaxActivationDuration(rules));
+                    ApprovalRequired: PolicyRules.ReadApprovalRequired(rules),
+                    MaxActivationDuration: PolicyRules.ReadMaxActivationDuration(rules));
             }
         }
 
@@ -210,7 +194,7 @@ internal sealed class GraphGroupPimClient : GraphHttpClientBase, IGraphGroupPimC
                 expiration = new
                 {
                     type = "afterDuration",
-                    duration = FormatIso8601Duration(duration),
+                    duration = Iso8601Duration.Format(duration),
                 },
             },
         };
@@ -328,7 +312,14 @@ internal sealed class GraphGroupPimClient : GraphHttpClientBase, IGraphGroupPimC
 
         var pending = requests.Where(r => r is not null).Select(r => r!).ToList();
 
-        await FillGroupNamesAsync(pending, cancellationToken).ConfigureAwait(false);
+        // Fills in the display name on requests whose group was not expanded, so
+        // an approval prompt names the group rather than a GUID.
+        await BackfillGroupNamesAsync(
+            pending,
+            r => r.Group,
+            r => r.GroupId,
+            (r, group) => r with { Group = group },
+            cancellationToken).ConfigureAwait(false);
 
         return pending;
     }
@@ -388,7 +379,9 @@ internal sealed class GraphGroupPimClient : GraphHttpClientBase, IGraphGroupPimC
         {
             // No open stage almost always means somebody else decided between
             // the poll that surfaced this and the user clicking.
-            throw new ApprovalAlreadyDecidedException(approvalId);
+            throw new ApprovalAlreadyDecidedException(
+                approvalId,
+                $"Group approval {approvalId} has no open stage (already completed, or not assigned to you).");
         }
 
         var reviewResult = decision == ApprovalDecision.Approve ? "Approve" : "Deny";
@@ -421,27 +414,37 @@ internal sealed class GraphGroupPimClient : GraphHttpClientBase, IGraphGroupPimC
         return status?.Status;
     }
 
-    // Fills in the display name on requests whose group was not expanded, so an
-    // approval prompt names the group rather than a GUID.
-    private async Task FillGroupNamesAsync(
-        List<GroupScheduleRequest> requests, CancellationToken cancellationToken)
+    // Fills in the display name on every row whose group was not expanded,
+    // whichever resource the rows came from — an eligibility instance and an
+    // activation request carry the same Group/GroupId pair and want the same
+    // treatment, so the shape is passed in rather than duplicated per record.
+    private async Task BackfillGroupNamesAsync<T>(
+        List<T> rows,
+        Func<T, GroupRef?> readGroup,
+        Func<T, string?> readGroupId,
+        Func<T, GroupRef, T> withGroup,
+        CancellationToken cancellationToken)
     {
-        RememberNames(requests.Select(r => r.Group));
+        RememberNames(rows.Select(readGroup));
 
         var resolved = await ResolveGroupNamesAsync(
-            requests
-                .Where(r => string.IsNullOrWhiteSpace(r.Group?.DisplayName))
-                .Select(r => r.GroupId),
+            rows
+                .Where(r => string.IsNullOrWhiteSpace(readGroup(r)?.DisplayName))
+                .Select(readGroupId),
             cancellationToken).ConfigureAwait(false);
 
-        for (var i = 0; i < requests.Count; i++)
+        // A name that could not be resolved degrades to the bare group id. It
+        // reads poorly, but a row the user can still activate beats a row that
+        // silently vanished because a display name was unavailable.
+        for (var i = 0; i < rows.Count; i++)
         {
-            var request = requests[i];
-            if (!string.IsNullOrWhiteSpace(request.Group?.DisplayName)) continue;
-            if (string.IsNullOrWhiteSpace(request.GroupId)) continue;
+            var row = rows[i];
+            if (!string.IsNullOrWhiteSpace(readGroup(row)?.DisplayName)) continue;
+            var groupId = readGroupId(row);
+            if (string.IsNullOrWhiteSpace(groupId)) continue;
 
-            var name = resolved.TryGetValue(request.GroupId!, out var found) ? found : request.GroupId!;
-            requests[i] = request with { Group = new GroupRef(request.GroupId, name) };
+            var name = resolved.TryGetValue(groupId, out var found) ? found : groupId;
+            rows[i] = withGroup(row, new GroupRef(groupId, name));
         }
     }
 

@@ -46,6 +46,10 @@ internal interface IGraphPimClient
         string justification,
         CancellationToken cancellationToken);
 
+    // Throws ApprovalAlreadyDecidedException when another approver in the same
+    // step got there first (no step still in progress, or Graph answers 409);
+    // that is an outcome, not a fault, and the caller is expected to report it
+    // as such.
     Task ReviewAsync(
         string approvalId,
         ApprovalDecision decision,

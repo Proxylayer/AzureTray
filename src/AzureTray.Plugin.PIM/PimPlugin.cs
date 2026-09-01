@@ -134,19 +134,15 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         var first = true;
         foreach (var watcher in pendingWatchers)
         {
-            if (!first) children.Add(PluginMenuItem.Separator);
-            first = false;
-
             var w = watcher;
-            children.Add(new PluginMenuItem(
-                // Text is the tenant name only — host renders the leading
-                // refresh icon in its own animated slot via Icon = "↻".
-                Text: w.TenantDisplayName,
-                Invoke: () => _ = w.PollAsync(CancellationToken.None),
-                IsBusy: w.IsPolling,
-                KeepMenuOpen: true,
-                Icon: "↻")
-            { Key = $"pim.pending.refresh.{w.TenantId}" });
+            AppendTenantHeader(
+                children,
+                first,
+                $"pim.pending.refresh.{w.TenantId}",
+                w.TenantDisplayName,
+                w.IsPolling,
+                () => _ = w.PollAsync(CancellationToken.None));
+            first = false;
 
             var pending = w.CurrentApprovals;
             if (pending.Count == 0)
@@ -188,19 +184,15 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         var first = true;
         foreach (var watcher in eligibleWatchers)
         {
-            if (!first) children.Add(PluginMenuItem.Separator);
-            first = false;
-
             var w = watcher;
-            children.Add(new PluginMenuItem(
-                // Text is the tenant name only — host renders the leading
-                // refresh icon in its own animated slot via Icon = "↻".
-                Text: w.TenantDisplayName,
-                Invoke: () => _ = w.PollAsync(CancellationToken.None),
-                IsBusy: w.IsPolling,
-                KeepMenuOpen: true,
-                Icon: "↻")
-            { Key = $"pim.eligible.refresh.{w.TenantId}" });
+            AppendTenantHeader(
+                children,
+                first,
+                $"pim.eligible.refresh.{w.TenantId}",
+                w.TenantDisplayName,
+                w.IsPolling,
+                () => _ = w.PollAsync(CancellationToken.None));
+            first = false;
 
             var roles = w.CurrentEligibleRoles;
             if (roles.Count == 0)
@@ -238,6 +230,29 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
 
         return new PluginMenuItem(Text: label, Icon: "🔑", Children: children)
         { Key = "pim.openRequest" };
+    }
+
+    // Opens a tenant's section in either top-level menu: a separator between
+    // tenants (never before the first), then the tenant's refresh row.
+    private static void AppendTenantHeader(
+        List<PluginMenuItem> target,
+        bool first,
+        string key,
+        string tenantDisplayName,
+        bool isPolling,
+        Action refresh)
+    {
+        if (!first) target.Add(PluginMenuItem.Separator);
+
+        target.Add(new PluginMenuItem(
+            // Text is the tenant name only — host renders the leading
+            // refresh icon in its own animated slot via Icon = "↻".
+            Text: tenantDisplayName,
+            Invoke: refresh,
+            IsBusy: isPolling,
+            KeepMenuOpen: true,
+            Icon: "↻")
+        { Key = key });
     }
 
     private void AppendSourceGroup(
@@ -328,52 +343,54 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
     // Tests exposed to the host's admin Test Runner.
     public IReadOnlyList<PluginTest> Tests => new[]
     {
-        new PluginTest(
+        PollEveryTenantTest(
             "Force pending-approval poll",
             "Triggers PendingApprovalWatcher.PollAsync for every tracked tenant.",
-            async ct =>
-            {
-                var watchers = PendingWatchersSnapshot();
-                if (watchers.Length == 0) return PluginTestResult.Fail("No tenants tracked.");
-                var total = 0;
-                foreach (var w in watchers)
-                {
-                    await w.PollAsync(ct).ConfigureAwait(false);
-                    total += w.CurrentApprovals.Count;
-                }
-                return PluginTestResult.Pass($"Polled {watchers.Length} tenant(s); {total} pending approval(s) total.");
-            }),
-        new PluginTest(
+            PendingWatchersSnapshot,
+            (w, ct) => w.PollAsync(ct),
+            w => w.CurrentApprovals.Count,
+            "pending approval(s) total"),
+        PollEveryTenantTest(
             "Force eligible-roles poll",
             "Triggers EligibleRolesWatcher.PollAsync for every tracked tenant.",
-            async ct =>
-            {
-                var watchers = EligibleWatchersSnapshot();
-                if (watchers.Length == 0) return PluginTestResult.Fail("No tenants tracked.");
-                var total = 0;
-                foreach (var w in watchers)
-                {
-                    await w.PollAsync(ct).ConfigureAwait(false);
-                    total += w.CurrentEligibleRoles.Count;
-                }
-                return PluginTestResult.Pass($"Polled {watchers.Length} tenant(s); {total} eligible role(s) total.");
-            }),
-        new PluginTest(
+            EligibleWatchersSnapshot,
+            (w, ct) => w.PollAsync(ct),
+            w => w.CurrentEligibleRoles.Count,
+            "eligible role(s) total"),
+        PollEveryTenantTest(
             "Force pending-activation poll",
             "Triggers PendingActivationWatcher.PollAsync for every tracked tenant — checks the signed-in user's own activation requests for approval.",
+            ActivationWatchersSnapshot,
+            (w, ct) => w.PollAsync(ct),
+            w => w.TrackedCount,
+            "activation(s) still awaiting approval"),
+    };
+
+    // All three watcher tests are the same test: poll every tracked tenant's
+    // watcher of one kind, then report a count. Only the watcher kind, the
+    // count, and what the count is called differ.
+    private static PluginTest PollEveryTenantTest<TWatcher>(
+        string name,
+        string description,
+        Func<TWatcher[]> snapshot,
+        Func<TWatcher, CancellationToken, Task> poll,
+        Func<TWatcher, int> count,
+        string countLabel)
+        => new(
+            name,
+            description,
             async ct =>
             {
-                var watchers = ActivationWatchersSnapshot();
+                var watchers = snapshot();
                 if (watchers.Length == 0) return PluginTestResult.Fail("No tenants tracked.");
                 var total = 0;
                 foreach (var w in watchers)
                 {
-                    await w.PollAsync(ct).ConfigureAwait(false);
-                    total += w.TrackedCount;
+                    await poll(w, ct).ConfigureAwait(false);
+                    total += count(w);
                 }
-                return PluginTestResult.Pass($"Polled {watchers.Length} tenant(s); {total} activation(s) still awaiting approval.");
-            }),
-    };
+                return PluginTestResult.Pass($"Polled {watchers.Length} tenant(s); {total} {countLabel}.");
+            });
 
     public Task InitializeAsync(IPluginContext context, CancellationToken cancellationToken)
     {
@@ -497,6 +514,17 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             _watchersByTenant.Remove(tenantId);
         }
 
+        await DetachAndStopAsync(entry).ConfigureAwait(false);
+
+        _context?.Logger.LogInformation("Stopped PIM watchers for tenant {TenantId}.", tenantId);
+        MenuChanged?.Invoke();
+    }
+
+    // Detaches this plugin's event handlers and stops all three of a tenant's
+    // watcher loops. Shared by the per-tenant removal path and shutdown, which
+    // did the same five unsubscribes and three stops verbatim.
+    private async Task DetachAndStopAsync(TenantWatchers entry)
+    {
         entry.Pending.PollStarted -= OnWatcherPollStarted;
         entry.Pending.PollCompleted -= OnWatcherPollCompleted;
         entry.Eligible.PollStarted -= OnWatcherPollStarted;
@@ -506,9 +534,6 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         await entry.Pending.StopAsync().ConfigureAwait(false);
         await entry.Eligible.StopAsync().ConfigureAwait(false);
         await entry.Activations.StopAsync().ConfigureAwait(false);
-
-        _context?.Logger.LogInformation("Stopped PIM watchers for tenant {TenantId}.", tenantId);
-        MenuChanged?.Invoke();
     }
 
     // Plugin fires MenuChanged on the state transitions (busy → idle, idle →
@@ -549,14 +574,7 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
 
         foreach (var entry in toStop)
         {
-            entry.Pending.PollStarted -= OnWatcherPollStarted;
-            entry.Pending.PollCompleted -= OnWatcherPollCompleted;
-            entry.Eligible.PollStarted -= OnWatcherPollStarted;
-            entry.Eligible.PollCompleted -= OnWatcherPollCompleted;
-            entry.Activations.ActivationProvisioned -= OnActivationProvisioned;
-            await entry.Pending.StopAsync().ConfigureAwait(false);
-            await entry.Eligible.StopAsync().ConfigureAwait(false);
-            await entry.Activations.StopAsync().ConfigureAwait(false);
+            await DetachAndStopAsync(entry).ConfigureAwait(false);
         }
 
         _context = null;

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -113,8 +115,8 @@ internal sealed class GraphPimClient : GraphHttpClientBase, IGraphPimClient
             if (rules is null) continue;
 
             policies[roleDefinitionId] = new RolePolicy(
-                ApprovalRequired: ReadApprovalRequired(rules),
-                MaxActivationDuration: ReadMaxActivationDuration(rules));
+                ApprovalRequired: PolicyRules.ReadApprovalRequired(rules),
+                MaxActivationDuration: PolicyRules.ReadMaxActivationDuration(rules));
         }
 
         // A successful-but-empty read is the failure mode that hid the broken
@@ -208,7 +210,7 @@ internal sealed class GraphPimClient : GraphHttpClientBase, IGraphPimClient
                 expiration = new
                 {
                     type = "afterDuration",
-                    duration = FormatIso8601Duration(duration),
+                    duration = Iso8601Duration.Format(duration),
                 },
             },
         };
@@ -293,13 +295,25 @@ internal sealed class GraphPimClient : GraphHttpClientBase, IGraphPimClient
             .FirstOrDefault(s => string.Equals(s.Status, "InProgress", StringComparison.OrdinalIgnoreCase));
         if (openStep?.Id is null)
         {
-            throw new InvalidOperationException(
+            // No open step almost always means somebody else decided between
+            // the poll that surfaced this and the user clicking.
+            throw new ApprovalAlreadyDecidedException(
+                approvalId,
                 $"Approval {approvalId} has no open step (already completed, or not assigned to you).");
         }
 
         var reviewResult = decision == ApprovalDecision.Approve ? "Approve" : "Deny";
         var patchUrl = $"beta/roleManagement/directory/roleAssignmentApprovals/{approvalId}/steps/{openStep.Id}";
-        await PatchJsonAsync(patchUrl, new { reviewResult, justification }, cancellationToken);
+        try
+        {
+            await PatchJsonAsync(patchUrl, new { reviewResult, justification }, cancellationToken);
+        }
+        catch (HttpRequestException ex) when (HasStatus(ex, HttpStatusCode.Conflict))
+        {
+            // A step can list several approvers and the first decision closes
+            // it for everyone; 409 is that race, not a fault.
+            throw new ApprovalAlreadyDecidedException(approvalId, detail: null, ex);
+        }
 
         Logger.LogInformation(
             "{Decision} approval {ApprovalId} step {StepId} on tenant {TenantId}.",

@@ -1,48 +1,33 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using AzureTray.Plugin.Contracts;
 using AzureTray.Plugin.PIM.Arm.Dto;
 using AzureTray.Plugin.PIM.Graph;
+using AzureTray.Plugin.PIM.Http;
 using AzureTray.Plugin.PIM.Policies;
 
 namespace AzureTray.Plugin.PIM.Arm;
 
-internal sealed class ArmPimClient : IArmPimClient
+internal sealed class ArmPimClient : PimHttpClientBase, IArmPimClient
 {
     private const string SubscriptionsApi = "2022-12-01";
     private const string AuthorizationApi = "2020-10-01";
     private const string ApprovalApi = "2021-01-01-preview";
-    private const string EndUserExpirationRuleId = "Expiration_EndUser_Assignment";
-    private const string EndUserApprovalRuleId = "Approval_EndUser_Assignment";
-    private const string ExpirationRuleType = "RoleManagementPolicyExpirationRule";
-    private const string ApprovalRuleType = "RoleManagementPolicyApprovalRule";
-
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    };
-
-    private readonly IPluginContext _ctx;
-    private readonly ILogger _logger;
-    private readonly string _tenantId;
 
     public ArmPimClient(IPluginContext ctx, string tenantId)
+        : base(ctx, tenantId, PluginHttpClientNames.Arm, () => ctx.ArmScope, "ARM")
     {
-        _ctx = ctx;
-        _logger = ctx.Logger;
-        _tenantId = tenantId;
     }
+
+    protected override async Task<IPageEnvelope<T>?> ReadPageAsync<T>(string url, CancellationToken cancellationToken)
+        => await GetJsonAsync<ArmCollection<T>>(url, cancellationToken).ConfigureAwait(false);
 
     public async Task<IReadOnlyList<ArmSubscription>> ListSubscriptionsAsync(
         CancellationToken cancellationToken)
@@ -124,38 +109,15 @@ internal sealed class ArmPimClient : IArmPimClient
             if (rules is null) continue;
 
             policies[ArmRolePolicyKey.For(scope, roleDefinitionId)] = new RolePolicy(
-                ApprovalRequired: ReadApprovalRequired(rules),
-                MaxActivationDuration: ReadMaxActivationDuration(rules));
+                ApprovalRequired: PolicyRules.ReadApprovalRequired(rules),
+                MaxActivationDuration: PolicyRules.ReadMaxActivationDuration(rules));
         }
 
-        _logger.LogDebug(
+        Logger.LogDebug(
             "Read {PolicyCount} ARM role policies for tenant {TenantId} from {AssignmentCount} assignment(s).",
-            policies.Count, _tenantId, tagged.Count);
+            policies.Count, TenantId, tagged.Count);
 
         return policies;
-    }
-
-    // Expiration_EndUser_Assignment is the only rule that governs a user
-    // self-activating an eligible role; the Admin_* expiration rules are
-    // days-scale caps on eligibility/assignment and must never substitute for
-    // it. Matched on id + ruleType, never on target — ARM and Graph disagree on
-    // the casing of target values.
-    private static TimeSpan? ReadMaxActivationDuration(List<ArmPolicyRule> rules)
-    {
-        var rule = rules.FirstOrDefault(r =>
-            string.Equals(r.Id, EndUserExpirationRuleId, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(r.RuleType, ExpirationRuleType, StringComparison.OrdinalIgnoreCase));
-
-        return Iso8601Duration.TryParse(rule?.MaximumDuration);
-    }
-
-    private static bool? ReadApprovalRequired(List<ArmPolicyRule> rules)
-    {
-        var rule = rules.FirstOrDefault(r =>
-            string.Equals(r.Id, EndUserApprovalRuleId, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(r.RuleType, ApprovalRuleType, StringComparison.OrdinalIgnoreCase));
-
-        return rule?.Setting?.IsApprovalRequired;
     }
 
     public async Task<ArmRoleAssignmentScheduleRequest> ActivateRoleAsync(
@@ -200,7 +162,7 @@ internal sealed class ArmPimClient : IArmPimClient
                     expiration = new
                     {
                         type = "AfterDuration",
-                        duration = FormatIso8601Duration(duration),
+                        duration = Iso8601Duration.Format(duration),
                     },
                 },
             },
@@ -209,9 +171,9 @@ internal sealed class ArmPimClient : IArmPimClient
         var created = await PutScheduleRequestAsync(
             scope, requestId, body, "self-activation", cancellationToken).ConfigureAwait(false);
 
-        _logger.LogInformation(
+        Logger.LogInformation(
             "Submitted ARM self-activation {RequestId} for role {RoleId} at {Scope} (tenant {TenantId}, status {Status}).",
-            requestId, roleDefinitionId, scope, _tenantId, created.Properties?.Status);
+            requestId, roleDefinitionId, scope, TenantId, created.Properties?.Status);
 
         return created;
     }
@@ -246,9 +208,9 @@ internal sealed class ArmPimClient : IArmPimClient
         var created = await PutScheduleRequestAsync(
             scope, requestId, body, "self-deactivation", cancellationToken).ConfigureAwait(false);
 
-        _logger.LogInformation(
+        Logger.LogInformation(
             "Submitted ARM self-deactivation {RequestId} for role {RoleId} at {Scope} (tenant {TenantId}, status {Status}).",
-            requestId, roleDefinitionId, scope, _tenantId, created.Properties?.Status);
+            requestId, roleDefinitionId, scope, TenantId, created.Properties?.Status);
 
         return created;
     }
@@ -278,7 +240,10 @@ internal sealed class ArmPimClient : IArmPimClient
             .FirstOrDefault(s => string.Equals(s.Properties?.Status, "InProgress", StringComparison.OrdinalIgnoreCase));
         if (openStage?.Id is null || openStage.Name is null)
         {
-            throw new InvalidOperationException(
+            // No open stage almost always means somebody else decided between
+            // the poll that surfaced this and the user clicking.
+            throw new ApprovalAlreadyDecidedException(
+                approvalId,
                 $"ARM approval {approvalId} has no open stage (already completed, or not assigned to you).");
         }
 
@@ -296,16 +261,20 @@ internal sealed class ArmPimClient : IArmPimClient
             },
         };
 
-        using var request = new HttpRequestMessage(HttpMethod.Patch, stageUrl)
+        try
         {
-            Content = JsonContent.Create(body, options: JsonOptions),
-        };
-        using var response = await SendAsync(request, cancellationToken);
-        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
+            await PatchJsonAsync(stageUrl, body, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex) when (HasStatus(ex, HttpStatusCode.Conflict))
+        {
+            // A stage can list several approvers and the first decision closes
+            // it for everyone; 409 is that race, not a fault.
+            throw new ApprovalAlreadyDecidedException(approvalId, detail: null, ex);
+        }
 
-        _logger.LogInformation(
+        Logger.LogInformation(
             "{Decision} ARM approval {ApprovalId} stage {StageId} (tenant {TenantId}).",
-            decision, approvalId, openStage.Name, _tenantId);
+            decision, approvalId, openStage.Name, TenantId);
     }
 
     public async Task<string?> GetActivationStatusAsync(
@@ -361,11 +330,11 @@ internal sealed class ArmPimClient : IArmPimClient
             var conflictBody = await ReadBodySafeAsync(response, cancellationToken).ConfigureAwait(false);
             if (conflictBody.Contains(requestId, StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogWarning(
+                Logger.LogWarning(
                     "ARM {Operation} {RequestId} returned 409 for our own request id (a per-attempt timeout aborted the " +
                     "socket after ARM had committed it, then the retry re-sent it); reconciling by reading the committed " +
                     "request (tenant {TenantId}).",
-                    operation, requestId, _tenantId);
+                    operation, requestId, TenantId);
 
                 var existing = await GetJsonAsync<ArmRoleAssignmentScheduleRequest>(url, cancellationToken).ConfigureAwait(false);
                 if (existing is not null)
@@ -378,7 +347,7 @@ internal sealed class ArmPimClient : IArmPimClient
             }
 
             // A 409 that does NOT name our requestId is a genuine conflict — throw.
-            throw BuildArmError(response, conflictBody);
+            throw BuildError(response, conflictBody);
         }
 
         await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
@@ -452,94 +421,9 @@ internal sealed class ArmPimClient : IArmPimClient
         return combined;
     }
 
-    private async Task<T?> GetJsonAsync<T>(string url, CancellationToken cancellationToken)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        using var response = await SendAsync(request, cancellationToken);
-        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
-        return await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken);
-    }
-
-    private async Task<List<T>> GetAllPagesAsync<T>(string firstUrl, CancellationToken cancellationToken)
-    {
-        var results = new List<T>();
-        string? next = firstUrl;
-        while (!string.IsNullOrEmpty(next))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var page = await GetJsonAsync<ArmCollection<T>>(next, cancellationToken);
-            if (page?.Value is not null) results.AddRange(page.Value);
-            next = NormalizeNextLink(page?.NextLink);
-        }
-        return results;
-    }
-
-    private Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        => _ctx.GetHttpClient(_tenantId).SendAsync(
-            PluginHttpClientNames.Arm,
-            _ctx.ArmScope,
-            request,
-            cancellationToken);
-
-    // ARM returns structured JSON errors with code + message on 4xx/5xx.
-    // EnsureSuccessStatusCode would discard the body; preserve it in the
-    // exception so the call site can show the user what actually went wrong.
-    private static async Task EnsureSuccessOrThrowWithBodyAsync(HttpResponseMessage response, CancellationToken cancellationToken)
-    {
-        if (response.IsSuccessStatusCode) return;
-
-        var body = await ReadBodySafeAsync(response, cancellationToken).ConfigureAwait(false);
-        throw BuildArmError(response, body);
-    }
-
-    private static async Task<string> ReadBodySafeAsync(HttpResponseMessage response, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            return "(body unreadable)";
-        }
-    }
-
-    private static HttpRequestException BuildArmError(HttpResponseMessage response, string body)
-    {
-        if (body.Length > 1500) body = body[..1500] + "…(truncated)";
-
-        return new HttpRequestException(
-            $"ARM {response.RequestMessage?.Method} {response.RequestMessage?.RequestUri} returned {(int)response.StatusCode} {response.ReasonPhrase}. Body: {body}",
-            inner: null,
-            statusCode: response.StatusCode);
-    }
-
     private static string NormalizeScope(string scope)
     {
         var trimmed = scope.Trim().TrimStart('/');
         return string.IsNullOrEmpty(trimmed) ? string.Empty : trimmed + "/";
-    }
-
-    private static string? NormalizeNextLink(string? nextLink)
-    {
-        if (string.IsNullOrWhiteSpace(nextLink)) return null;
-        if (Uri.TryCreate(nextLink, UriKind.Absolute, out var absolute))
-        {
-            return absolute.PathAndQuery.TrimStart('/');
-        }
-        return nextLink;
-    }
-
-    private static string FormatIso8601Duration(TimeSpan duration)
-    {
-        var totalMinutes = (long)Math.Round(duration.TotalMinutes);
-        var hours = totalMinutes / 60;
-        var minutes = totalMinutes % 60;
-        return (hours, minutes) switch
-        {
-            (0, var m) => $"PT{m}M",
-            (var h, 0) => $"PT{h}H",
-            (var h, var m) => $"PT{h}H{m}M",
-        };
     }
 }

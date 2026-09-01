@@ -25,18 +25,39 @@ namespace AzureTray.Plugin.PIM.Watchers;
 // The three sources are fetched concurrently and each is wrapped in its own
 // try/catch: one provider failing degrades that provider's rows to empty and
 // must never blank the other two.
-internal sealed class EligibleRolesWatcher
+internal sealed class EligibleRolesWatcher : PollingWatcher
 {
+    // Names each per-poll read in the once-then-quiet log lines.
+    private const string GraphEligibleFetch = "Graph eligible-role fetch";
+    private const string ArmEligibleFetch = "ARM eligible-role fetch";
+    private const string GroupEligibleFetch = "PIM for Groups eligible-access fetch";
+    private const string EntraActiveFetch = "Entra active-role fetch";
+    private const string ArmActiveFetch = "ARM active-role fetch";
+    private const string GroupActiveFetch = "PIM for Groups active-access fetch";
+    private const string EntraPolicyRead = "Entra PIM policy read";
+    private const string ArmPolicyRead = "ARM PIM policy read";
+    private const string GroupPolicyRead = "PIM for Groups policy read";
+
     private readonly IGraphPimClient _graph;
     private readonly IArmPimClient _arm;
     private readonly IGraphGroupPimClient _groups;
-    private readonly IPluginContext _context;
-    private readonly PluginTenant _tenant;
-    private readonly TimeSpan _interval;
     private readonly PendingActivationStore _pendingActivations;
 
-    private Task? _loopTask;
-    private CancellationTokenSource? _cts;
+    // Once-then-quiet logging for every per-poll read this watcher makes: an
+    // expired token makes all nine fail identically every interval, and only
+    // the transitions (fail once, recover once) carry information. One gate per
+    // source, so a failing source stays quiet without muting a healthy one.
+    // See FetchFailureGate.
+    private readonly FetchFailureGate _graphFetchFailures = new();
+    private readonly FetchFailureGate _armFetchFailures = new();
+    private readonly FetchFailureGate _groupFetchFailures = new();
+    private readonly FetchFailureGate _graphActiveFetchFailures = new();
+    private readonly FetchFailureGate _armActiveFetchFailures = new();
+    private readonly FetchFailureGate _groupActiveFetchFailures = new();
+    private readonly FetchFailureGate _entraPolicyFetchFailures = new();
+    private readonly FetchFailureGate _armPolicyFetchFailures = new();
+    private readonly FetchFailureGate _groupPolicyFetchFailures = new();
+
     private UnifiedEligibleRole[] _lastSnapshot = Array.Empty<UnifiedEligibleRole>();
     private ActiveRoleAssignment[] _activeAssignments = Array.Empty<ActiveRoleAssignment>();
     private IReadOnlySet<string> _relevantSubscriptionIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -51,15 +72,15 @@ internal sealed class EligibleRolesWatcher
         PluginTenant tenant,
         TimeSpan interval,
         PendingActivationStore pendingActivations)
+        : base(context, tenant, interval)
     {
         _graph = graph;
         _arm = arm;
         _groups = groups;
-        _context = context;
-        _tenant = tenant;
-        _interval = interval;
         _pendingActivations = pendingActivations;
     }
+
+    protected override string PollKind => "Eligible-role";
 
     // Raised at the start and end of each PollAsync so the host can spin a
     // refresh indicator and rebuild the menu. May fire on a thread-pool thread;
@@ -67,8 +88,7 @@ internal sealed class EligibleRolesWatcher
     public event Action? PollStarted;
     public event Action? PollCompleted;
 
-    public string TenantId => _tenant.TenantId;
-    public string TenantDisplayName => _tenant.DisplayName;
+    public string TenantDisplayName => Tenant.DisplayName;
     public IReadOnlyList<UnifiedEligibleRole> CurrentEligibleRoles => _lastSnapshot;
 
     public bool IsPolling { get; private set; }
@@ -110,19 +130,13 @@ internal sealed class EligibleRolesWatcher
     // MG-scoped eligibility; the pending watcher then adds no extra requests.
     public IReadOnlySet<string> RelevantManagementGroupScopes => _relevantManagementGroupScopes;
 
-    public void Start(CancellationToken stopToken)
-    {
-        // Hydrate from cache first so the menu shows last-known eligibility
-        // immediately instead of waiting for the first poll to finish. The
-        // background loop refreshes shortly after and overwrites the cache.
-        LoadFromCache();
-
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(stopToken);
-        _loopTask = Task.Run(() => LoopAsync(_cts.Token), _cts.Token);
-    }
+    // Hydrate from cache before the loop starts so the menu shows last-known
+    // eligibility immediately instead of waiting for the first poll to finish.
+    // The background loop refreshes shortly after and overwrites the cache.
+    protected override void OnStarting() => LoadFromCache();
 
     private string CachePath =>
-        Path.Combine(_context.DataDir, $"eligible-roles-{Sanitize(_tenant.TenantId)}.json");
+        Path.Combine(Context.DataDir, $"eligible-roles-{Sanitize(Tenant.TenantId)}.json");
 
     private static string Sanitize(string s)
         => string.Join("_", s.Split(Path.GetInvalidFileNameChars()));
@@ -156,17 +170,17 @@ internal sealed class EligibleRolesWatcher
                 ? new HashSet<string>(dto.RelevantManagementGroupScopes, StringComparer.OrdinalIgnoreCase)
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            _context.Logger.LogInformation(
+            Context.Logger.LogInformation(
                 "Eligible-role cache loaded for tenant {TenantId}: {Count} role(s).",
-                _tenant.TenantId, _lastSnapshot.Length);
+                Tenant.TenantId, _lastSnapshot.Length);
         }
         catch (Exception ex)
         {
             // Stale or hand-edited cache shouldn't block startup. Drop it
             // and let the first poll repopulate.
-            _context.Logger.LogWarning(ex,
+            Context.Logger.LogWarning(ex,
                 "Eligible-role cache load failed for tenant {TenantId}; ignoring.",
-                _tenant.TenantId);
+                Tenant.TenantId);
         }
     }
 
@@ -174,7 +188,7 @@ internal sealed class EligibleRolesWatcher
     {
         try
         {
-            Directory.CreateDirectory(_context.DataDir);
+            Directory.CreateDirectory(Context.DataDir);
             var dto = new CacheDto
             {
                 Roles = _lastSnapshot.ToArray(),
@@ -187,9 +201,9 @@ internal sealed class EligibleRolesWatcher
         }
         catch (Exception ex)
         {
-            _context.Logger.LogWarning(ex,
+            Context.Logger.LogWarning(ex,
                 "Eligible-role cache save failed for tenant {TenantId}.",
-                _tenant.TenantId);
+                Tenant.TenantId);
         }
     }
 
@@ -201,45 +215,7 @@ internal sealed class EligibleRolesWatcher
         public List<string>? RelevantManagementGroupScopes { get; set; }
     }
 
-    public async Task StopAsync()
-    {
-        _cts?.Cancel();
-        if (_loopTask is not null)
-        {
-            try { await _loopTask.ConfigureAwait(false); }
-            catch (OperationCanceledException) { }
-        }
-        _cts?.Dispose();
-        _cts = null;
-        _loopTask = null;
-    }
-
-    private async Task LoopAsync(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                await PollAsync(ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                _context.Logger.LogWarning(
-                    ex,
-                    "Eligible-role poll failed for tenant {TenantId}; will retry next interval.",
-                    _tenant.TenantId);
-            }
-
-            try { await Task.Delay(_interval, ct).ConfigureAwait(false); }
-            catch (OperationCanceledException) { return; }
-        }
-    }
-
-    internal async Task PollAsync(CancellationToken cancellationToken)
+    internal override async Task PollAsync(CancellationToken cancellationToken)
     {
         IsPolling = true;
         PollStarted?.Invoke();
@@ -339,6 +315,7 @@ internal sealed class EligibleRolesWatcher
         try
         {
             var actives = await _graph.ListActiveRoleAssignmentsAsync(principalId, ct).ConfigureAwait(false);
+            LogFetchRecovered(_graphActiveFetchFailures, EntraActiveFetch);
             return actives
                 .Select(a => new ActiveRoleAssignment(
                     Source: PimSource.EntraId,
@@ -351,10 +328,9 @@ internal sealed class EligibleRolesWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
         catch (Exception ex)
         {
-            _context.Logger.LogWarning(
-                ex,
-                "Entra active-role fetch failed for tenant {TenantId}; eligibility list will not gray out active roles this cycle.",
-                _tenant.TenantId);
+            LogFetchFailure(
+                _graphActiveFetchFailures, ex, EntraActiveFetch,
+                "eligibility list will not gray out active roles this cycle");
             return new();
         }
     }
@@ -365,6 +341,7 @@ internal sealed class EligibleRolesWatcher
         try
         {
             var actives = await _arm.ListActiveRoleAssignmentsAsync(principalId, scopes, ct).ConfigureAwait(false);
+            LogFetchRecovered(_armActiveFetchFailures, ArmActiveFetch);
             return actives
                 .Where(a => a.Properties is not null)
                 .Select(a => new ActiveRoleAssignment(
@@ -380,10 +357,9 @@ internal sealed class EligibleRolesWatcher
         {
             // Caught separately from the eligibility fan-out so a failure here
             // still leaves the ARM eligible roles listed (just not grayed out).
-            _context.Logger.LogWarning(
-                ex,
-                "ARM active-role fetch failed for tenant {TenantId}; Azure RBAC rows will not gray out this cycle.",
-                _tenant.TenantId);
+            LogFetchFailure(
+                _armActiveFetchFailures, ex, ArmActiveFetch,
+                "Azure RBAC rows will not gray out this cycle");
             return new();
         }
     }
@@ -396,9 +372,9 @@ internal sealed class EligibleRolesWatcher
                 ?? await GetPrincipalIdAsync(cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(principalId))
             {
-                _context.Logger.LogWarning(
+                Context.Logger.LogWarning(
                     "Cannot activate {RoleName} on tenant {TenantId}: signed-in principal ID could not be resolved.",
-                    role.RoleName, _tenant.TenantId);
+                    role.RoleName, Tenant.TenantId);
                 return;
             }
 
@@ -406,7 +382,7 @@ internal sealed class EligibleRolesWatcher
             // than the policy permits earns a 400 from the service that reads
             // as a generic activation failure.
             var choices = ActivationDurationChoices.For(role);
-            var durationChoice = await _context.Notifier.ShowAsync(
+            var durationChoice = await Context.Notifier.ShowAsync(
                 new ChoiceRequest(
                     Title: $"Activate {role.RoleName}",
                     Message: $"Activate on {role.ScopeDisplay}. Choose a duration.",
@@ -416,13 +392,13 @@ internal sealed class EligibleRolesWatcher
             if (durationChoice is not ChoiceResult { SelectedChoice: { } pickedLabel }
                 || ActivationDurationChoices.Match(choices, pickedLabel) is not { } duration)
             {
-                _context.Logger.LogDebug(
+                Context.Logger.LogDebug(
                     "Activation cancelled at duration prompt for {RoleName} on tenant {TenantId}.",
-                    role.RoleName, _tenant.TenantId);
+                    role.RoleName, Tenant.TenantId);
                 return;
             }
 
-            var justification = await _context.Notifier.ShowAsync(
+            var justification = await Context.Notifier.ShowAsync(
                 new TextInputRequest(
                     Title: $"Justification — {role.RoleName}",
                     Message: $"Why are you activating {role.RoleName}?",
@@ -431,9 +407,9 @@ internal sealed class EligibleRolesWatcher
 
             if (justification is not TextInputResult { Text: { } justText } || string.IsNullOrWhiteSpace(justText))
             {
-                _context.Logger.LogInformation(
+                Context.Logger.LogInformation(
                     "Activation cancelled at justification prompt for {RoleName} on tenant {TenantId}.",
-                    role.RoleName, _tenant.TenantId);
+                    role.RoleName, Tenant.TenantId);
                 return;
             }
 
@@ -457,9 +433,9 @@ internal sealed class EligibleRolesWatcher
                 case PimSource.AzureRbac:
                     if (string.IsNullOrWhiteSpace(role.ArmScope))
                     {
-                        _context.Logger.LogError(
+                        Context.Logger.LogError(
                             "ARM role {RoleName} on tenant {TenantId} has no scope; cannot activate.",
-                            role.RoleName, _tenant.TenantId);
+                            role.RoleName, Tenant.TenantId);
                         await NotifyActivationErrorAsync(role, $"Cannot activate — the role has no ARM scope to act on.", ex: null, cancellationToken).ConfigureAwait(false);
                         return;
                     }
@@ -469,9 +445,9 @@ internal sealed class EligibleRolesWatcher
                         // roleAssignmentScheduleRequests contract, so a missing
                         // one is not a reason to refuse: warn and let ARM decide
                         // rather than leaving the row dead in the menu.
-                        _context.Logger.LogWarning(
+                        Context.Logger.LogWarning(
                             "ARM role {RoleName} on tenant {TenantId} has no eligibility id; activating without linkedRoleEligibilityScheduleId.",
-                            role.RoleName, _tenant.TenantId);
+                            role.RoleName, Tenant.TenantId);
                     }
                     var armRequest = await _arm.ActivateRoleAsync(
                         role.ArmScope,
@@ -484,7 +460,7 @@ internal sealed class EligibleRolesWatcher
                     status = armRequest.Properties?.Status;
                     // ARM's request id is the PUT's resource name; GetActivationStatusAsync
                     // rebuilds the URL from it, so pass the name rather than the full id.
-                    TrackIfAwaitingApproval(role, armRequest.Name ?? LastSegment(armRequest.Id), status);
+                    TrackIfAwaitingApproval(role, armRequest.Name ?? ArmResourceId.LastSegment(armRequest.Id), status);
                     break;
 
                 case PimSource.EntraGroup:
@@ -494,9 +470,9 @@ internal sealed class EligibleRolesWatcher
                         // The group id is the row's scope; without it there is
                         // nothing to activate against. Only reachable from a
                         // hand-edited cache file.
-                        _context.Logger.LogError(
+                        Context.Logger.LogError(
                             "Group access {RoleName} on tenant {TenantId} has no group id; cannot activate.",
-                            role.RoleName, _tenant.TenantId);
+                            role.RoleName, Tenant.TenantId);
                         await NotifyActivationErrorAsync(role, "Cannot activate — the row has no group to act on.", ex: null, cancellationToken).ConfigureAwait(false);
                         return;
                     }
@@ -517,7 +493,7 @@ internal sealed class EligibleRolesWatcher
             // whether it granted access outright or went to an approver.
             // Notification auto-dismisses (InformationRequest).
             var awaitingApproval = !ActivationStatus.IsProvisioned(status);
-            _ = _context.Notifier.ShowAsync(
+            _ = Context.Notifier.ShowAsync(
                 new InformationRequest(
                     Title: awaitingApproval ? $"Requested {role.RoleName}" : $"Activated {role.RoleName}",
                     Message: awaitingApproval
@@ -531,10 +507,10 @@ internal sealed class EligibleRolesWatcher
         catch (OperationCanceledException) { /* shutdown */ }
         catch (Exception ex)
         {
-            _context.Logger.LogError(
+            Context.Logger.LogError(
                 ex,
                 "Activation failed for {RoleName} on tenant {TenantId}.",
-                role.RoleName, _tenant.TenantId);
+                role.RoleName, Tenant.TenantId);
             await NotifyActivationErrorAsync(role, ExtractHeadline(ex), ex, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -549,17 +525,17 @@ internal sealed class EligibleRolesWatcher
 
         if (string.IsNullOrWhiteSpace(requestId))
         {
-            _context.Logger.LogWarning(
+            Context.Logger.LogWarning(
                 "Activation of {RoleName} on tenant {TenantId} returned status {Status} but no request id; cannot track the approval.",
-                role.RoleName, _tenant.TenantId, status);
+                role.RoleName, Tenant.TenantId, status);
             return;
         }
 
         if (ActivationStatus.IsTerminalFailure(status))
         {
-            _context.Logger.LogInformation(
+            Context.Logger.LogInformation(
                 "Activation of {RoleName} on tenant {TenantId} came back {Status}; not tracking.",
-                role.RoleName, _tenant.TenantId, status);
+                role.RoleName, Tenant.TenantId, status);
             return;
         }
 
@@ -572,18 +548,11 @@ internal sealed class EligibleRolesWatcher
             SubmittedAt: DateTimeOffset.UtcNow));
     }
 
-    private static string? LastSegment(string? resourceId)
-    {
-        if (string.IsNullOrWhiteSpace(resourceId)) return null;
-        var last = resourceId.LastIndexOf('/');
-        return last >= 0 && last < resourceId.Length - 1 ? resourceId[(last + 1)..] : resourceId;
-    }
-
     internal async Task HandleDeactivationAsync(UnifiedEligibleRole role, CancellationToken cancellationToken)
     {
         try
         {
-            var confirm = await _context.Notifier.ShowAsync(
+            var confirm = await Context.Notifier.ShowAsync(
                 new YesNoRequest(
                     Title: $"Deactivate {role.RoleName}?",
                     Message: $"End your active assignment on {role.ScopeDisplay} now."),
@@ -591,9 +560,9 @@ internal sealed class EligibleRolesWatcher
 
             if (confirm is not YesNoResult { Accepted: true })
             {
-                _context.Logger.LogDebug(
+                Context.Logger.LogDebug(
                     "Deactivation cancelled at confirm prompt for {RoleName} on tenant {TenantId}.",
-                    role.RoleName, _tenant.TenantId);
+                    role.RoleName, Tenant.TenantId);
                 return;
             }
 
@@ -601,9 +570,9 @@ internal sealed class EligibleRolesWatcher
                 ?? await GetPrincipalIdAsync(cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(principalId))
             {
-                _context.Logger.LogWarning(
+                Context.Logger.LogWarning(
                     "Cannot deactivate {RoleName} on tenant {TenantId}: signed-in principal ID could not be resolved.",
-                    role.RoleName, _tenant.TenantId);
+                    role.RoleName, Tenant.TenantId);
                 return;
             }
 
@@ -623,9 +592,9 @@ internal sealed class EligibleRolesWatcher
                 case PimSource.AzureRbac:
                     if (string.IsNullOrWhiteSpace(role.ArmScope))
                     {
-                        _context.Logger.LogError(
+                        Context.Logger.LogError(
                             "ARM role {RoleName} on tenant {TenantId} has no scope; cannot deactivate.",
-                            role.RoleName, _tenant.TenantId);
+                            role.RoleName, Tenant.TenantId);
                         await NotifyOperationErrorAsync("Deactivation", role, "Cannot deactivate — the role has no ARM scope to act on.", ex: null, cancellationToken).ConfigureAwait(false);
                         return;
                     }
@@ -640,9 +609,9 @@ internal sealed class EligibleRolesWatcher
                 case PimSource.EntraGroup:
                     if (string.IsNullOrWhiteSpace(role.GroupId))
                     {
-                        _context.Logger.LogError(
+                        Context.Logger.LogError(
                             "Group access {RoleName} on tenant {TenantId} has no group id; cannot deactivate.",
-                            role.RoleName, _tenant.TenantId);
+                            role.RoleName, Tenant.TenantId);
                         await NotifyOperationErrorAsync("Deactivation", role, "Cannot deactivate — the row has no group to act on.", ex: null, cancellationToken).ConfigureAwait(false);
                         return;
                     }
@@ -660,7 +629,7 @@ internal sealed class EligibleRolesWatcher
                     break;
             }
 
-            _ = _context.Notifier.ShowAsync(
+            _ = Context.Notifier.ShowAsync(
                 new InformationRequest(
                     Title: $"Deactivated {role.RoleName}",
                     Message: $"on {role.ScopeDisplay}.")
@@ -677,10 +646,10 @@ internal sealed class EligibleRolesWatcher
         catch (OperationCanceledException) { /* shutdown */ }
         catch (Exception ex)
         {
-            _context.Logger.LogError(
+            Context.Logger.LogError(
                 ex,
                 "Deactivation failed for {RoleName} on tenant {TenantId}.",
-                role.RoleName, _tenant.TenantId);
+                role.RoleName, Tenant.TenantId);
             await NotifyOperationErrorAsync("Deactivation", role, ExtractHeadline(ex), ex, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -703,7 +672,7 @@ internal sealed class EligibleRolesWatcher
         // kept terse on purpose — the verbose context (response body, stack
         // trace, request URI, status code) flows into Details and stays
         // collapsed by default so the toast doesn't dwarf the screen.
-        await _context.Notifier.ShowAsync(
+        await Context.Notifier.ShowAsync(
             new InformationRequest(
                 Title: $"{operation} failed: {role.RoleName}",
                 Message: reason)
@@ -801,10 +770,10 @@ internal sealed class EligibleRolesWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return null; }
         catch (Exception ex)
         {
-            _context.Logger.LogWarning(
+            Context.Logger.LogWarning(
                 ex,
                 "Could not resolve signed-in user for tenant {TenantId}; eligible-role poll will retry.",
-                _tenant.TenantId);
+                Tenant.TenantId);
         }
         return _cachedPrincipalId;
     }
@@ -814,6 +783,7 @@ internal sealed class EligibleRolesWatcher
         try
         {
             var schedules = await _graph.ListEligibleRolesAsync(principalId, ct).ConfigureAwait(false);
+            LogFetchRecovered(_graphFetchFailures, GraphEligibleFetch);
 
             // Collapsed before the caps are attached, so the policy join runs
             // once per distinct row rather than once per grant path.
@@ -834,10 +804,7 @@ internal sealed class EligibleRolesWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return new(); }
         catch (Exception ex)
         {
-            _context.Logger.LogWarning(
-                ex,
-                "Graph eligible-role fetch failed for tenant {TenantId}; continuing with ARM only.",
-                _tenant.TenantId);
+            LogFetchFailure(_graphFetchFailures, ex, GraphEligibleFetch, "continuing with ARM only");
             return new();
         }
     }
@@ -859,15 +826,26 @@ internal sealed class EligibleRolesWatcher
         try
         {
             var subs = await _arm.ListSubscriptionsAsync(ct).ConfigureAwait(false);
-            if (subs.Count == 0) return SourcePollResult.Empty();
+            // A poll with nothing to scan is still a successful poll — the
+            // subscription listing worked.
+            if (subs.Count == 0)
+            {
+                LogFetchRecovered(_armFetchFailures, ArmEligibleFetch);
+                return SourcePollResult.Empty();
+            }
 
             var scopes = subs
                 .Where(s => !string.IsNullOrWhiteSpace(s.SubscriptionId))
                 .Select(s => $"/subscriptions/{s.SubscriptionId}")
                 .ToList();
-            if (scopes.Count == 0) return SourcePollResult.Empty();
+            if (scopes.Count == 0)
+            {
+                LogFetchRecovered(_armFetchFailures, ArmEligibleFetch);
+                return SourcePollResult.Empty();
+            }
 
             var schedules = await _arm.ListEligibleRolesAsync(principalId, scopes, ct).ConfigureAwait(false);
+            LogFetchRecovered(_armFetchFailures, ArmEligibleFetch);
 
             // One management-group-scoped eligibility comes back once per
             // subscription beneath it (the fan-out queries each subscription and
@@ -890,10 +868,7 @@ internal sealed class EligibleRolesWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return SourcePollResult.Empty(); }
         catch (Exception ex)
         {
-            _context.Logger.LogWarning(
-                ex,
-                "ARM eligible-role fetch failed for tenant {TenantId}; continuing with Graph only.",
-                _tenant.TenantId);
+            LogFetchFailure(_armFetchFailures, ex, ArmEligibleFetch, "continuing with Graph only");
             return SourcePollResult.Empty();
         }
     }
@@ -911,6 +886,7 @@ internal sealed class EligibleRolesWatcher
         try
         {
             var eligibilities = await _groups.ListEligibleGroupsAsync(ct).ConfigureAwait(false);
+            LogFetchRecovered(_groupFetchFailures, GroupEligibleFetch);
 
             // Collapsed before the caps are attached, so the policy join runs
             // once per distinct row rather than once per grant path — the same
@@ -937,10 +913,9 @@ internal sealed class EligibleRolesWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return SourcePollResult.Empty(); }
         catch (Exception ex)
         {
-            _context.Logger.LogWarning(
-                ex,
-                "PIM for Groups eligible-access fetch failed for tenant {TenantId}; continuing with Entra ID and Azure RBAC only.",
-                _tenant.TenantId);
+            LogFetchFailure(
+                _groupFetchFailures, ex, GroupEligibleFetch,
+                "continuing with Entra ID and Azure RBAC only");
             return SourcePollResult.Empty();
         }
     }
@@ -950,6 +925,7 @@ internal sealed class EligibleRolesWatcher
         try
         {
             var actives = await _groups.ListActiveGroupAssignmentsAsync(ct).ConfigureAwait(false);
+            LogFetchRecovered(_groupActiveFetchFailures, GroupActiveFetch);
             return actives
                 .Where(a => !string.IsNullOrWhiteSpace(a.GroupId))
                 .Select(a => new ActiveRoleAssignment(
@@ -970,10 +946,9 @@ internal sealed class EligibleRolesWatcher
         {
             // Caught separately from the eligibility read so a failure here
             // still leaves the group rows listed (just not grayed out).
-            _context.Logger.LogWarning(
-                ex,
-                "PIM for Groups active-access fetch failed for tenant {TenantId}; group rows will not gray out this cycle.",
-                _tenant.TenantId);
+            LogFetchFailure(
+                _groupActiveFetchFailures, ex, GroupActiveFetch,
+                "group rows will not gray out this cycle");
             return new();
         }
     }
@@ -982,118 +957,87 @@ internal sealed class EligibleRolesWatcher
     // form, and each request returns that group's member and owner policy
     // together. Only groups that appeared in the eligibility list are asked
     // about, so the fan-out is bounded by what the user can actually activate.
-    private async Task<List<UnifiedEligibleRole>> AttachGroupCapsAsync(
+    private Task<List<UnifiedEligibleRole>> AttachGroupCapsAsync(
         List<UnifiedEligibleRole> roles, CancellationToken ct)
-    {
-        var groupIds = roles
-            .Select(r => r.GroupId)
-            .Where(id => !string.IsNullOrWhiteSpace(id))
-            .Select(id => id!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        if (groupIds.Count == 0) return roles;
-
-        IReadOnlyDictionary<GroupRolePolicyKey, RolePolicy>? policies = null;
-        try
-        {
-            policies = await _groups.GetGroupPoliciesAsync(groupIds, ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception ex)
-        {
-            _context.Logger.LogWarning(
-                ex,
-                "PIM for Groups policy read failed for tenant {TenantId}; group activation durations fall back to the last known caps.",
-                _tenant.TenantId);
-        }
-
-        for (var i = 0; i < roles.Count; i++)
-        {
-            TimeSpan? cap = null;
-            if (policies is not null
-                && policies.TryGetValue(
-                    GroupRolePolicyKey.For(roles[i].GroupId, roles[i].RoleDefinitionId),
-                    out var policy))
-            {
-                cap = policy.MaxActivationDuration;
-            }
-            roles[i] = roles[i] with { MaxActivationDuration = CarryForwardCap(roles[i], cap) };
-        }
-        return roles;
-    }
+        => AttachCapsAsync(
+            roles,
+            rows => DistinctNonEmpty(rows.Select(r => r.GroupId)),
+            (groupIds, token) => _groups.GetGroupPoliciesAsync(groupIds, token),
+            r => GroupRolePolicyKey.For(r.GroupId, r.RoleDefinitionId),
+            _groupPolicyFetchFailures,
+            GroupPolicyRead,
+            "group activation durations fall back to the last known caps",
+            ct);
 
     // One request per poll cycle for every directory-scoped role's policy — not
     // one per role. A failure (403 for a user without a policy-reading directory
     // role, or any transport error) leaves the caps at their last known value,
     // and Entra roles then clamp to the service's documented 8-hour ceiling.
-    private async Task<List<UnifiedEligibleRole>> AttachEntraCapsAsync(
+    private Task<List<UnifiedEligibleRole>> AttachEntraCapsAsync(
         List<UnifiedEligibleRole> roles, CancellationToken ct)
-    {
-        if (roles.Count == 0) return roles;
-
-        IReadOnlyDictionary<string, RolePolicy>? policies = null;
-        try
-        {
-            policies = await _graph.GetRolePoliciesAsync(ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception ex)
-        {
-            _context.Logger.LogWarning(
-                ex,
-                "Entra PIM policy read failed for tenant {TenantId}; activation durations fall back to the last known caps.",
-                _tenant.TenantId);
-        }
-
-        for (var i = 0; i < roles.Count; i++)
-        {
-            TimeSpan? cap = null;
-            if (policies is not null
-                && policies.TryGetValue(roles[i].RoleDefinitionId, out var policy))
-            {
-                cap = policy.MaxActivationDuration;
-            }
-            roles[i] = roles[i] with { MaxActivationDuration = CarryForwardCap(roles[i], cap) };
-        }
-        return roles;
-    }
+        => AttachCapsAsync(
+            roles,
+            // The read is tenant-wide and takes no input, so the derived list
+            // exists only to express this source's guard: one entry per row, so
+            // "no inputs" means exactly "no rows to attach caps to".
+            rows => rows.Select(r => r.RoleDefinitionId).ToList(),
+            (_, token) => _graph.GetRolePoliciesAsync(token),
+            r => r.RoleDefinitionId,
+            _entraPolicyFetchFailures,
+            EntraPolicyRead,
+            "activation durations fall back to the last known caps",
+            ct);
 
     // Read at the scopes the user actually holds eligibility on (typically a
     // handful) rather than every subscription in the tenant, and in one request
     // per scope covering all roles there — the effective rules come back inline
     // on the policy assignments, so no per-role follow-up is needed.
-    private async Task<List<UnifiedEligibleRole>> AttachArmCapsAsync(
+    private Task<List<UnifiedEligibleRole>> AttachArmCapsAsync(
         List<UnifiedEligibleRole> roles, CancellationToken ct)
-    {
-        var policyScopes = roles
-            .Select(r => r.ArmScope)
-            .Where(s => !string.IsNullOrWhiteSpace(s))
-            .Select(s => s!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        if (policyScopes.Count == 0) return roles;
+        => AttachCapsAsync(
+            roles,
+            rows => DistinctNonEmpty(rows.Select(r => r.ArmScope)),
+            (scopes, token) => _arm.GetRolePoliciesAsync(scopes, token),
+            r => ArmRolePolicyKey.For(r.ArmScope, r.RoleDefinitionId),
+            _armPolicyFetchFailures,
+            ArmPolicyRead,
+            "Azure RBAC activation durations fall back to the last known caps",
+            ct);
 
-        IReadOnlyDictionary<ArmRolePolicyKey, RolePolicy>? policies = null;
+    // Derive what the policy read is keyed by, skip the request when there is
+    // nothing to ask about, read the policies (a failure here degrades the caps
+    // rather than the rows), then join the answer onto every row. The three
+    // sources differ only in the key type, the client call, and what the log
+    // line calls them.
+    private async Task<List<UnifiedEligibleRole>> AttachCapsAsync<TKey>(
+        List<UnifiedEligibleRole> roles,
+        Func<List<UnifiedEligibleRole>, IReadOnlyList<string>> lookupInputs,
+        Func<IReadOnlyList<string>, CancellationToken, Task<IReadOnlyDictionary<TKey, RolePolicy>>> read,
+        Func<UnifiedEligibleRole, TKey> keyFor,
+        FetchFailureGate gate,
+        string subject,
+        string consequence,
+        CancellationToken ct)
+    {
+        var inputs = lookupInputs(roles);
+        if (inputs.Count == 0) return roles;
+
+        IReadOnlyDictionary<TKey, RolePolicy>? policies = null;
         try
         {
-            policies = await _arm.GetRolePoliciesAsync(policyScopes, ct).ConfigureAwait(false);
+            policies = await read(inputs, ct).ConfigureAwait(false);
+            LogFetchRecovered(gate, subject);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
-            _context.Logger.LogWarning(
-                ex,
-                "ARM PIM policy read failed for tenant {TenantId}; Azure RBAC activation durations fall back to the last known caps.",
-                _tenant.TenantId);
+            LogFetchFailure(gate, ex, subject, consequence);
         }
 
         for (var i = 0; i < roles.Count; i++)
         {
             TimeSpan? cap = null;
-            if (policies is not null
-                && policies.TryGetValue(
-                    ArmRolePolicyKey.For(roles[i].ArmScope, roles[i].RoleDefinitionId),
-                    out var policy))
+            if (policies is not null && policies.TryGetValue(keyFor(roles[i]), out var policy))
             {
                 cap = policy.MaxActivationDuration;
             }
@@ -1101,6 +1045,13 @@ internal sealed class EligibleRolesWatcher
         }
         return roles;
     }
+
+    private static List<string> DistinctNonEmpty(IEnumerable<string?> values)
+        => values
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .Select(v => v!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
     // Policy reads are best-effort: a user who holds none of the directory
     // roles that permit reading PIM policies gets a 403, and that must not

@@ -18,7 +18,7 @@ namespace AzureTray.Plugin.PIM.Watchers;
 // cached access token predates them, so the host is asked to force-refresh the
 // tenant's tokens before the eligible-role snapshot is re-read. Without that the
 // new role only takes effect when the cached token rolls over (~60-90 minutes).
-internal sealed class PendingActivationWatcher
+internal sealed class PendingActivationWatcher : PollingWatcher
 {
     // Requests nobody ever decides are dropped rather than polled forever.
     private static readonly TimeSpan MaxTrackingAge = TimeSpan.FromHours(24);
@@ -26,14 +26,8 @@ internal sealed class PendingActivationWatcher
     private readonly IGraphPimClient _graph;
     private readonly IArmPimClient _arm;
     private readonly IGraphGroupPimClient _groups;
-    private readonly IPluginContext _context;
-    private readonly PluginTenant _tenant;
-    private readonly TimeSpan _interval;
     private readonly PendingActivationStore _store;
     private readonly Func<CancellationToken, Task> _refreshActiveRoles;
-
-    private Task? _loopTask;
-    private CancellationTokenSource? _cts;
 
     public PendingActivationWatcher(
         IGraphPimClient graph,
@@ -44,71 +38,25 @@ internal sealed class PendingActivationWatcher
         TimeSpan interval,
         PendingActivationStore store,
         Func<CancellationToken, Task> refreshActiveRoles)
+        : base(context, tenant, interval)
     {
         _graph = graph;
         _arm = arm;
         _groups = groups;
-        _context = context;
-        _tenant = tenant;
-        _interval = interval;
         _store = store;
         _refreshActiveRoles = refreshActiveRoles;
     }
+
+    protected override string PollKind => "Pending-activation";
 
     // Raised after an approved activation has been reflected in the token and
     // the eligible-role snapshot, so the host can rebuild the tray menu.
     public event Action? ActivationProvisioned;
 
-    public string TenantId => _tenant.TenantId;
-
     // Activations currently waiting on an approver for this tenant.
     public int TrackedCount => _store.Current.Count;
 
-    public void Start(CancellationToken stopToken)
-    {
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(stopToken);
-        _loopTask = Task.Run(() => LoopAsync(_cts.Token), _cts.Token);
-    }
-
-    public async Task StopAsync()
-    {
-        _cts?.Cancel();
-        if (_loopTask is not null)
-        {
-            try { await _loopTask.ConfigureAwait(false); }
-            catch (OperationCanceledException) { }
-        }
-        _cts?.Dispose();
-        _cts = null;
-        _loopTask = null;
-    }
-
-    private async Task LoopAsync(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                await PollAsync(ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                _context.Logger.LogWarning(
-                    ex,
-                    "Pending-activation poll failed for tenant {TenantId}; will retry next interval.",
-                    _tenant.TenantId);
-            }
-
-            try { await Task.Delay(_interval, ct).ConfigureAwait(false); }
-            catch (OperationCanceledException) { return; }
-        }
-    }
-
-    internal async Task PollAsync(CancellationToken cancellationToken)
+    internal override async Task PollAsync(CancellationToken cancellationToken)
     {
         _store.DropOlderThan(MaxTrackingAge);
 
@@ -134,9 +82,9 @@ internal sealed class PendingActivationWatcher
             }
             else
             {
-                _context.Logger.LogDebug(
+                Context.Logger.LogDebug(
                     "PIM activation {RequestId} ({RoleName}) on tenant {TenantId} is still {Status}.",
-                    request.RequestId, request.RoleName, _tenant.TenantId, status);
+                    request.RequestId, request.RoleName, Tenant.TenantId, status);
             }
         }
     }
@@ -164,28 +112,28 @@ internal sealed class PendingActivationWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return null; }
         catch (Exception ex)
         {
-            _context.Logger.LogDebug(
+            Context.Logger.LogDebug(
                 ex,
                 "Could not read status of PIM activation {RequestId} on tenant {TenantId}; will retry.",
-                request.RequestId, _tenant.TenantId);
+                request.RequestId, Tenant.TenantId);
             return null;
         }
     }
 
     private async Task OnProvisionedAsync(PendingActivationRequest request, CancellationToken ct)
     {
-        _context.Logger.LogInformation(
+        Context.Logger.LogInformation(
             "PIM activation {RequestId} ({RoleName} on {Scope}) was approved for tenant {TenantId}; refreshing token and roles.",
-            request.RequestId, request.RoleName, request.ScopeDisplay, _tenant.TenantId);
+            request.RequestId, request.RoleName, request.ScopeDisplay, Tenant.TenantId);
 
         // Old hosts return false from the contract's default implementation;
         // that is not an error, the claims just arrive with the next token.
-        var refreshed = await _context.RefreshTokenAsync(_tenant.TenantId, ct).ConfigureAwait(false);
+        var refreshed = await Context.RefreshTokenAsync(Tenant.TenantId, ct).ConfigureAwait(false);
         if (!refreshed)
         {
-            _context.Logger.LogDebug(
+            Context.Logger.LogDebug(
                 "Host did not force-refresh the token for tenant {TenantId}; the new role's claims will apply once the cached token rolls over.",
-                _tenant.TenantId);
+                Tenant.TenantId);
         }
 
         // Re-read eligibility/actives so the row flips to "✓ active" with its
@@ -197,12 +145,12 @@ internal sealed class PendingActivationWatcher
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
         catch (Exception ex)
         {
-            _context.Logger.LogWarning(ex,
+            Context.Logger.LogWarning(ex,
                 "Active-role refresh after approval of {RequestId} failed for tenant {TenantId}.",
-                request.RequestId, _tenant.TenantId);
+                request.RequestId, Tenant.TenantId);
         }
 
-        _ = _context.Notifier.ShowAsync(
+        _ = Context.Notifier.ShowAsync(
             new InformationRequest(
                 Title: $"Approved: {request.RoleName}",
                 Message: $"The role is now active on {request.ScopeDisplay}.")
@@ -216,11 +164,11 @@ internal sealed class PendingActivationWatcher
 
     private async Task OnRefusedAsync(PendingActivationRequest request, string status, CancellationToken ct)
     {
-        _context.Logger.LogInformation(
+        Context.Logger.LogInformation(
             "PIM activation {RequestId} ({RoleName}) on tenant {TenantId} ended as {Status}; no longer tracking.",
-            request.RequestId, request.RoleName, _tenant.TenantId, status);
+            request.RequestId, request.RoleName, Tenant.TenantId, status);
 
-        await _context.Notifier.ShowAsync(
+        await Context.Notifier.ShowAsync(
             new InformationRequest(
                 Title: $"Not activated: {request.RoleName}",
                 Message: $"The request for {request.ScopeDisplay} ended as {status}.")

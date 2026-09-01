@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
+using AzureTray.Plugin.PIM.Policies;
 
 namespace AzureTray.Plugin.PIM.Dto;
 
@@ -44,7 +46,27 @@ internal sealed record EntraPolicyRule(
     string? Id,
     string? MaximumDuration,
     bool? IsExpirationRequired,
-    EntraApprovalRuleSetting? Setting);
+    EntraApprovalRuleSetting? Setting) : IPolicyRule
+{
+    // Explicit so System.Text.Json never sees it: the rule shape is
+    // deserialize-only and this is a projection, not a wire member.
+    bool? IPolicyRule.IsApprovalRequired => Setting?.IsApprovalRequired;
+
+    // @odata.type is a corroborating check only: the rule ids are unique within
+    // a policy, so an absent type is accepted rather than treated as a mismatch
+    // (an unexpanded or narrowed payload can arrive without it).
+    public bool MatchesRuleType(PolicyRuleKind kind)
+    {
+        var expected = kind switch
+        {
+            PolicyRuleKind.Expiration => "unifiedRoleManagementPolicyExpirationRule",
+            _ => "unifiedRoleManagementPolicyApprovalRule",
+        };
+
+        return string.IsNullOrWhiteSpace(ODataType)
+            || ODataType.Contains(expected, StringComparison.OrdinalIgnoreCase);
+    }
+}
 
 internal sealed record EntraApprovalRuleSetting(
     bool? IsApprovalRequired,
