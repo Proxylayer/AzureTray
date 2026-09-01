@@ -31,6 +31,17 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# A failing test run is a normal outcome here, not a script error: `dotnet
+# test` exits non-zero and writes the [FAIL] lines we want to report. With
+# $PSNativeCommandUseErrorActionPreference on (the default in several pwsh 7
+# builds) that non-zero exit becomes a terminating error under
+# ErrorActionPreference 'Stop', so the script dies at the dotnet call and
+# prints neither the summary nor the failed-test list - exactly when they
+# matter most. Native exit codes are inspected explicitly below ($LASTEXITCODE)
+# and the script still exits non-zero; genuine PowerShell errors still throw.
+$PSNativeCommandUseErrorActionPreference = $false
+
 $root = $PSScriptRoot
 $project = Join-Path $root 'tests/AzureTray.Tests/AzureTray.Tests.csproj'
 
