@@ -56,7 +56,7 @@ public sealed class AppRegistrationProvisioningTests
                 """));
 
         var provisioning = NewProvisioning(handler);
-        var required = new[] { GraphRequirement("User.Read", "id-user-read") };
+        var required = new[] { GraphRequirement("User.Read", UserReadScopeId) };
 
         var result = await provisioning.CreateAsync("tenant-1", "AzureTray", required, CancellationToken.None);
 
@@ -70,7 +70,7 @@ public sealed class AppRegistrationProvisioningTests
         var appPost = handler.Recorded.Single(r => r.Method == HttpMethod.Post && r.Uri.AbsolutePath == "/v1.0/applications");
         Assert.NotNull(appPost.Body);
         Assert.Contains("\"signInAudience\":\"AzureADMyOrg\"", appPost.Body);
-        Assert.Contains("\"id-user-read\"", appPost.Body);
+        Assert.Contains($"\"{UserReadScopeId}\"", appPost.Body);
 
         // Verify the broker URI patch carried the expected URI.
         var patch = handler.Recorded.Single(r => r.Method == HttpMethod.Patch);
@@ -113,7 +113,7 @@ public sealed class AppRegistrationProvisioningTests
                 """));
 
         var provisioning = NewProvisioning(handler);
-        var required = new[] { GraphRequirement("User.Read", "id-user-read") };
+        var required = new[] { GraphRequirement("User.Read", UserReadScopeId) };
 
         var result = await provisioning.CreateAsync("tenant-1", "AzureTray", required, CancellationToken.None);
 
@@ -122,9 +122,6 @@ public sealed class AppRegistrationProvisioningTests
         // Consent still proceeded since the broker URI failure is best-effort.
         Assert.Equal(1, result.ScopesGranted);
     }
-
-    private static PluginPermissionRequirement GraphRequirement(string name, string id)
-        => new(PermissionApi.MicrosoftGraph, name, id, name);
 
     private static AppRegistrationProvisioning NewProvisioning(RoutedHttpHandler handler)
         => new(NewGraphClient(handler), NullLogger<AppRegistrationProvisioning>.Instance);

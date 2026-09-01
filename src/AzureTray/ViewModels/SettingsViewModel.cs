@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using AzureTray.AppRegistration;
 using AzureTray.Auth;
+using AzureTray.AzureCloud;
 using AzureTray.Configuration;
 using AzureTray.Extensions;
 using AzureTray.Graph;
@@ -33,6 +34,11 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly IGraphMeClient _graphMeClient;
     private readonly ITenantStore _tenantStore;
     private readonly ICredentialFactory _credentialFactory;
+
+    // Built here rather than injected: it is a behaviour over the credential
+    // factory and the cloud endpoints this view model already holds, with no
+    // state of its own worth registering in the container.
+    private readonly ConsentPropagationRefresher _consentRefresher;
     private readonly IExtensionInstaller _extensionInstaller;
     private readonly INuGetPluginFeed _nuGetFeed;
     private readonly IPackageSecurityScanner _packageSecurityScanner;
@@ -53,6 +59,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly IGraphOrganizationClient _organizationInfo;
     private readonly IStartupManager _startupManager;
     private readonly AuthOptions _authOptions;
+
+    // Shared with TokenFreshnessService. The background check goes quiet
+    // after one failed refresh for a tenant's missing-scope set; a user who
+    // fixes permissions or refreshes tokens has changed the very thing that
+    // verdict was based on, so it gets re-armed here.
+    private readonly TokenFreshnessGate _tokenFreshnessGate;
     private readonly ILogger<SettingsViewModel> _logger;
 
     // Guard so flipping LaunchAtStartup from the ctor (initial sync of the
@@ -280,6 +292,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(FixPermissionsCommand))]
+    [NotifyCanExecuteChangedFor(nameof(RefreshTenantTokensCommand))]
     [NotifyCanExecuteChangedFor(nameof(CreateAppRegistrationCommand))]
     [NotifyCanExecuteChangedFor(nameof(SignInToTenantCommand))]
     [NotifyCanExecuteChangedFor(nameof(ResolveSignInCommand))]
@@ -348,6 +361,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         IGraphMeClient graphMeClient,
         ITenantStore tenantStore,
         ICredentialFactory credentialFactory,
+        IAzureCloudConfig cloud,
         IExtensionInstaller extensionInstaller,
         INuGetPluginFeed pluginRegistry,
         IPackageSecurityScanner packageSecurityScanner,
@@ -369,6 +383,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         IWindowsAccountSignInService windowsSignIn,
         IGraphOrganizationClient organizationInfo,
         IStartupManager startupManager,
+        TokenFreshnessGate tokenFreshnessGate,
         IOptions<AuthOptions> authOptions,
         IOptions<PluginOptions> pluginOptions,
         ILogger<SettingsViewModel> logger)
@@ -398,9 +413,12 @@ public sealed partial class SettingsViewModel : ObservableObject
         _windowsSignIn = windowsSignIn;
         _organizationInfo = organizationInfo;
         _startupManager = startupManager;
+        _tokenFreshnessGate = tokenFreshnessGate;
         _authOptions = authOptions.Value;
         _pluginOptions = pluginOptions.Value;
         _logger = logger;
+
+        _consentRefresher = new ConsentPropagationRefresher(credentialFactory, cloud, logger);
 
         VersionDisplay = $"Version {_updateService.CurrentVersionDisplay}";
 
@@ -1514,10 +1532,11 @@ public sealed partial class SettingsViewModel : ObservableObject
             return;
         }
 
-        var required = AggregateRequiredPermissions();
-        if (required.Count == 0)
+        var permissions = AggregateRequiredPermissions();
+        if (permissions.Required.Count == 0)
         {
-            TenantActionStatus = "No permissions to apply — host has no baseline scopes and no plugins are loaded.";
+            TenantActionStatus = "No permissions to apply — host has no baseline scopes and no plugins are loaded."
+                + permissions.RejectionNote;
             return;
         }
 
@@ -1527,14 +1546,38 @@ public sealed partial class SettingsViewModel : ObservableObject
             TenantActionStatus = $"Fixing permissions on \"{tenant.DisplayName}\"… (sign-in may open if no cached admin token)";
 
             var result = await _appRegistrationPermissions.EnsureAsync(
-                tenant.TenantId, tenant.ClientId, required, CancellationToken.None);
+                tenant.TenantId, tenant.ClientId, permissions.Required, permissions.Rejected, CancellationToken.None);
 
-            TenantActionStatus = FormatFixResult(tenant.DisplayName, result);
+            // The consent state the background freshness check gave up on has
+            // just changed; let it try this tenant again.
+            _tokenFreshnessGate.Rearm(tenant.TenantId);
+
+            var fixStatus = FormatFixResult(tenant.DisplayName, result) + permissions.RejectionNote;
+            TenantActionStatus = fixStatus;
             _logger.LogInformation(
                 "Fix Permissions on tenant {TenantId} app {AppClientId}: added {Added} scope(s), removed {Removed} stale; grants added {GrantsAdded}, stale grants removed {GrantsRemoved}.",
                 tenant.TenantId, tenant.ClientId,
                 result.ScopesAdded.Count, result.StaleScopesRemoved,
                 result.GrantsAdded.Count, result.StaleGrantsRemoved);
+
+            // Tokens are acquired with the resource's /.default scope, so the
+            // cached access token still carries the pre-consent scope set and
+            // every call needing a newly-consented scope keeps returning 403.
+            // The MSAL cache is persisted to disk, so a restart doesn't clear
+            // it either — refresh here rather than making the user sign out
+            // and back in. Entra takes tens of seconds to propagate the
+            // consent, so the refresh runs in the background and verifies the
+            // token it gets back; blocking the command on it would freeze the
+            // dialog for the better part of a minute.
+            var newlyGranted = result.ScopesAdded
+                .Concat(result.GrantsAdded)
+                .DistinctBy(r => (r.Api, r.ScopeName))
+                .ToList();
+            if (newlyGranted.Count > 0)
+            {
+                TenantActionStatus = fixStatus + " Waiting for Entra to propagate the new consent…";
+                VerifyTokensInBackground(tenant, newlyGranted, fixStatus);
+            }
         }
         catch (Exception ex)
         {
@@ -1548,6 +1591,86 @@ public sealed partial class SettingsViewModel : ObservableObject
             IsPerformingTenantAction = false;
         }
     }
+
+    // Runs the post-consent refresh off the UI thread and rewrites the status
+    // line once it settles. Deliberately not awaited: the permission fix is
+    // already done and reported, and the verification can take the better part
+    // of a minute. Nothing in here may turn that success into a failure.
+    private void VerifyTokensInBackground(
+        Tenant tenant, IReadOnlyList<PluginPermissionRequirement> newlyGranted, string fixStatus)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var outcome = await _consentRefresher.RefreshAsync(
+                    tenant.TenantId, newlyGranted, CancellationToken.None).ConfigureAwait(false);
+                SetTenantActionStatus(fixStatus + outcome.StatusSuffix);
+            }
+            catch (Exception ex)
+            {
+                // Nothing is awaiting this task, so an escaping exception
+                // would surface as an unobserved one — most plausibly the
+                // dispatcher going away while the app shuts down mid-wait.
+                _logger.LogWarning(ex,
+                    "Post-fix token verification for tenant {TenantId} ended early; the permission changes are unaffected.",
+                    tenant.TenantId);
+            }
+        });
+    }
+
+    // Assigns the status line from whatever thread the caller is on. The WPF
+    // bindings behind it must see the change notification on the dispatcher.
+    private void SetTenantActionStatus(string status)
+    {
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess())
+        {
+            TenantActionStatus = status;
+        }
+        else
+        {
+            dispatcher.BeginInvoke(new Action(() => TenantActionStatus = status));
+        }
+    }
+
+    // The escape hatch Fix Permissions cannot provide. Once the app
+    // registration is already correct, Ensure adds nothing and there is
+    // nothing to hang a refresh off — but the cached access token can still
+    // predate the consent, and MSAL will keep serving it for its full hour.
+    // This refreshes the tenant's tokens regardless of what changed.
+    [RelayCommand(CanExecute = nameof(CanRefreshTenantTokens))]
+    private async Task RefreshTenantTokensAsync(Tenant? tenant)
+    {
+        if (tenant is null) return;
+
+        try
+        {
+            IsPerformingTenantAction = true;
+            TenantActionStatus = $"Refreshing access tokens for \"{tenant.DisplayName}\"…";
+
+            // Same re-arm as Fix permissions: the user has asked for exactly
+            // what the background check stopped attempting.
+            _tokenFreshnessGate.Rearm(tenant.TenantId);
+
+            // No expected scopes: there is no permission change to verify
+            // against, so this is a single unconditional refresh pass.
+            var outcome = await _consentRefresher.RefreshAsync(
+                tenant.TenantId, [], CancellationToken.None);
+
+            TenantActionStatus = $"\"{tenant.DisplayName}\":" + outcome.StatusSuffix;
+        }
+        finally
+        {
+            IsPerformingTenantAction = false;
+        }
+    }
+
+    // Unlike Fix Permissions this needs no app registration of its own and no
+    // administrative authority — any signed-in tenant can have its tokens
+    // re-acquired.
+    private bool CanRefreshTenantTokens(Tenant? tenant)
+        => !IsPerformingTenantAction && tenant is not null;
 
     private bool CanFixPermissions(Tenant? tenant)
         => !IsPerformingTenantAction
@@ -1579,7 +1702,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             return;
         }
 
-        var required = AggregateRequiredPermissions();
+        var permissions = AggregateRequiredPermissions();
 
         try
         {
@@ -1587,7 +1710,7 @@ public sealed partial class SettingsViewModel : ObservableObject
             TenantActionStatus = $"Creating app registration \"{displayName}\" in \"{tenant.DisplayName}\"… (admin sign-in may open)";
 
             var result = await _appRegistrationProvisioning.CreateAsync(
-                tenant.TenantId, displayName, required, CancellationToken.None);
+                tenant.TenantId, displayName, permissions.Required, CancellationToken.None);
 
             // Persist the new clientId on the tenant + invalidate the cached
             // credential so future calls authenticate as the new app reg.
@@ -1609,7 +1732,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 TenantNeedingAppReg = null;
             }
 
-            TenantActionStatus = FormatCreateResult(updated.DisplayName, displayName, result);
+            TenantActionStatus = FormatCreateResult(updated.DisplayName, displayName, result) + permissions.RejectionNote;
             _logger.LogInformation(
                 "Created and persisted app registration {DisplayName} ({AppId}) for tenant {TenantId}: scopes granted {Scopes}, broker URI added {BrokerAdded}.",
                 displayName, result.App.AppId, tenant.TenantId, result.ScopesGranted, result.BrokerRedirectUriAdded);
@@ -1640,30 +1763,11 @@ public sealed partial class SettingsViewModel : ObservableObject
         return $"Created \"{appDisplayName}\" ({result.App.AppId}) in \"{tenantDisplayName}\", admin-consented {result.ScopesGranted} scope(s){note}.";
     }
 
-    // Aggregates host baseline scopes with every loaded plugin's required
-    // permissions. Deduplicates by (resourceAppId, scopeId) so the same
-    // scope declared in two places only PATCHes once.
-    private List<PluginPermissionRequirement> AggregateRequiredPermissions()
-    {
-        var seen = new HashSet<(PermissionApi Api, string ScopeId)>();
-        var all = new List<PluginPermissionRequirement>();
-
-        void AddRange(IEnumerable<PluginPermissionRequirement> source)
-        {
-            foreach (var p in source)
-            {
-                if (seen.Add((p.Api, p.ScopeId))) all.Add(p);
-            }
-        }
-
-        AddRange(HostRequiredPermissions.All);
-        foreach (var loaded in _pluginLoader.LoadedPlugins)
-        {
-            AddRange(loaded.Plugin.RequiredPermissions);
-        }
-
-        return all;
-    }
+    // Host baseline + every loaded plugin's declared scopes, deduplicated and
+    // with malformed declarations dropped. See RequiredPermissionsAggregator
+    // for why the filtering has to happen before the list reaches Graph.
+    private RequiredPermissionsAggregator.AggregatedPermissions AggregateRequiredPermissions()
+        => RequiredPermissionsAggregator.Aggregate(_pluginLoader, _logger);
 
     private static string FormatFixResult(string tenantDisplayName, PermissionFixResult result)
     {

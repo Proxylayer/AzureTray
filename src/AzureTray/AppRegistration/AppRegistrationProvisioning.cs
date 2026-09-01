@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -30,6 +30,11 @@ public sealed class AppRegistrationProvisioning : IAppRegistrationProvisioning
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(displayName);
         ArgumentNullException.ThrowIfNull(required);
+
+        // Same guard as EnsureAsync: one malformed plugin ScopeId would make
+        // Graph reject the POST body outright, so no app registration gets
+        // created at all. Drop the offender, provision everything else.
+        required = RequiredPermissionsAggregator.KeepValid(required, _logger);
 
         // 1. POST /applications. Single-tenant, public-client, with the
         //    required scopes baked into requiredResourceAccess so the user

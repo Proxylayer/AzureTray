@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -214,7 +214,7 @@ public sealed class TestRegistry : ITestRegistry
                 var tenant = await PickTenantAsync(allowNoClientId: false, ct);
                 if (tenant is null) return PluginTestResult.Fail("No tenant with a dedicated app registration was selected.");
 
-                var required = AggregateRequiredPermissions();
+                var required = AggregateRequiredPermissions().Required;
                 if (required.Count == 0) return PluginTestResult.Pass("No required permissions to check.");
 
                 var result = await _appRegistrationPermissions.CheckAsync(tenant.TenantId, tenant.ClientId!, required, ct);
@@ -253,10 +253,11 @@ public sealed class TestRegistry : ITestRegistry
                 var tenant = await PickTenantAsync(allowNoClientId: false, ct);
                 if (tenant is null) return PluginTestResult.Fail("No tenant with a dedicated app registration was selected.");
 
-                var required = AggregateRequiredPermissions();
-                if (required.Count == 0) return PluginTestResult.Fail("No required permissions to apply.");
+                var permissions = AggregateRequiredPermissions();
+                if (permissions.Required.Count == 0) return PluginTestResult.Fail("No required permissions to apply.");
 
-                var result = await _appRegistrationPermissions.EnsureAsync(tenant.TenantId, tenant.ClientId!, required, ct);
+                var result = await _appRegistrationPermissions.EnsureAsync(
+                    tenant.TenantId, tenant.ClientId!, permissions.Required, permissions.Rejected, ct);
                 return PluginTestResult.Pass(
                     $"Tenant '{tenant.DisplayName}': added {result.ScopesAdded.Count} scope(s), removed {result.StaleScopesRemoved} stale; granted {result.GrantsAdded.Count}, removed {result.StaleGrantsRemoved} stale grant(s).");
             }),
@@ -278,8 +279,8 @@ public sealed class TestRegistry : ITestRegistry
                 if (string.IsNullOrWhiteSpace(name))
                     return PluginTestResult.Fail("AppRegistrationName is empty in appsettings.json.");
 
-                var required = AggregateRequiredPermissions();
-                var result = await _appRegistrationProvisioning.CreateAsync(tenant.TenantId, name, required, ct);
+                var permissions = AggregateRequiredPermissions();
+                var result = await _appRegistrationProvisioning.CreateAsync(tenant.TenantId, name, permissions.Required, ct);
 
                 // Persist the new clientId on the tenant so subsequent sign-ins
                 // use the dedicated app reg, matching the Settings UI flow.
@@ -325,24 +326,11 @@ public sealed class TestRegistry : ITestRegistry
         return result is YesNoResult yn && yn.Accepted;
     }
 
-    private List<PluginPermissionRequirement> AggregateRequiredPermissions()
-    {
-        var seen = new HashSet<(PermissionApi Api, string ScopeId)>();
-        var all = new List<PluginPermissionRequirement>();
-
-        void AddRange(IEnumerable<PluginPermissionRequirement> source)
-        {
-            foreach (var p in source)
-            {
-                if (seen.Add((p.Api, p.ScopeId))) all.Add(p);
-            }
-        }
-
-        AddRange(HostRequiredPermissions.All);
-        foreach (var loaded in _pluginLoader.LoadedPlugins)
-        {
-            AddRange(loaded.Plugin.RequiredPermissions);
-        }
-        return all;
-    }
+    // Same host + plugin aggregation the Settings UI runs, including the
+    // drop of malformed plugin ScopeIds — the tests must exercise exactly
+    // what Fix Permissions / Create App Registration would send. The
+    // rejected declarations travel with it: EnsureAsync needs them to know
+    // which resources it must not clean up.
+    private RequiredPermissionsAggregator.AggregatedPermissions AggregateRequiredPermissions()
+        => RequiredPermissionsAggregator.Aggregate(_pluginLoader, _logger);
 }

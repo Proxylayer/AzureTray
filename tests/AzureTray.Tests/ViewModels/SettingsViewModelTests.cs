@@ -11,6 +11,7 @@ using NSubstitute;
 using AzureTray;
 using AzureTray.AppRegistration;
 using AzureTray.Auth;
+using AzureTray.AzureCloud;
 using AzureTray.Configuration;
 using AzureTray.Dto;
 using AzureTray.Extensions;
@@ -589,6 +590,7 @@ public sealed class SettingsViewModelTests : IDisposable
             graphMeClient,
             tenantStore,
             credentialFactory,
+            Substitute.For<IAzureCloudConfig>(),
             extensionInstaller,
             nuGetFeed,
             packageSecurityScanner,
@@ -610,6 +612,7 @@ public sealed class SettingsViewModelTests : IDisposable
             windowsSignIn,
             organizationInfo,
             startupManager,
+            new TokenFreshnessGate(),
             Options.Create(authOptions),
             Options.Create(pluginOptions),
             NullLogger<SettingsViewModel>.Instance);

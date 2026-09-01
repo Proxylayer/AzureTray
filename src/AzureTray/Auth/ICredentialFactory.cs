@@ -41,4 +41,25 @@ public interface ICredentialFactory
     // (serialized and briefly debounced per tenant).
     Task<bool> ForceRefreshAsync(
         string tenantId, IReadOnlyList<string> scopes, CancellationToken cancellationToken);
+
+    // Re-acquires the tenant's token for one resource scope, bypassing MSAL's
+    // access-token cache, and reports the delegated permissions ("scp") the
+    // STS put into the token it handed back.
+    //
+    // Null means no token could be acquired silently (re-auth needed, broker
+    // failure). An empty list means a token was acquired but says nothing
+    // about what it grants — access tokens are opaque by contract, so an
+    // unreadable one is "cannot tell", never "the scope is missing".
+    //
+    // Distinct from ForceRefreshAsync because the caller here is verifying,
+    // not just nudging. It needs the claims rather than a did-anything-change
+    // bool, and it must be able to ask again a few seconds later - Entra
+    // consent propagation runs behind the Graph write by tens of seconds, so
+    // the debounce that keeps background refreshes cheap would swallow
+    // exactly the retries that decide the answer.
+    //
+    // Never prompts, never throws for the ordinary failures: an
+    // AuthenticationRequiredException is logged and reported as null.
+    Task<IReadOnlyList<string>?> RefreshAndReadScopesAsync(
+        string tenantId, string resourceScope, CancellationToken cancellationToken);
 }

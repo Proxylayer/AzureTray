@@ -21,7 +21,7 @@ public sealed class AppRegistrationPermissionsTests
         handler.OnGet("https://graph.microsoft.com/v1.0/applications", _ => Json(@"{ ""value"": [] }"));
 
         var permissions = NewPermissions(handler);
-        var required = new[] { GraphRequirement("User.Read", "id-1") };
+        var required = new[] { GraphRequirement("User.Read", UserReadScopeId) };
 
         var result = await permissions.CheckAsync("tenant-1", "client-1", required, CancellationToken.None);
 
@@ -45,7 +45,7 @@ public sealed class AppRegistrationPermissionsTests
                     "displayName": "Our App",
                     "requiredResourceAccess": [{
                       "resourceAppId": "{{GraphResourceAppId}}",
-                      "resourceAccess": [{ "id": "id-user-read", "type": "Scope" }]
+                      "resourceAccess": [{ "id": "{{UserReadScopeId}}", "type": "Scope" }]
                     }]
                   }]
                 }
@@ -84,8 +84,8 @@ public sealed class AppRegistrationPermissionsTests
         var permissions = NewPermissions(handler);
         var required = new[]
         {
-            GraphRequirement("User.Read", "id-user-read"),
-            GraphRequirement("RoleManagement.Read.Directory", "id-role-mgmt"),
+            GraphRequirement("User.Read", UserReadScopeId),
+            GraphRequirement("RoleManagement.Read.Directory", RoleManagementReadDirectoryScopeId),
         };
 
         var result = await permissions.CheckAsync("tenant-1", "client-1", required, CancellationToken.None);
@@ -112,7 +112,7 @@ public sealed class AppRegistrationPermissionsTests
                     "displayName": "Our App",
                     "requiredResourceAccess": [{
                       "resourceAppId": "{{GraphResourceAppId}}",
-                      "resourceAccess": [{ "id": "id-user-read", "type": "Scope" }]
+                      "resourceAccess": [{ "id": "{{UserReadScopeId}}", "type": "Scope" }]
                     }]
                   }]
                 }
@@ -144,13 +144,20 @@ public sealed class AppRegistrationPermissionsTests
                 """));
 
         var permissions = NewPermissions(handler);
-        var required = new[] { GraphRequirement("User.Read", "id-user-read") };
+        var required = new[] { GraphRequirement("User.Read", UserReadScopeId) };
 
         var result = await permissions.CheckAsync("tenant-1", "client-1", required, CancellationToken.None);
 
         Assert.True(result.IsFullyConfigured);
         Assert.Empty(result.Missing);
         Assert.Empty(result.NotConsented);
+
+        // Non-vacuity guard. An empty required list also reports "fully
+        // configured" - and that is exactly what a fixture with non-GUID
+        // scope ids degrades into, since KeepValid filters it away and
+        // CheckAsync returns before it talks to Graph at all. If the routes
+        // below were never called, the three assertions above proved nothing.
+        Assert.Contains(handler.Recorded, r => r.Uri.AbsolutePath == "/v1.0/oauth2PermissionGrants");
     }
 
     [Fact]
@@ -178,8 +185,8 @@ public sealed class AppRegistrationPermissionsTests
                     "requiredResourceAccess": [{
                       "resourceAppId": "{{GraphResourceAppId}}",
                       "resourceAccess": [
-                        { "id": "id-user-read",  "type": "Scope" },
-                        { "id": "id-role-mgmt",  "type": "Scope" }
+                        { "id": "{{UserReadScopeId}}",  "type": "Scope" },
+                        { "id": "{{RoleManagementReadDirectoryScopeId}}",  "type": "Scope" }
                       ]
                     }]
                   }]
@@ -222,9 +229,9 @@ public sealed class AppRegistrationPermissionsTests
             _ => new HttpResponseMessage(HttpStatusCode.NoContent));
 
         var permissions = NewPermissions(handler);
-        var required = new[] { GraphRequirement("User.Read", "id-user-read") };
+        var required = new[] { GraphRequirement("User.Read", UserReadScopeId) };
 
-        var result = await permissions.EnsureAsync("tenant-1", "client-1", required, CancellationToken.None);
+        var result = await permissions.EnsureAsync("tenant-1", "client-1", required, [], CancellationToken.None);
 
         // No new scopes/grants since User.Read was already declared and consented.
         Assert.Empty(result.ScopesAdded);
@@ -236,8 +243,8 @@ public sealed class AppRegistrationPermissionsTests
         // Verify the RRA PATCH dropped the stale scope.
         var rraPatch = handler.Recorded.Single(r => r.Method == HttpMethod.Patch && r.Uri.AbsolutePath == "/v1.0/applications/app-obj-1");
         Assert.NotNull(rraPatch.Body);
-        Assert.Contains("\"id-user-read\"", rraPatch.Body);
-        Assert.DoesNotContain("\"id-role-mgmt\"", rraPatch.Body);
+        Assert.Contains($"\"{UserReadScopeId}\"", rraPatch.Body);
+        Assert.DoesNotContain($"\"{RoleManagementReadDirectoryScopeId}\"", rraPatch.Body);
 
         // Verify the grant PATCH replaced the scope string with exactly the required scope.
         var grantPatch = handler.Recorded.Single(r => r.Method == HttpMethod.Patch && r.Uri.AbsolutePath == "/v1.0/oauth2PermissionGrants/grant-1");
@@ -246,8 +253,184 @@ public sealed class AppRegistrationPermissionsTests
         Assert.DoesNotContain("RoleManagement", grantPatch.Body);
     }
 
-    private static PluginPermissionRequirement GraphRequirement(string name, string id)
-        => new(PermissionApi.MicrosoftGraph, name, id, name);
+    // Regression guard for the incident this protection exists for: a plugin
+    // declared a scope *name* where a scope GUID belongs, the declaration was
+    // filtered out of the required list, and "not required" then read as
+    // "stale" - so the host stripped scopes the tenant had already consented
+    // to out of the app registration and its grant. A rejected declaration is
+    // unprovisionable, never withdrawn: nothing for that resource may be
+    // touched.
+    [Fact]
+    public async Task EnsureAsync_RemovesNothing_WhenADeclarationForThatResourceWasRejected()
+    {
+        var handler = new RoutedHttpHandler();
+
+        // The app declares User.Read plus the scope behind the malformed
+        // declaration (which we can only see as a GUID here - the rejected
+        // declaration carries a name, so it cannot be matched against it).
+        handler.OnGet(
+            url => url.AbsolutePath == "/v1.0/applications" && Uri.UnescapeDataString(url.Query).Contains("appId eq 'client-1'"),
+            _ => Json($$"""
+                {
+                  "value": [{
+                    "id": "app-obj-1",
+                    "appId": "client-1",
+                    "displayName": "Our App",
+                    "requiredResourceAccess": [{
+                      "resourceAppId": "{{GraphResourceAppId}}",
+                      "resourceAccess": [
+                        { "id": "{{UserReadScopeId}}",  "type": "Scope" },
+                        { "id": "{{RoleManagementReadDirectoryScopeId}}",  "type": "Scope" }
+                      ]
+                    }]
+                  }]
+                }
+                """));
+
+        handler.OnGet(
+            url => url.AbsolutePath == "/v1.0/servicePrincipals" && Uri.UnescapeDataString(url.Query).Contains("appId eq 'client-1'"),
+            _ => Json("""
+                { "value": [{ "id": "our-sp-obj-1", "appId": "client-1" }] }
+                """));
+
+        handler.OnGet(
+            url => url.AbsolutePath == "/v1.0/servicePrincipals" && Uri.UnescapeDataString(url.Query).Contains($"appId eq '{GraphResourceAppId}'"),
+            _ => Json($$"""
+                { "value": [{ "id": "graph-sp-obj", "appId": "{{GraphResourceAppId}}" }] }
+                """));
+
+        handler.OnGet(
+            url => url.AbsolutePath == "/v1.0/servicePrincipals/graph-sp-obj",
+            _ => Json($$"""
+                { "id": "graph-sp-obj", "appId": "{{GraphResourceAppId}}" }
+                """));
+
+        // Both scopes are already consented; the second one only because of
+        // the declaration we could not provision.
+        handler.OnGet(
+            url => url.AbsolutePath == "/v1.0/oauth2PermissionGrants",
+            _ => Json("""
+                {
+                  "value": [{
+                    "id": "grant-1",
+                    "clientId": "our-sp-obj-1",
+                    "resourceId": "graph-sp-obj",
+                    "scope": "User.Read RoleManagement.Read.Directory"
+                  }]
+                }
+                """));
+
+        // Routed so a wrongly-issued write is recorded and asserted on,
+        // rather than dying as an unmatched route.
+        handler.OnPatch(url => url.AbsolutePath == "/v1.0/applications/app-obj-1", _ => new HttpResponseMessage(HttpStatusCode.NoContent));
+        handler.OnPatch(url => url.AbsolutePath == "/v1.0/oauth2PermissionGrants/grant-1", _ => new HttpResponseMessage(HttpStatusCode.NoContent));
+        handler.OnDelete(url => url.AbsolutePath == "/v1.0/oauth2PermissionGrants/grant-1", _ => new HttpResponseMessage(HttpStatusCode.NoContent));
+
+        var permissions = NewPermissions(handler);
+        var required = new[] { GraphRequirement("User.Read", UserReadScopeId) };
+        var rejected = new[]
+        {
+            // What a plugin actually shipped: the scope name in the id slot.
+            new RejectedRequirement("plugin-x", PermissionApi.MicrosoftGraph, "RoleManagement.Read.Directory", "RoleManagement.Read.Directory"),
+        };
+
+        var result = await permissions.EnsureAsync("tenant-1", "client-1", required, rejected, CancellationToken.None);
+
+        // Identical inputs minus the rejection produce 1 stale scope + 1 stale
+        // grant (see EnsureAsync_ReplacesScopes_...); the rejection must make
+        // that nothing at all.
+        Assert.Equal(0, result.StaleScopesRemoved);
+        Assert.Equal(0, result.StaleGrantsRemoved);
+        Assert.Empty(result.ScopesAdded);
+        Assert.Empty(result.GrantsAdded);
+
+        // Nothing was written: no RRA rewrite, no grant rewrite, no delete.
+        Assert.DoesNotContain(handler.Recorded, r => r.Method == HttpMethod.Patch);
+        Assert.DoesNotContain(handler.Recorded, r => r.Method == HttpMethod.Delete);
+
+        // ...and it got far enough to have been able to write. Without this
+        // the assertions above would also hold for an EnsureAsync that bailed
+        // out before reaching Graph.
+        Assert.Contains(handler.Recorded, r => r.Uri.AbsolutePath == "/v1.0/oauth2PermissionGrants");
+    }
+
+    // Same protection one layer out: the rejected declaration names a
+    // resource nothing else requires, so the resource appears in neither the
+    // required nor the stale list. Its grant must survive.
+    [Fact]
+    public async Task EnsureAsync_KeepsGrant_ForResourceNamedOnlyByRejectedDeclaration()
+    {
+        var handler = new RoutedHttpHandler();
+
+        handler.OnGet(
+            url => url.AbsolutePath == "/v1.0/applications" && Uri.UnescapeDataString(url.Query).Contains("appId eq 'client-1'"),
+            _ => Json($$"""
+                {
+                  "value": [{
+                    "id": "app-obj-1",
+                    "appId": "client-1",
+                    "displayName": "Our App",
+                    "requiredResourceAccess": [{
+                      "resourceAppId": "{{GraphResourceAppId}}",
+                      "resourceAccess": [{ "id": "{{UserReadScopeId}}", "type": "Scope" }]
+                    }]
+                  }]
+                }
+                """));
+
+        handler.OnGet(
+            url => url.AbsolutePath == "/v1.0/servicePrincipals" && Uri.UnescapeDataString(url.Query).Contains("appId eq 'client-1'"),
+            _ => Json("""
+                { "value": [{ "id": "our-sp-obj-1", "appId": "client-1" }] }
+                """));
+
+        handler.OnGet(
+            url => url.AbsolutePath == "/v1.0/servicePrincipals" && Uri.UnescapeDataString(url.Query).Contains($"appId eq '{GraphResourceAppId}'"),
+            _ => Json($$"""
+                { "value": [{ "id": "graph-sp-obj", "appId": "{{GraphResourceAppId}}" }] }
+                """));
+
+        handler.OnGet(
+            url => url.AbsolutePath == "/v1.0/servicePrincipals/graph-sp-obj",
+            _ => Json($$"""
+                { "id": "graph-sp-obj", "appId": "{{GraphResourceAppId}}" }
+                """));
+
+        // The ARM service principal the surviving grant points at.
+        handler.OnGet(
+            url => url.AbsolutePath == "/v1.0/servicePrincipals/arm-sp-obj",
+            _ => Json($$"""
+                { "id": "arm-sp-obj", "appId": "{{ArmResourceAppId}}" }
+                """));
+
+        handler.OnGet(
+            url => url.AbsolutePath == "/v1.0/oauth2PermissionGrants",
+            _ => Json("""
+                {
+                  "value": [
+                    { "id": "grant-graph", "clientId": "our-sp-obj-1", "resourceId": "graph-sp-obj", "scope": "User.Read" },
+                    { "id": "grant-arm",   "clientId": "our-sp-obj-1", "resourceId": "arm-sp-obj",   "scope": "user_impersonation" }
+                  ]
+                }
+                """));
+
+        handler.OnDelete(url => url.AbsolutePath.StartsWith("/v1.0/oauth2PermissionGrants/", StringComparison.Ordinal), _ => new HttpResponseMessage(HttpStatusCode.NoContent));
+
+        var permissions = NewPermissions(handler);
+        var required = new[] { GraphRequirement("User.Read", UserReadScopeId) };
+        var rejected = new[]
+        {
+            new RejectedRequirement("plugin-x", PermissionApi.AzureResourceManager, "user_impersonation", "user_impersonation"),
+        };
+
+        var result = await permissions.EnsureAsync("tenant-1", "client-1", required, rejected, CancellationToken.None);
+
+        Assert.Equal(0, result.StaleGrantsRemoved);
+        Assert.DoesNotContain(handler.Recorded, r => r.Method == HttpMethod.Delete);
+        // The ARM grant really was considered for pruning and spared, not
+        // skipped because the run never got that far.
+        Assert.Contains(handler.Recorded, r => r.Uri.AbsolutePath == "/v1.0/servicePrincipals/arm-sp-obj");
+    }
 
     private static AppRegistrationPermissions NewPermissions(RoutedHttpHandler handler)
         => new(NewGraphClient(handler), NullLogger<AppRegistrationPermissions>.Instance);

@@ -186,6 +186,10 @@ internal static class Program
             .AddOptions<NuGetPluginFeedOptions>()
             .Bind(builder.Configuration.GetSection(NuGetPluginFeedOptions.SectionName));
 
+        builder.Services
+            .AddOptions<TokenFreshnessOptions>()
+            .Bind(builder.Configuration.GetSection(TokenFreshnessOptions.SectionName));
+
         builder.Services.AddSingleton<IAzureCloudConfig, AzureCloudConfig>();
         builder.Services.AddSingleton<ITenantStore, JsonFileTenantStore>();
         builder.Services.AddSingleton<ICredentialFactory, CredentialFactory>();
@@ -233,6 +237,17 @@ internal static class Program
         // Probe must register AFTER PluginLoader so plugins subscribe to
         // TenantReady before the first ready event fires.
         builder.Services.AddHostedService<TenantReadinessProbe>();
+
+        // Token freshness. A token minted before an admin-consent change
+        // keeps serving the old scope set for its full lifetime, and MSAL's
+        // cache survives a restart, so the only cures were Fix permissions /
+        // Refresh tokens or waiting the hour out. This loop finds those
+        // tokens and force-refreshes them; the gate keeps a scope the tenant
+        // will never grant from producing a failed refresh every cycle, and
+        // is shared with SettingsViewModel so a user-driven fix re-arms it.
+        builder.Services.AddSingleton<ConsentedScopesReader>();
+        builder.Services.AddSingleton<TokenFreshnessGate>();
+        builder.Services.AddHostedService<TokenFreshnessService>();
     }
 
     private static void ConfigureLogging(HostApplicationBuilder builder, AppPaths appPaths)

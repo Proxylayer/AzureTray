@@ -1,4 +1,4 @@
-<Window x:Class="AzureTray.SettingsWindow"
+﻿<Window x:Class="AzureTray.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:AzureTray.Shell"
@@ -203,6 +203,37 @@
                                         </Button.Style>
                                         <Button.Command>
                                             <Binding Path="DataContext.FixPermissionsCommand" RelativeSource="{RelativeSource AncestorType=Window}"/>
+                                        </Button.Command>
+                                        <Button.CommandParameter>
+                                            <Binding/>
+                                        </Button.CommandParameter>
+                                    </Button>
+                                    <!-- Escape hatch for a stale cached token:
+                                         Fix permissions only refreshes tokens when
+                                         it actually changed something, so once the
+                                         app registration is already correct there
+                                         is otherwise no way to pick up consent that
+                                         landed after the token was cached. -->
+                                    <Button Content="Refresh tokens"
+                                            Margin="0,0,8,0"
+                                            AutomationProperties.Name="{Binding DisplayName, StringFormat='Refresh access tokens for tenant {0}'}"
+                                            ToolTip="Re-acquire this tenant&apos;s access tokens, bypassing the cached ones. Use when permissions look correct but calls still fail with a missing-scope error.">
+                                        <Button.Style>
+                                            <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding ProbeDisabled}" Value="False"/>
+                                                            <Condition Binding="{Binding DataContext.IsAdminMode, RelativeSource={RelativeSource AncestorType=Window}}" Value="True"/>
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </MultiDataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Button.Style>
+                                        <Button.Command>
+                                            <Binding Path="DataContext.RefreshTenantTokensCommand" RelativeSource="{RelativeSource AncestorType=Window}"/>
                                         </Button.Command>
                                         <Button.CommandParameter>
                                             <Binding/>

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using AzureTray.AppRegistration;
 using AzureTray.Auth;
 using AzureTray.AzureCloud;
 using AzureTray.Configuration;
@@ -444,6 +445,30 @@ public sealed class PluginLoader : IPluginLoader, IHostedService, IDisposable
                     plugin.Id, plugin.ApiVersion, PluginApiVersion.MinSupported, PluginApiVersion.Current);
                 loadContext.Unload();
                 return null;
+            }
+
+            // Surface malformed permission declarations at load time instead of
+            // leaving the user to hit them on the first Fix Permissions. ScopeId
+            // must be the oauth2PermissionScope GUID; anything else cannot be
+            // provisioned and is left out of the app-registration request.
+            // Warn only — the plugin is otherwise loadable, the scope may
+            // already be consented through another declaration or an earlier
+            // grant, and nothing is taken away.
+            try
+            {
+                foreach (var permission in plugin.RequiredPermissions)
+                {
+                    if (RequiredPermissionsAggregator.HasValidScopeId(permission)) continue;
+                    _logger.LogWarning(
+                        "Plugin {Id} declares required permission {ScopeName} with ScopeId '{ScopeId}', which is not a GUID; " +
+                        "ScopeId must be the oauth2PermissionScope id. The declaration cannot be provisioned, so Fix Permissions " +
+                        "neither adds nor removes it — any consent that scope already has is left untouched.",
+                        plugin.Id, permission.ScopeName, permission.ScopeId);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Plugin {Id} threw while enumerating RequiredPermissions.", plugin.Id);
             }
 
             var pluginLogger = _loggerFactory.CreateLogger($"Plugin.{plugin.Id}");

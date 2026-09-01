@@ -10,6 +10,7 @@ using NSubstitute;
 using AzureTray;
 using AzureTray.AppRegistration;
 using AzureTray.Auth;
+using AzureTray.AzureCloud;
 using AzureTray.Configuration;
 using AzureTray.Extensions;
 using AzureTray.Graph;
@@ -284,6 +285,7 @@ public sealed class SettingsViewModelPluginUpdateTests : IDisposable
             Substitute.For<IGraphMeClient>(),
             tenantStore,
             Substitute.For<ICredentialFactory>(),
+            Substitute.For<IAzureCloudConfig>(),
             extensionInstaller,
             Substitute.For<INuGetPluginFeed>(),
             Substitute.For<IPackageSecurityScanner>(),
@@ -309,6 +311,7 @@ public sealed class SettingsViewModelPluginUpdateTests : IDisposable
             Substitute.For<IWindowsAccountSignInService>(),
             Substitute.For<IGraphOrganizationClient>(),
             Substitute.For<IStartupManager>(),
+            new TokenFreshnessGate(),
             Options.Create(new AuthOptions()),
             Options.Create(pluginOptions),
             NullLogger<SettingsViewModel>.Instance);

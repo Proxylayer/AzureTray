@@ -10,6 +10,7 @@ using NSubstitute;
 using AzureTray.AppRegistration.Internal;
 using AzureTray.Auth;
 using AzureTray.AzureCloud;
+using AzureTray.Plugin.Contracts;
 
 namespace AzureTray.Tests.AppRegistration;
 
@@ -19,6 +20,21 @@ namespace AzureTray.Tests.AppRegistration;
 internal static class AppRegistrationTestFixtures
 {
     public const string GraphResourceAppId = "00000003-0000-0000-c000-000000000000";
+    public const string ArmResourceAppId = "797f4846-ba00-4fd7-ba43-dac1f8f63013";
+
+    // Scope ids must be GUIDs. The Graph-facing layer drops any requirement
+    // whose ScopeId does not parse as one (RequiredPermissionsAggregator.
+    // KeepValid), because Graph rejects the whole request otherwise - so a
+    // placeholder id like "id-user-read" silently filters a fixture down to
+    // nothing and the test then asserts against an empty result.
+    // Deliberately fake but well-formed, and stable so the JSON fixtures can
+    // interpolate the same value the requirement carries. Not real Microsoft
+    // scope ids: nothing here depends on Graph's actual GUIDs.
+    public const string UserReadScopeId = "11111111-1111-4111-8111-111111111111";
+    public const string RoleManagementReadDirectoryScopeId = "22222222-2222-4222-8222-222222222222";
+
+    public static PluginPermissionRequirement GraphRequirement(string name, string id)
+        => new(PermissionApi.MicrosoftGraph, name, id, name);
 
     public static AppRegistrationGraphClient NewGraphClient(RoutedHttpHandler handler)
     {

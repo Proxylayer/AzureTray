@@ -31,6 +31,7 @@ public sealed class AppRegistrationPermissions : IAppRegistrationPermissions
         ArgumentException.ThrowIfNullOrWhiteSpace(appClientId);
         ArgumentNullException.ThrowIfNull(required);
 
+        required = RequiredPermissionsAggregator.KeepValid(required, _logger);
         if (required.Count == 0)
         {
             return new PermissionCheckResult([], []);
@@ -63,15 +64,29 @@ public sealed class AppRegistrationPermissions : IAppRegistrationPermissions
         string tenantId,
         string appClientId,
         IReadOnlyList<PluginPermissionRequirement> required,
+        IReadOnlyList<RejectedRequirement> unprovisionable,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(appClientId);
         ArgumentNullException.ThrowIfNull(required);
+        ArgumentNullException.ThrowIfNull(unprovisionable);
 
+        // A ScopeId that isn't a GUID makes Graph reject the whole
+        // requiredResourceAccess PATCH ("Cannot convert the literal ... to
+        // the expected type 'Edm.Guid'"), taking the host's and every other
+        // plugin's scopes down with it. Drop those before we build the body.
+        required = RequiredPermissionsAggregator.KeepValid(required, _logger);
         if (required.Count == 0)
         {
             return new PermissionFixResult([], [], 0, 0);
         }
+
+        // Resources whose cleanup must be switched off. A dropped declaration
+        // is only unprovisionable, never withdrawn: its scope name cannot be
+        // matched against the GUID-keyed resourceAccess entries on the app,
+        // so the only way to be certain we never revoke it is to leave
+        // everything already present for that resource alone.
+        var protectedResources = ResolveProtectedResources(unprovisionable, tenantId);
 
         var app = await _graph.GetAppByClientIdAsync(tenantId, appClientId, cancellationToken)
             ?? throw new InvalidOperationException(
@@ -84,7 +99,7 @@ public sealed class AppRegistrationPermissions : IAppRegistrationPermissions
         // 1. Rebuild requiredResourceAccess from scratch for each managed
         //    resource; scopes for resources we don't list are pruned.
         var (newRra, scopesAdded, staleScopesRemoved) =
-            ComputeReplacementRequiredResourceAccess(app.RequiredResourceAccess, required);
+            ComputeReplacementRequiredResourceAccess(app.RequiredResourceAccess, required, protectedResources);
 
         if (scopesAdded.Count > 0 || staleScopesRemoved > 0)
         {
@@ -120,6 +135,17 @@ public sealed class AppRegistrationPermissions : IAppRegistrationPermissions
             var existingScopes = SplitScopes(existingGrant?.Scope);
             var requiredScopeNames = resourceGroup.Select(r => r.ScopeName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             var requiredScopesSet = new HashSet<string>(requiredScopeNames, StringComparer.OrdinalIgnoreCase);
+
+            // Protected resource: fold whatever is already consented into the
+            // scope string we write back, so the PATCH can only ever be
+            // additive. Nothing counts as stale here by construction.
+            if (protectedResources.Contains(resourceAppId))
+            {
+                foreach (var granted in existingScopes)
+                {
+                    if (requiredScopesSet.Add(granted)) requiredScopeNames.Add(granted);
+                }
+            }
 
             var newlyConsented = resourceGroup.Where(r => !existingScopes.Contains(r.ScopeName)).ToList();
             var staleForResource = existingScopes.Count(s => !requiredScopesSet.Contains(s));
@@ -173,6 +199,17 @@ public sealed class AppRegistrationPermissions : IAppRegistrationPermissions
             var resourceSp = await _graph.GetServicePrincipalByObjectIdAsync(tenantId, grant.ResourceId, cancellationToken);
             if (resourceSp?.AppId is null) continue;
             if (requiredResourceAppIds.Contains(resourceSp.AppId)) continue;
+
+            // A resource that only a rejected declaration named appears in
+            // neither list; deleting its grant would revoke access nobody
+            // asked us to revoke.
+            if (protectedResources.Contains(resourceSp.AppId))
+            {
+                _logger.LogInformation(
+                    "Leaving the oauth2PermissionGrant for resource {ResourceAppId} in tenant {TenantId} in place: a declaration for that resource could not be provisioned, so its consent is not treated as stale.",
+                    resourceSp.AppId, tenantId);
+                continue;
+            }
 
             // This grant is for a resource we no longer manage. Prune it.
             var pruned = SplitScopes(grant.Scope).Count;
@@ -259,7 +296,8 @@ public sealed class AppRegistrationPermissions : IAppRegistrationPermissions
     // newly-added and pruned scopes for reporting.
     private static (List<RequiredResourceAccessDto> NewRra, List<PluginPermissionRequirement> ScopesAdded, int StaleRemoved) ComputeReplacementRequiredResourceAccess(
         List<RequiredResourceAccessDto>? current,
-        IReadOnlyList<PluginPermissionRequirement> required)
+        IReadOnlyList<PluginPermissionRequirement> required,
+        HashSet<string> protectedResources)
     {
         var newRra = new List<RequiredResourceAccessDto>();
         var scopesAdded = new List<PluginPermissionRequirement>();
@@ -289,7 +327,22 @@ public sealed class AppRegistrationPermissions : IAppRegistrationPermissions
 
             if (existingResource?.ResourceAccess is { } ra)
             {
-                staleRemoved += ra.Count(x => x.Id is not null && !requiredIds.Contains(x.Id));
+                var notRequired = ra.Where(x => x.Id is not null && !requiredIds.Contains(x.Id)).ToList();
+                if (protectedResources.Contains(resourceAppId))
+                {
+                    // Carry every existing entry through unchanged. One of
+                    // them may well be the GUID behind the malformed
+                    // declaration; we cannot tell which, so none of them go.
+                    foreach (var keep in notRequired)
+                    {
+                        newAccess.Add(keep);
+                        requiredIds.Add(keep.Id!);
+                    }
+                }
+                else
+                {
+                    staleRemoved += notRequired.Count;
+                }
             }
 
             newRra.Add(new RequiredResourceAccessDto(resourceAppId, newAccess));
@@ -301,6 +354,15 @@ public sealed class AppRegistrationPermissions : IAppRegistrationPermissions
             {
                 if (existingResource.ResourceAppId is null) continue;
                 if (requiredByResource.ContainsKey(existingResource.ResourceAppId)) continue;
+
+                // Protected resources keep their whole block: the only
+                // declaration naming them was one we could not provision.
+                if (protectedResources.Contains(existingResource.ResourceAppId))
+                {
+                    newRra.Add(existingResource);
+                    continue;
+                }
+
                 if (existingResource.ResourceAccess is not null)
                 {
                     staleRemoved += existingResource.ResourceAccess.Count;
@@ -309,6 +371,43 @@ public sealed class AppRegistrationPermissions : IAppRegistrationPermissions
         }
 
         return (newRra, scopesAdded, staleRemoved);
+    }
+
+    // Maps rejected declarations onto the resources whose stale cleanup has
+    // to be switched off. Deliberately coarse: protecting the whole resource
+    // needs no extra Graph round-trip and has no failure mode, whereas
+    // resolving each malformed scope *name* to its GUID via the resource
+    // service principal's oauth2PermissionScopes could fail (throttling, a
+    // missing service principal, a scope the resource no longer publishes)
+    // and every one of those failures would end in exactly the outcome we
+    // are guarding against - a revoke. The price of being coarse is that
+    // genuinely stale scopes on that resource survive until the plugin fixes
+    // its declaration, which is the strictly safer way to be wrong.
+    private HashSet<string> ResolveProtectedResources(
+        IReadOnlyList<RejectedRequirement> unprovisionable, string tenantId)
+    {
+        var resources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var rejected in unprovisionable)
+        {
+            string resourceAppId;
+            try
+            {
+                resourceAppId = AppRegistrationGraphClient.GetResourceAppId(rejected.Api);
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                // A plugin can hand us an undefined enum value; it names no
+                // resource we manage, so there is nothing to protect.
+                continue;
+            }
+
+            resources.Add(resourceAppId);
+            _logger.LogWarning(
+                "Stale cleanup disabled for resource {ResourceAppId} in tenant {TenantId}: {Source} declares {ScopeName} with ScopeId '{ScopeId}', which is not a GUID. " +
+                "The declaration cannot be provisioned, and its scope name cannot be matched against the app registration's scope ids, so existing scopes and grants for that resource are left exactly as they are.",
+                resourceAppId, tenantId, rejected.Source, rejected.ScopeName, rejected.ScopeId);
+        }
+        return resources;
     }
 
     private static HashSet<string> SplitScopes(string? scopeString)

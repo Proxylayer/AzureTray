@@ -35,3 +35,22 @@ public sealed record AppRegistrationCreateResult(
     AppRegistrationInfo App,
     int ScopesGranted,
     bool BrokerRedirectUriAdded);
+
+// A permission a plugin (or the host) declared that the app registration
+// layer cannot provision: PluginPermissionRequirement.ScopeId must be the
+// resource's oauth2PermissionScope GUID, and this one is not a GUID.
+//
+// Rejected declarations are carried alongside the required list rather than
+// silently discarded, because "we cannot provision this" must never turn
+// into "we may revoke this": EnsureAsync uses them to switch off stale
+// cleanup for the resource they target, so scopes the tenant already
+// consented to are left exactly as they are.
+//
+// Source is the plugin id (or "the host") the declaration came from —
+// PluginPermissionRequirement carries no origin, so attribution is captured
+// where the aggregation walks the loaded plugins.
+public sealed record RejectedRequirement(
+    string Source,
+    PermissionApi Api,
+    string ScopeName,
+    string ScopeId);

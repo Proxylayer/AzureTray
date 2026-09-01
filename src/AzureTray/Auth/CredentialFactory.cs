@@ -124,6 +124,69 @@ public sealed class CredentialFactory : ICredentialFactory
         }
     }
 
+    public async Task<IReadOnlyList<string>?> RefreshAndReadScopesAsync(
+        string tenantId, string resourceScope, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(tenantId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourceScope);
+
+        // Same per-tenant gate as ForceRefreshAsync so concurrent callers
+        // still collapse into one STS round-trip at a time. The cooldown is
+        // deliberately not applied: this path exists to re-ask while consent
+        // propagates, and returning a stale "yes" would defeat the point.
+        var gate = _refreshGates.GetOrAdd(tenantId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var context = new TokenRequestContext(
+                [resourceScope],
+                parentRequestId: null,
+                claims: BuildCacheBypassClaims());
+
+            AccessToken token;
+            try
+            {
+                token = await GetForTenant(tenantId)
+                    .GetTokenAsync(context, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (AuthenticationRequiredException)
+            {
+                _logger.LogInformation(
+                    "Scope check for tenant {TenantId} scope {Scope} skipped: no silently usable token (re-auth needed).",
+                    tenantId, resourceScope);
+                return null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex,
+                    "Scope check for tenant {TenantId} scope {Scope} could not acquire a token.",
+                    tenantId, resourceScope);
+                return null;
+            }
+
+            // A genuine STS round-trip just happened, so the background
+            // refresh path has nothing left to do for a while.
+            _lastForcedRefresh[tenantId] = DateTimeOffset.UtcNow;
+
+            var scopes = JwtAccessTokenScopes.TryRead(token.Token);
+            if (scopes is null)
+            {
+                // Acquired but unreadable: report the empty list so the caller
+                // can tell "token, contents unknown" from "no token at all".
+                _logger.LogDebug(
+                    "Token for tenant {TenantId} scope {Scope} carries no readable scp claim; its granted scopes cannot be verified.",
+                    tenantId, resourceScope);
+                return [];
+            }
+            return scopes;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
     // Acquires one scope's token twice: once normally (which serves whatever
     // MSAL has cached) and once with a claims challenge, which MSAL treats as
     // "skip the access-token cache" and satisfies from the refresh token — so
