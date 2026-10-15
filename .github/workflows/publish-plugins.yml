@@ -153,7 +153,7 @@ jobs:
       # restore/build time on branch pushes that didn't touch a plugin.
       - name: Setup .NET
         if: steps.pick.outputs.any == 'true'
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
 
