@@ -59,16 +59,17 @@ public sealed class PimPluginCapRowTests : IDisposable
         Assert.NotNull(row.Invoke);
     }
 
-    // A cap equal to the longest standard step restricts nothing, so the row
-    // stays quiet.
+    // A cap equal to the longest standard step restricts nothing, but the row
+    // still states it: a quiet row next to "(max 4h)" siblings reads as missing
+    // data rather than as "no restriction".
     [Fact]
-    public async Task EligibleRow_WithACapEqualToTheLongestStandardStep_HasNoMarker()
+    public async Task EligibleRow_WithACapEqualToTheLongestStandardStep_StillCarriesTheMaxSuffix()
     {
         var row = await RoleRowAsync(
             "Owner",
             new Scenario { GraphEligible = EntraOwnerJson, GraphPolicies = EntraPolicyJson("PT8H") });
 
-        Assert.Equal(EntraRowPrefix, row.Text);
+        Assert.Equal($"{EntraRowPrefix} (max 8h)", row.Text);
     }
 
     [Fact]

@@ -298,16 +298,17 @@ public sealed class ActivationDurationChoicesTests
         Assert.Null(ActivationDurationChoices.CapHint(Role(PimSource.AzureRbac, cap: null)));
     }
 
-    // A cap at or above the longest standard step does not restrict anything,
-    // so it stays quiet too.
+    // A cap at or above the longest standard step restricts nothing, but it is
+    // still shown: users read a quiet row next to "(max 4h)" siblings as
+    // missing data rather than as "no restriction".
     [Theory]
-    [InlineData(480)]
-    [InlineData(481)]
-    [InlineData(12 * 60)]
-    [InlineData(48 * 60)]
-    public void CapHint_CapNotTighterThanTheLongestStep_IsSilent(int capMinutes)
+    [InlineData(480, "8h")]
+    [InlineData(481, "8h 1m")]
+    [InlineData(12 * 60, "12h")]
+    [InlineData(48 * 60, "2d")]
+    public void CapHint_CapNotTighterThanTheLongestStep_StillRenders(int capMinutes, string expected)
     {
-        Assert.Null(ActivationDurationChoices.CapHint(
+        Assert.Equal(expected, ActivationDurationChoices.CapHint(
             Role(PimSource.AzureRbac, TimeSpan.FromMinutes(capMinutes))));
     }
 

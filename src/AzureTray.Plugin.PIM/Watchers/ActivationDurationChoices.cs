@@ -74,13 +74,16 @@ internal static class ActivationDurationChoices
         return null;
     }
 
-    // Menu-row hint for an eligible role, or null when there is nothing worth
-    // saying: an unknown cap (a policy-read failure is not news the user can
-    // act on) or a cap that does not restrict the standard steps.
+    // Menu-row hint for an eligible role: the policy's max activation duration
+    // whenever it is known. Earlier builds hid caps at or above the longest
+    // standard step (8h) as "not restrictive", but users read the silence as
+    // missing data, so every known cap is now shown. Null only for an unknown
+    // cap (a policy-read failure is not news the user can act on) or a
+    // nonsensical non-positive one.
     internal static string? CapHint(UnifiedEligibleRole role)
     {
         if (role.MaxActivationDuration is not { } cap) return null;
-        if (cap <= TimeSpan.Zero || cap >= StandardSteps[^1]) return null;
+        if (cap <= TimeSpan.Zero) return null;
         return EligibleRolesWatcher.FormatDuration(cap);
     }
 
