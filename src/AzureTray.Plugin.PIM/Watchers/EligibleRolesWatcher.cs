@@ -378,25 +378,32 @@ internal sealed class EligibleRolesWatcher : PollingWatcher
                 return;
             }
 
-            // Clamped to the role's policy maximum: offering a longer duration
-            // than the policy permits earns a 400 from the service that reads
-            // as a generic activation failure.
-            var choices = ActivationDurationChoices.For(role);
+            // Slider clamped to the role's policy maximum: offering a longer
+            // duration than the policy permits earns a 400 from the service
+            // that reads as a generic activation failure.
+            var slider = ActivationDurationChoices.For(role);
             var durationChoice = await Context.Notifier.ShowAsync(
-                new ChoiceRequest(
+                new DurationRequest(
                     Title: $"Activate {role.RoleName}",
                     Message: $"Activate on {role.ScopeDisplay}. Choose a duration.",
-                    Choices: choices.Select(c => c.Label).ToArray()),
+                    Minimum: slider.Minimum,
+                    Maximum: slider.Maximum,
+                    Step: slider.Step,
+                    InitialValue: slider.Initial),
                 cancellationToken).ConfigureAwait(false);
 
-            if (durationChoice is not ChoiceResult { SelectedChoice: { } pickedLabel }
-                || ActivationDurationChoices.Match(choices, pickedLabel) is not { } duration)
+            // Clamped again on the way back: the host's slider cannot leave
+            // the range, but the cap is what the service enforces, so a
+            // malformed result must never turn into a 400.
+            if (durationChoice is not DurationResult { Duration: var picked }
+                || picked <= TimeSpan.Zero)
             {
                 Context.Logger.LogDebug(
                     "Activation cancelled at duration prompt for {RoleName} on tenant {TenantId}.",
                     role.RoleName, Tenant.TenantId);
                 return;
             }
+            var duration = picked > slider.Maximum ? slider.Maximum : picked;
 
             var justification = await Context.Notifier.ShowAsync(
                 new TextInputRequest(

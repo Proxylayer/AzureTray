@@ -191,8 +191,8 @@ public sealed class EligibleRolesWatcherActivationScopeTests
     private static INotifier PromptingNotifier()
     {
         var notifier = Substitute.For<INotifier>();
-        notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ChoiceResult("1 hour", null));
+        notifier.ShowAsync(Arg.Any<DurationRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new DurationResult(TimeSpan.FromHours(1)));
         notifier.ShowAsync(Arg.Any<TextInputRequest>(), Arg.Any<CancellationToken>())
             .Returns(new TextInputResult("incident #42"));
         return notifier;

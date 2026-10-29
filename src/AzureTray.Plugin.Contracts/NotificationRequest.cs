@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 
 namespace AzureTray.Plugin.Contracts;
 
@@ -80,6 +81,26 @@ public sealed record ChoiceRequest(
     string Message,
     IReadOnlyList<string> Choices,
     bool AllowOther = false)
+    : NotificationRequest(Title, Message);
+
+/// <summary>
+/// Pick a duration on a slider between <see cref="Minimum"/> and
+/// <see cref="Maximum"/>, snapped to <see cref="Step"/> intervals. The UI
+/// states the currently selected duration next to the slider. Returns
+/// <see cref="DurationResult"/>.
+/// </summary>
+/// <remarks>
+/// <see cref="InitialValue"/> is where the thumb starts; the host clamps it
+/// into the range. <see cref="Maximum"/> is always selectable even when the
+/// range is not a whole number of steps.
+/// </remarks>
+public sealed record DurationRequest(
+    string Title,
+    string Message,
+    TimeSpan Minimum,
+    TimeSpan Maximum,
+    TimeSpan Step,
+    TimeSpan InitialValue)
     : NotificationRequest(Title, Message);
 
 /// <summary>

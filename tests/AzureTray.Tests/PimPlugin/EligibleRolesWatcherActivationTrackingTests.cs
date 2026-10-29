@@ -283,8 +283,8 @@ public sealed class EligibleRolesWatcherActivationTrackingTests : IDisposable
 
         var notifier = Substitute.For<INotifier>();
         // Duration prompt, then justification prompt.
-        notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ChoiceResult("4 hours", null));
+        notifier.ShowAsync(Arg.Any<DurationRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new DurationResult(TimeSpan.FromHours(4)));
         notifier.ShowAsync(Arg.Any<TextInputRequest>(), Arg.Any<CancellationToken>())
             .Returns(new TextInputResult("operations"));
         ctx.Notifier.Returns(notifier);

@@ -35,11 +35,13 @@ public sealed class PluginApiVersionTests
     [InlineData(2)]
     [InlineData(3)]
     [InlineData(4)]
+    [InlineData(5)]
     public void IsSupported_AcceptsKnownShippedVersions(int apiVersion)
     {
         // Every shipped API version must still load — the contract surface has
         // only ever evolved additively (API 4 added
-        // IPluginContext.RefreshTokenAsync as a default-implemented member).
+        // IPluginContext.RefreshTokenAsync as a default-implemented member;
+        // API 5 added DurationRequest/DurationResult, new notification types).
         Assert.True(PluginApiVersion.IsSupported(apiVersion));
     }
 
@@ -47,9 +49,9 @@ public sealed class PluginApiVersionTests
     // come with a contract change, and raising MinSupported locks out shipped
     // plugins, so both values are asserted rather than derived.
     [Fact]
-    public void Current_IsFour_AndMinSupportedIsStillOne()
+    public void Current_IsFive_AndMinSupportedIsStillOne()
     {
-        Assert.Equal(4, PluginApiVersion.Current);
+        Assert.Equal(5, PluginApiVersion.Current);
         Assert.Equal(1, PluginApiVersion.MinSupported);
     }
 }

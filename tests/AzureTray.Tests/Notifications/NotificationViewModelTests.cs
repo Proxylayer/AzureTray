@@ -150,6 +150,69 @@ public sealed class NotificationViewModelTests
     }
 
     [Fact]
+    public async Task Duration_SubmitsTheSliderPosition()
+    {
+        var tcs = NewCompletion();
+        var vm = new NotificationViewModel(
+            new DurationRequest(
+                "T", "M",
+                Minimum: System.TimeSpan.FromMinutes(30),
+                Maximum: System.TimeSpan.FromHours(8),
+                Step: System.TimeSpan.FromMinutes(30),
+                InitialValue: System.TimeSpan.FromHours(1)),
+            tcs);
+
+        Assert.True(vm.SubmitCommand.CanExecute(null)); // slider is always on a value
+        vm.SelectedMinutes = 150;
+        vm.SubmitCommand.Execute(null);
+
+        var result = await tcs.Task;
+        var duration = Assert.IsType<DurationResult>(result);
+        Assert.Equal(System.TimeSpan.FromMinutes(150), duration.Duration);
+    }
+
+    // The readout restates the thumb position in words — the "states the
+    // selected duration" half of the slider prompt.
+    [Fact]
+    public void Duration_LabelTracksTheThumb_AndEndsOfTrackAreCaptioned()
+    {
+        var vm = new NotificationViewModel(
+            new DurationRequest(
+                "T", "M",
+                Minimum: System.TimeSpan.FromMinutes(30),
+                Maximum: System.TimeSpan.FromHours(8),
+                Step: System.TimeSpan.FromMinutes(30),
+                InitialValue: System.TimeSpan.FromHours(1)),
+            NewCompletion());
+
+        Assert.Equal("1h", vm.SelectedDurationLabel);
+        vm.SelectedMinutes = 90;
+        Assert.Equal("1h 30m", vm.SelectedDurationLabel);
+        vm.SelectedMinutes = 30;
+        Assert.Equal("30 min", vm.SelectedDurationLabel);
+
+        Assert.Equal("30 min", vm.SliderMinimumLabel);
+        Assert.Equal("8h", vm.SliderMaximumLabel);
+    }
+
+    // An initial value outside the range clamps instead of rendering a thumb
+    // off the track (WPF would coerce silently and desync the readout).
+    [Fact]
+    public void Duration_InitialValueOutsideTheRange_IsClamped()
+    {
+        var vm = new NotificationViewModel(
+            new DurationRequest(
+                "T", "M",
+                Minimum: System.TimeSpan.FromMinutes(30),
+                Maximum: System.TimeSpan.FromHours(4),
+                Step: System.TimeSpan.FromMinutes(30),
+                InitialValue: System.TimeSpan.FromHours(8)),
+            NewCompletion());
+
+        Assert.Equal(240, vm.SelectedMinutes);
+    }
+
+    [Fact]
     public async Task DismissCommand_ResolvesWithDismissed()
     {
         var tcs = NewCompletion();

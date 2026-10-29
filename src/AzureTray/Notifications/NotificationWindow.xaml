@@ -185,6 +185,45 @@
                 </StackPanel>
             </StackPanel>
 
+            <!-- Duration slider (DurationRequest). The readout above the
+                 track restates the selected duration on every move, so the
+                 prompt always says in words what the thumb position means.
+                 SmallChange = the request's step keeps arrow keys moving one
+                 interval at a time; snapping keeps mouse drags on intervals
+                 too, while Maximum stays reachable even when the range is not
+                 a whole number of steps. -->
+            <StackPanel Grid.Row="2"
+                        Margin="14,0,14,0"
+                        Visibility="{Binding IsDuration, Converter={StaticResource BoolToVis}}">
+                <TextBlock Text="{Binding SelectedDurationLabel}"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           HorizontalAlignment="Center"
+                           AutomationProperties.LiveSetting="Polite"
+                           Foreground="{DynamicResource Brush.Text.Primary}"
+                           Margin="0,0,0,6"/>
+                <Slider x:Name="DurationSlider"
+                        Minimum="{Binding SliderMinimum, Mode=OneTime}"
+                        Maximum="{Binding SliderMaximum, Mode=OneTime}"
+                        Value="{Binding SelectedMinutes, Mode=TwoWay}"
+                        TickFrequency="{Binding SliderStep, Mode=OneTime}"
+                        SmallChange="{Binding SliderStep, Mode=OneTime}"
+                        LargeChange="{Binding SliderStep, Mode=OneTime}"
+                        IsSnapToTickEnabled="True"
+                        TickPlacement="BottomRight"
+                        AutomationProperties.Name="Duration"/>
+                <Grid Margin="0,2,0,0">
+                    <TextBlock Text="{Binding SliderMinimumLabel}"
+                               FontSize="11"
+                               Foreground="{DynamicResource Brush.Text.Muted}"
+                               HorizontalAlignment="Left"/>
+                    <TextBlock Text="{Binding SliderMaximumLabel}"
+                               FontSize="11"
+                               Foreground="{DynamicResource Brush.Text.Muted}"
+                               HorizontalAlignment="Right"/>
+                </Grid>
+            </StackPanel>
+
             <!-- TextInput input. The request's Placeholder renders as a
                  watermark overlay (visible only while the box is empty) and
                  doubles as the box's accessible name, so a screen reader says

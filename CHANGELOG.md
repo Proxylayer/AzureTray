@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The activation duration prompt is now a slider, in 30-minute steps, that states the selected duration** (`AzureTray.Plugin.PIM`, host, `AzureTray.Plugin.Contracts` 1.5.0 → 1.6.0). The fixed 1h/4h/8h choice list is replaced by a slider from 30 minutes up to the role's policy maximum (8 hours when the policy could not be read), snapped to 30-minute intervals, with a readout above the track that restates the thumb position in words ("1h 30m") and captions at both ends of the track. The thumb starts at 1 hour (or the cap, when tighter); arrow keys step one interval at a time and Enter submits. New contract types `DurationRequest` / `DurationResult` (additive: `PluginApiVersion.Current` 4 → 5, `MinSupported` unchanged at 1). The watcher clamps the returned duration to the policy cap before activating, so a malformed host result can never turn into the service's 400.
+
+- **A role's menu row now always shows its max activation duration when the policy was read** (`AzureTray.Plugin.PIM`). The "(max …)" suffix used to be suppressed for caps of 8 hours or more as "not restrictive", but a quiet row next to "(max 4h)" siblings reads as missing data rather than as "no restriction" — two users independently reported it as a bug. A row now stays quiet only when the cap is genuinely unknown (the policy read failed), where printing the fallback ceiling as if it were the role's own policy would be a lie.
+
 ### Fixed
 
 - **A multi-scope PIM read no longer sits idle for half a second after its last request** (`AzureTray.Plugin.PIM` 0.12.0 → 0.12.1). ARM fan-out reads scopes two at a time and waits 500 ms between batches so ARM is not hit with the whole set at once. The wait was applied after *every* full batch, including the last one — and since the batch size is 2, any fan-out over an even number of scopes ended by pausing 500 ms with no request left to space out. It throttled nothing; it just delayed the caller, on every eligibility, assignment and policy read. The pause is now taken only while scopes remain, so an even-numbered fan-out returns half a second sooner and an odd-numbered one is unchanged. The spacing between consecutive batches — the part that does the throttling — is untouched.

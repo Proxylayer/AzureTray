@@ -26,6 +26,12 @@ public sealed record ChoiceResult(string? SelectedChoice, string? OtherText) : N
 public sealed record TextInputResult(string Text) : NotificationResult;
 
 /// <summary>
+/// Result from a <see cref="DurationRequest"/>: the duration the slider was
+/// on when the user submitted.
+/// </summary>
+public sealed record DurationResult(System.TimeSpan Duration) : NotificationResult;
+
+/// <summary>
 /// Result from an <see cref="ActionRequest"/>.
 /// <see cref="ActionInvoked"/> is <c>true</c> when the user clicked the primary
 /// action button; <c>false</c> when they dismissed.

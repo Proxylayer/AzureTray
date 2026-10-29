@@ -55,6 +55,12 @@ public partial class NotificationWindow : Window
             // Single call-to-action prompt: land on its (IsDefault) button.
             ActionButton.Focus();
         }
+        else if (DataContext is NotificationViewModel { IsDuration: true })
+        {
+            // Land on the slider so arrow keys step the duration immediately;
+            // Enter (once armed) submits via the default button.
+            DurationSlider.Focus();
+        }
     }
 
     /// <summary>

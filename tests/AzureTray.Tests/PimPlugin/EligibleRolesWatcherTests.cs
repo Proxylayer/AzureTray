@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -124,8 +124,8 @@ public sealed class EligibleRolesWatcherTests
             .Returns(GraphRequest("req-1", "Provisioned"));
         var arm = NewArm();
         var notifier = Substitute.For<INotifier>();
-        notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ChoiceResult("4 hours", null));
+        notifier.ShowAsync(Arg.Any<DurationRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new DurationResult(TimeSpan.FromHours(4)));
         notifier.ShowAsync(Arg.Any<TextInputRequest>(), Arg.Any<CancellationToken>())
             .Returns(new TextInputResult("operations"));
 
@@ -166,8 +166,8 @@ public sealed class EligibleRolesWatcherTests
             Arg.Any<TimeSpan>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(ArmRequest("req-arm-1", "Provisioned"));
         var notifier = Substitute.For<INotifier>();
-        notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ChoiceResult("1 hour", null));
+        notifier.ShowAsync(Arg.Any<DurationRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new DurationResult(TimeSpan.FromHours(1)));
         notifier.ShowAsync(Arg.Any<TextInputRequest>(), Arg.Any<CancellationToken>())
             .Returns(new TextInputResult("incident #42"));
 
@@ -201,7 +201,7 @@ public sealed class EligibleRolesWatcherTests
         graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
         var arm = NewArm();
         var notifier = Substitute.For<INotifier>();
-        notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
+        notifier.ShowAsync(Arg.Any<DurationRequest>(), Arg.Any<CancellationToken>())
             .Returns(new DismissedResult());
 
         var watcher = NewWatcher(graph, arm, notifier);
@@ -229,8 +229,8 @@ public sealed class EligibleRolesWatcherTests
         graph.GetSignedInUserIdAsync(Arg.Any<CancellationToken>()).Returns("prin-1");
         var arm = NewArm();
         var notifier = Substitute.For<INotifier>();
-        notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ChoiceResult("1 hour", null));
+        notifier.ShowAsync(Arg.Any<DurationRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new DurationResult(TimeSpan.FromHours(1)));
         notifier.ShowAsync(Arg.Any<TextInputRequest>(), Arg.Any<CancellationToken>())
             .Returns(new TextInputResult("   "));
 

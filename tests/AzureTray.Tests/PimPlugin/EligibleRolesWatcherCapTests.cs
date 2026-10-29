@@ -229,13 +229,13 @@ public sealed class EligibleRolesWatcherCapTests : IDisposable
 
     // ---- the clamp where it is visible: the activation prompt -------------
 
-    // The whole point of reading the cap: the prompt must not offer a duration
-    // the service will reject, and the pick must round-trip back to the exact
-    // TimeSpan behind the chosen label.
+    // The whole point of reading the cap: the slider must not reach a duration
+    // the service will reject, and the pick must round-trip to the activation
+    // call unchanged.
     [Fact]
-    public async Task HandleActivationAsync_OffersOnlyDurationsWithinTheCap_AndActivatesForThePick()
+    public async Task HandleActivationAsync_SlidesOnlyWithinTheCap_AndActivatesForThePick()
     {
-        ChoiceRequest? prompt = null;
+        DurationRequest? prompt = null;
         var graph = NewGraph(eligible: new[] { GraphEligible("Owner", "role-owner") });
         graph.GetRolePoliciesAsync(Arg.Any<CancellationToken>())
             .Returns(EntraPolicies(("role-owner", TimeSpan.FromHours(2))));
@@ -245,11 +245,11 @@ public sealed class EligibleRolesWatcherCapTests : IDisposable
             .Returns(GraphRequest("req-1", "Provisioned"));
 
         var notifier = Substitute.For<INotifier>();
-        notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
+        notifier.ShowAsync(Arg.Any<DurationRequest>(), Arg.Any<CancellationToken>())
             .Returns<NotificationResult>(call =>
             {
-                prompt = call.Arg<ChoiceRequest>();
-                return new ChoiceResult("2 hours", null);
+                prompt = call.Arg<DurationRequest>();
+                return new DurationResult(TimeSpan.FromHours(2));
             });
         notifier.ShowAsync(Arg.Any<TextInputRequest>(), Arg.Any<CancellationToken>())
             .Returns(new TextInputResult("incident #42"));
@@ -261,24 +261,31 @@ public sealed class EligibleRolesWatcherCapTests : IDisposable
             Assert.Single(watcher.CurrentEligibleRoles), CancellationToken.None);
 
         Assert.NotNull(prompt);
-        Assert.Equal(new[] { "1 hour", "2 hours" }, prompt!.Choices);
+        Assert.Equal(TimeSpan.FromMinutes(30), prompt!.Minimum);
+        Assert.Equal(TimeSpan.FromHours(2), prompt.Maximum);
+        Assert.Equal(TimeSpan.FromMinutes(30), prompt.Step);
         await graph.Received(1).ActivateRoleAsync(
             "prin-1", "role-owner", "/", TimeSpan.FromHours(2), "incident #42", Arg.Any<CancellationToken>());
     }
 
-    // A label the current (clamped) list never offered — a stale prompt, or a
-    // notifier echoing something else — must abandon the activation rather than
-    // send a duration above the cap for the service to reject.
+    // A result above the cap — a buggy or stale host slider — must never reach
+    // the service, where it would earn a 400; it is clamped to the cap instead.
     [Fact]
-    public async Task HandleActivationAsync_LabelAboveTheCap_DoesNotActivate()
+    public async Task HandleActivationAsync_ResultAboveTheCap_ActivatesClampedToTheCap()
     {
         var graph = NewGraph(eligible: new[] { GraphEligible("Owner", "role-owner") });
         graph.GetRolePoliciesAsync(Arg.Any<CancellationToken>())
             .Returns(EntraPolicies(("role-owner", TimeSpan.FromHours(2))));
+        graph.ActivateRoleAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<TimeSpan>(),
+            Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(GraphRequest("req-1", "Provisioned"));
 
         var notifier = Substitute.For<INotifier>();
-        notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ChoiceResult("8 hours", null));
+        notifier.ShowAsync(Arg.Any<DurationRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new DurationResult(TimeSpan.FromHours(8)));
+        notifier.ShowAsync(Arg.Any<TextInputRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new TextInputResult("incident #42"));
 
         var watcher = NewWatcher(graph, NewArm(), notifier);
         await watcher.PollAsync(CancellationToken.None);
@@ -286,8 +293,8 @@ public sealed class EligibleRolesWatcherCapTests : IDisposable
         await watcher.HandleActivationAsync(
             Assert.Single(watcher.CurrentEligibleRoles), CancellationToken.None);
 
-        await graph.DidNotReceive().ActivateRoleAsync(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<TimeSpan>(),
+        await graph.Received(1).ActivateRoleAsync(
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), TimeSpan.FromHours(2),
             Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 

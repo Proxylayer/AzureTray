@@ -413,8 +413,8 @@ public sealed class EligibleRolesWatcherGroupTests : IDisposable
                 Principal: null, Group: null));
 
         var notifier = Substitute.For<INotifier>();
-        notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ChoiceResult("4 hours", null));
+        notifier.ShowAsync(Arg.Any<DurationRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new DurationResult(TimeSpan.FromHours(4)));
         notifier.ShowAsync(Arg.Any<TextInputRequest>(), Arg.Any<CancellationToken>())
             .Returns(new TextInputResult("on call"));
 
@@ -439,8 +439,8 @@ public sealed class EligibleRolesWatcherGroupTests : IDisposable
     {
         var groups = NewGroups();
         var notifier = Substitute.For<INotifier>();
-        notifier.ShowAsync(Arg.Any<ChoiceRequest>(), Arg.Any<CancellationToken>())
-            .Returns(new ChoiceResult("1 hour", null));
+        notifier.ShowAsync(Arg.Any<DurationRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new DurationResult(TimeSpan.FromHours(1)));
         notifier.ShowAsync(Arg.Any<TextInputRequest>(), Arg.Any<CancellationToken>())
             .Returns(new TextInputResult("why"));
 

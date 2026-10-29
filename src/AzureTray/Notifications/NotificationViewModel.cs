@@ -25,7 +25,8 @@ public sealed partial class NotificationViewModel : ObservableObject
     public bool IsTextInput => Request is TextInputRequest;
     public bool IsInformation => Request is InformationRequest;
     public bool IsAction => Request is ActionRequest;
-    public bool IsSubmittable => IsChoice || IsTextInput;
+    public bool IsDuration => Request is DurationRequest;
+    public bool IsSubmittable => IsChoice || IsTextInput || IsDuration;
 
     // Resolved label for the ActionRequest primary button. Null for any
     // other request type so the XAML binding stays well-defined.
@@ -57,6 +58,17 @@ public sealed partial class NotificationViewModel : ObservableObject
     public bool AllowOther { get; }
     public string? Placeholder { get; }
 
+    // Slider geometry for DurationRequest, in whole minutes — WPF's Slider
+    // binds doubles, and minutes keep a 30-minute Step an exact integer
+    // (ticks-as-double would lose snapping to rounding).
+    public double SliderMinimum { get; }
+    public double SliderMaximum { get; }
+    public double SliderStep { get; }
+
+    // End-of-track captions under the slider.
+    public string SliderMinimumLabel => FormatDuration(TimeSpan.FromMinutes(SliderMinimum));
+    public string SliderMaximumLabel => FormatDuration(TimeSpan.FromMinutes(SliderMaximum));
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SubmitCommand))]
     private string? _selectedChoice;
@@ -72,6 +84,15 @@ public sealed partial class NotificationViewModel : ObservableObject
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SubmitCommand))]
     private string _inputText = string.Empty;
+
+    // The slider thumb's position, in minutes. The window binds the Slider's
+    // Value here; SelectedDurationLabel re-renders on every move so the prompt
+    // always states the duration the thumb is on.
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SelectedDurationLabel))]
+    private double _selectedMinutes;
+
+    public string SelectedDurationLabel => FormatDuration(TimeSpan.FromMinutes(SelectedMinutes));
 
     public NotificationViewModel(
         NotificationRequest request,
@@ -92,6 +113,16 @@ public sealed partial class NotificationViewModel : ObservableObject
         {
             Placeholder = text.Placeholder;
             InputText = text.InitialValue ?? string.Empty;
+        }
+        if (request is DurationRequest duration)
+        {
+            // Degenerate ranges collapse to a single stop rather than
+            // throwing: the slider then renders pinned at the one legal value.
+            SliderMinimum = Math.Max(0, duration.Minimum.TotalMinutes);
+            SliderMaximum = Math.Max(SliderMinimum, duration.Maximum.TotalMinutes);
+            SliderStep = Math.Max(1, duration.Step.TotalMinutes);
+            SelectedMinutes = Math.Clamp(
+                duration.InitialValue.TotalMinutes, SliderMinimum, SliderMaximum);
         }
     }
 
@@ -118,6 +149,9 @@ public sealed partial class NotificationViewModel : ObservableObject
                 break;
             case TextInputRequest:
                 Complete(new TextInputResult(InputText));
+                break;
+            case DurationRequest:
+                Complete(new DurationResult(TimeSpan.FromMinutes(SelectedMinutes)));
                 break;
         }
     }
@@ -154,8 +188,22 @@ public sealed partial class NotificationViewModel : ObservableObject
                 (IsOtherSelected && !string.IsNullOrWhiteSpace(OtherText)) ||
                 (!IsOtherSelected && SelectedChoice is not null),
             TextInputRequest => !string.IsNullOrWhiteSpace(InputText),
+            // The slider is always on a legal value, so Submit is always live.
+            DurationRequest => true,
             _ => false,
         };
+    }
+
+    // Mirrors the compact duration wording plugins use in menu rows ("30 min",
+    // "1h 30m", "2d") so the slider's readout and the tray text agree.
+    internal static string FormatDuration(TimeSpan d)
+    {
+        if (d.TotalMinutes < 60) return $"{(int)d.TotalMinutes} min";
+        if (d.TotalHours < 24) return d.Minutes == 0 ? $"{(int)d.TotalHours}h" : $"{(int)d.TotalHours}h {d.Minutes}m";
+        var days = (int)d.TotalDays;
+        var rem = d - TimeSpan.FromDays(days);
+        if (rem == TimeSpan.Zero) return $"{days}d";
+        return rem.Minutes == 0 ? $"{days}d {(int)rem.TotalHours}h" : $"{days}d {(int)rem.TotalHours}h {rem.Minutes}m";
     }
 
     // Selecting a list choice deselects the "Other" radio (and vice versa).
