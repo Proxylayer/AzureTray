@@ -302,8 +302,8 @@ public sealed class PimPluginCapRowTests : IDisposable
             Assert.True(result.Passed, result.Message);
 
             var openRequest = plugin.GetMenuItems()[1];
-            Assert.NotNull(openRequest.Children);
-            return openRequest.Children!.Single(
+            Assert.NotNull(openRequest.SearchProvider);
+            return openRequest.SearchProvider!(string.Empty).Single(
                 c => c.Text.Contains(roleNameFragment, StringComparison.Ordinal));
         }
         finally

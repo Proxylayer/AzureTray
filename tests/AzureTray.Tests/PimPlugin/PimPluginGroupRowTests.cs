@@ -369,8 +369,8 @@ public sealed class PimPluginGroupRowTests : IDisposable
     private static IReadOnlyList<PluginMenuItem> OpenRequestChildren(AzureTray.Plugin.PIM.PimPlugin plugin)
     {
         var openRequest = plugin.GetMenuItems()[1];
-        Assert.NotNull(openRequest.Children);
-        return openRequest.Children!;
+        Assert.NotNull(openRequest.SearchProvider);
+        return openRequest.SearchProvider!(string.Empty);
     }
 
     private IPluginContext NewContext(Scenario scenario)

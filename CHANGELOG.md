@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The Open Request menu is searchable** (`AzureTray.Plugin.PIM`). The submenu now carries the host's search box (the same one LAPS Passwords uses): typing filters the role rows live, matching case-insensitively on the role name or its scope — so "uat" finds every role on a uat subscription. Tenants, and source sections (Entra ID / Azure RBAC / Entra Groups), with nothing left for the query drop out whole, headers included; a query matching nothing shows a single "No matches" row. An empty search shows the full menu exactly as before.
+
 ### Changed
 
 - **The activation duration prompt is now a slider, in 30-minute steps, that states the selected duration** (`AzureTray.Plugin.PIM`, host, `AzureTray.Plugin.Contracts` 1.5.0 → 1.6.0). The fixed 1h/4h/8h choice list is replaced by a slider from 30 minutes up to the role's policy maximum (8 hours when the policy could not be read), snapped to 30-minute intervals, with a readout above the track that restates the thumb position in words ("1h 30m") and captions at both ends of the track. The thumb starts at 1 hour (or the cap, when tighter); arrow keys step one interval at a time and Enter submits. New contract types `DurationRequest` / `DurationResult` (additive: `PluginApiVersion.Current` 4 → 5, `MinSupported` unchanged at 1). The watcher clamps the returned duration to the policy cap before activating, so a malformed host result can never turn into the service's 400.

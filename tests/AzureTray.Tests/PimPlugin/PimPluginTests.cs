@@ -50,10 +50,15 @@ public sealed class PimPluginTests
             var openRequest = items[1];
             Assert.Equal("🔑", openRequest.Icon);
             Assert.Contains("Open Request", openRequest.Text, StringComparison.Ordinal);
-            Assert.NotNull(openRequest.Children);
-            Assert.Contains(openRequest.Children!, c => c.Text == "Contoso" && c.Icon == "↻" && c.Invoke is not null);
-            Assert.Contains(openRequest.Children!, c => c.Text == "Fabrikam" && c.Icon == "↻" && c.Invoke is not null);
-            Assert.Contains(openRequest.Children!, c => c.Text == "No eligible roles" && !c.IsEnabled);
+            // Open Request is a searchable submenu — the host seeds it from
+            // SearchProvider("") instead of Children.
+            Assert.Null(openRequest.Children);
+            Assert.NotNull(openRequest.SearchProvider);
+            Assert.Equal("Search roles…", openRequest.SearchPlaceholder);
+            var rows = openRequest.SearchProvider!(string.Empty);
+            Assert.Contains(rows, c => c.Text == "Contoso" && c.Icon == "↻" && c.Invoke is not null);
+            Assert.Contains(rows, c => c.Text == "Fabrikam" && c.Icon == "↻" && c.Invoke is not null);
+            Assert.Contains(rows, c => c.Text == "No eligible roles" && !c.IsEnabled);
         }
         finally
         {

@@ -173,28 +173,52 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
 
     private PluginMenuItem BuildOpenRequestMenu()
     {
-        var eligibleWatchers = EligibleWatchersSnapshot().ToArray();
         var totalEligible = 0;
-        foreach (var watcher in eligibleWatchers)
+        foreach (var watcher in EligibleWatchersSnapshot())
         {
             totalEligible += watcher.CurrentEligibleRoles.Count;
         }
 
+        var label = totalEligible > 0
+            ? $"Open Request ({totalEligible} role{(totalEligible == 1 ? "" : "s")})"
+            : "Open Request";
+
+        return new PluginMenuItem(
+            Text: label,
+            Icon: "🔑",
+            SearchProvider: BuildOpenRequestRows,
+            SearchPlaceholder: "Search roles…")
+        { Key = "pim.openRequest" };
+    }
+
+    // Rows for the Open Request submenu, rebuilt on every search keystroke.
+    // An empty query shows everything; otherwise a role stays visible when the
+    // query matches its name or its scope (so "uat" finds every uat-sub role),
+    // and tenants with nothing left are dropped whole — header included — so a
+    // search never scrolls past empty sections.
+    private List<PluginMenuItem> BuildOpenRequestRows(string query)
+    {
+        var hasQuery = !string.IsNullOrWhiteSpace(query);
         var children = new List<PluginMenuItem>();
-        var first = true;
-        foreach (var watcher in eligibleWatchers)
+        foreach (var watcher in EligibleWatchersSnapshot())
         {
             var w = watcher;
+            var roles = hasQuery
+                ? w.CurrentEligibleRoles.Where(r => MatchesQuery(r, query)).ToList()
+                : (IReadOnlyList<UnifiedEligibleRole>)w.CurrentEligibleRoles;
+            if (hasQuery && roles.Count == 0)
+            {
+                continue;
+            }
+
             AppendTenantHeader(
                 children,
-                first,
+                first: children.Count == 0,
                 $"pim.eligible.refresh.{w.TenantId}",
                 w.TenantDisplayName,
                 w.IsPolling,
                 () => _ = w.PollAsync(CancellationToken.None));
-            first = false;
 
-            var roles = w.CurrentEligibleRoles;
             if (roles.Count == 0)
             {
                 children.Add(new PluginMenuItem("No eligible roles", IsEnabled: false)
@@ -224,13 +248,18 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             AppendSourceGroup(children, "Entra Groups", entraGroups, w);
         }
 
-        var label = totalEligible > 0
-            ? $"Open Request ({totalEligible} role{(totalEligible == 1 ? "" : "s")})"
-            : "Open Request";
+        if (children.Count == 0 && hasQuery)
+        {
+            children.Add(new PluginMenuItem("No matches", IsEnabled: false)
+            { Key = "pim.eligibleNoMatches" });
+        }
 
-        return new PluginMenuItem(Text: label, Icon: "🔑", Children: children)
-        { Key = "pim.openRequest" };
+        return children;
     }
+
+    private static bool MatchesQuery(UnifiedEligibleRole role, string query)
+        => role.RoleName.Contains(query, StringComparison.OrdinalIgnoreCase)
+            || role.ScopeDisplay.Contains(query, StringComparison.OrdinalIgnoreCase);
 
     // Opens a tenant's section in either top-level menu: a separator between
     // tenants (never before the first), then the tenant's refresh row.
