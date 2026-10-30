@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-10-30
+
 ### Added
 
 - **The Open Request menu is searchable** (`AzureTray.Plugin.PIM`). The submenu now carries the host's search box (the same one LAPS Passwords uses): typing filters the role rows live, matching case-insensitively on the role name or its scope — so "uat" finds every role on a uat subscription. Tenants, and source sections (Entra ID / Azure RBAC / Entra Groups), with nothing left for the query drop out whole, headers included; a query matching nothing shows a single "No matches" row. An empty search shows the full menu exactly as before.
@@ -348,7 +350,8 @@ The accessibility work that ran through 0.12.0, 0.12.1 and 0.12.2 — the keyboa
 
 - This release is foundation only; no features from `Azure.PIM.Tray` have been ported yet.
 
-[Unreleased]: https://github.com/Proxylayer/AzureTray/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/Proxylayer/AzureTray/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/Proxylayer/AzureTray/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Proxylayer/AzureTray/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/Proxylayer/AzureTray/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/Proxylayer/AzureTray/compare/v0.12.0...v0.12.1
