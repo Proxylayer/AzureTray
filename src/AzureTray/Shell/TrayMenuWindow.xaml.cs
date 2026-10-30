@@ -102,6 +102,11 @@ public partial class TrayMenuWindow : Window
     // moved a row-and-a-half per visible lurch (40 DIP at 300ms) and were
     // reported as far too fast; the per-tick step is also what the initial
     // hover jumps, so it must stay small.
+    //
+    // These are DIP only because the ListBox sets
+    // VirtualizingPanel.ScrollUnit="Pixel". Under the virtualizing default
+    // (Item), VerticalOffset counts rows, and the same numbers flew through
+    // 60 rows a second — the whole menu in an eyeblink.
     private const double ScrollStepDip = 3;
     private static readonly TimeSpan ScrollTickInterval = TimeSpan.FromMilliseconds(50);
 

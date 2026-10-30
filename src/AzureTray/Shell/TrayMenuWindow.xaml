@@ -376,6 +376,7 @@
                          MaxHeight="500"
                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                          ScrollViewer.VerticalScrollBarVisibility="Hidden"
+                         VirtualizingPanel.ScrollUnit="Pixel"
                          KeyboardNavigation.DirectionalNavigation="Cycle"
                          MouseLeftButtonUp="OnItemMouseLeftButtonUp"
                          MouseRightButtonUp="OnItemMouseRightButtonUp"
