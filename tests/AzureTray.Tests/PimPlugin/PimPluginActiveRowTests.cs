@@ -41,14 +41,16 @@ public sealed class PimPluginActiveRowTests : IDisposable
         Assert.Equal("✓", row.Icon);
     }
 
-    // Unchanged from before the countdown existed: an inactive row is clickable
-    // and carries no marker at all.
+    // An inactive row is clickable and carries no active marker — just the
+    // cap suffix every eligible Entra row states.
     [Fact]
-    public async Task InactiveRow_IsUnchanged()
+    public async Task InactiveRow_StaysClickable_WithNoActiveMarker()
     {
         var row = await RoleRowAsync(NoActivesJson);
 
-        Assert.Equal(RowPrefix, row.Text);
+        // No policy is readable in this harness, so the cap suffix is the
+        // service's own 8h ceiling on Entra activations.
+        Assert.Equal($"{RowPrefix} (max 8h)", row.Text);
         Assert.True(row.IsEnabled);
         Assert.NotNull(row.Invoke);
         Assert.NotNull(row.ContextItems);

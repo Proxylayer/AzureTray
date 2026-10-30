@@ -44,15 +44,17 @@ internal static class ActivationDurationChoices
                 ? FallbackCeiling
                 : null);
 
-    // Menu-row hint for an eligible role: the policy's max activation duration
-    // whenever it is known. Earlier builds hid caps at or above the longest
-    // standard step (8h) as "not restrictive", but users read the silence as
-    // missing data, so every known cap is now shown. Null only for an unknown
-    // cap (a policy-read failure is not news the user can act on) or a
-    // nonsensical non-positive one.
+    // Menu-row hint for an eligible role: the effective activation cap — the
+    // policy's value when read, else the service's documented 8h ceiling for
+    // Graph-served sources (Entra ID and groups), so those rows state a limit
+    // even when the policy read failed; the ceiling is real either way, not a
+    // guess. Earlier builds hid caps at or above the longest standard step (8h)
+    // as "not restrictive", but users read the silence as missing data. Null
+    // only for ARM with an unknown cap (no documented ceiling exists to print)
+    // or a nonsensical non-positive value.
     internal static string? CapHint(UnifiedEligibleRole role)
     {
-        if (role.MaxActivationDuration is not { } cap) return null;
+        if (EffectiveCap(role) is not { } cap) return null;
         if (cap <= TimeSpan.Zero) return null;
         return EligibleRolesWatcher.FormatDuration(cap);
     }

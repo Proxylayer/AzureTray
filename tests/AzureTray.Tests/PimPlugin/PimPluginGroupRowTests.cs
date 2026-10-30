@@ -45,7 +45,9 @@ public sealed class PimPluginGroupRowTests : IDisposable
         var children = await OpenRequestChildrenAsync(new Scenario { GroupEligible = OneGroupJson });
 
         var row = Assert.Single(children, c => c.Text.StartsWith("Member (", StringComparison.Ordinal));
-        Assert.Equal("Member (Contoso SQL Admins)", row.Text);
+        // No policy was readable, so the suffix is the service's own 8h
+        // ceiling on group activations.
+        Assert.Equal("Member (Contoso SQL Admins) (max 8h)", row.Text);
         Assert.True(row.IsEnabled);
         Assert.NotNull(row.Invoke);
     }
@@ -62,7 +64,7 @@ public sealed class PimPluginGroupRowTests : IDisposable
         var texts = children.Select(c => c.Text).ToList();
         var entraHeader = texts.IndexOf("Entra ID");
         var groupHeader = texts.IndexOf("Entra Groups");
-        var groupRow = texts.IndexOf("Member (Contoso SQL Admins)");
+        var groupRow = texts.FindIndex(t => t.StartsWith("Member (Contoso SQL Admins)", StringComparison.Ordinal));
 
         Assert.True(entraHeader >= 0, "the Entra ID header is missing");
         Assert.True(groupHeader > entraHeader, "the Entra Groups header must follow the Entra ID group");
@@ -170,9 +172,9 @@ public sealed class PimPluginGroupRowTests : IDisposable
         Assert.Equal(
             new[]
             {
-                "Member (Alpha Admins)",
-                "Owner (Alpha Admins)",
-                "Member (Beta Admins)",
+                "Member (Alpha Admins) (max 8h)",
+                "Owner (Alpha Admins) (max 8h)",
+                "Member (Beta Admins) (max 8h)",
             },
             groupRows);
     }

@@ -203,14 +203,22 @@ public sealed class ActivationDurationChoicesTests
 
     // ---- CapHint ----------------------------------------------------------
 
-    // Nothing to say when the cap was never read: a policy-read failure is not
-    // news the user can act on, and printing the 8h Entra fallback as if it were
-    // the role's own policy would be a lie. (PimSource is internal, so these are
-    // two Facts rather than one Theory — an InlineData of it would not compile.)
+    // An unread cap still renders on Graph-served sources: the service itself
+    // bounds Entra ID and group activations at 8 hours, so the ceiling is a
+    // real limit whether or not the policy read succeeded. ARM has no such
+    // documented ceiling, so an unknown ARM cap stays quiet — there is nothing
+    // true to print. (PimSource is internal, so these are Facts rather than
+    // one Theory — an InlineData of it would not compile.)
     [Fact]
-    public void CapHint_EntraWithUnknownCap_IsSilent()
+    public void CapHint_EntraWithUnknownCap_RendersTheServiceCeiling()
     {
-        Assert.Null(ActivationDurationChoices.CapHint(Role(PimSource.EntraId, cap: null)));
+        Assert.Equal("8h", ActivationDurationChoices.CapHint(Role(PimSource.EntraId, cap: null)));
+    }
+
+    [Fact]
+    public void CapHint_GroupWithUnknownCap_RendersTheServiceCeiling()
+    {
+        Assert.Equal("8h", ActivationDurationChoices.CapHint(GroupRole(cap: null)));
     }
 
     [Fact]

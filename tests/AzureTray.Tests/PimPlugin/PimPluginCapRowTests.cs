@@ -16,9 +16,10 @@ namespace AzureTray.Tests.PimPlugin;
 // The activation-cap suffix on eligible-role rows, driven end to end: canned
 // Graph/ARM responses in, exact row text out. The row text is the only slot the
 // host gives for right-hand info, so these strings are the contract. The rule
-// being pinned is that the marker appears only when a cap was actually read AND
-// is tighter than the longest duration otherwise offered — a fallback ceiling
-// must never be printed as if it were the role's own policy.
+// being pinned is that the marker states the effective cap: the policy's value
+// when read, else the service's documented 8h ceiling on Graph-served sources.
+// Only ARM with an unreadable policy stays quiet — ARM has no documented
+// ceiling, so there is nothing true to print.
 public sealed class PimPluginCapRowTests : IDisposable
 {
     private const string EntraRowPrefix = "Owner (Entra ID directory)";
@@ -44,17 +45,18 @@ public sealed class PimPluginCapRowTests : IDisposable
         Assert.Equal($"{EntraRowPrefix} (max 2h)", row.Text);
     }
 
-    // The cap could not be read (403 / missing rule). Entra activation still
-    // clamps to the documented 8h ceiling internally, but the row must NOT say
-    // "max 8h" — that would present a service default as this role's policy.
+    // The cap could not be read (403 / missing rule). The service itself still
+    // bounds Entra activations at 8 hours, so the row states that ceiling —
+    // a real limit either way — rather than going quiet next to siblings
+    // whose policies were readable.
     [Fact]
-    public async Task EligibleRow_WithAnUnreadableCap_HasNoMarker()
+    public async Task EligibleRow_WithAnUnreadableCap_StatesTheServiceCeiling()
     {
         var row = await RoleRowAsync(
             "Owner",
             new Scenario { GraphEligible = EntraOwnerJson, GraphPolicies = null });
 
-        Assert.Equal(EntraRowPrefix, row.Text);
+        Assert.Equal($"{EntraRowPrefix} (max 8h)", row.Text);
         Assert.True(row.IsEnabled);
         Assert.NotNull(row.Invoke);
     }

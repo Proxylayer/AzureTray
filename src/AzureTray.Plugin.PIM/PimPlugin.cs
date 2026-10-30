@@ -349,10 +349,11 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
     // so the value is accurate when the menu opens and never ticks stale in
     // place. Permanent assignments (and any end time already past) keep the
     // bare marker.
-    // Suffix on an eligible (inactive) row when the role's PIM policy caps
-    // activation tighter than the longest duration otherwise offered — the row
-    // then reads "Reader (Dev sub) (max 2h)". Roles with no known cap, or a
-    // cap that doesn't restrict the choices, get nothing so the list stays quiet.
+    // Suffix on an eligible (inactive) row stating the effective activation
+    // cap — "Reader (Dev sub) (max 2h)": the role's own policy value when it
+    // was read, else the service's documented 8h ceiling on Entra ID and group
+    // rows. Only an ARM row with an unreadable policy stays quiet (ARM has no
+    // documented ceiling to print).
     private static string CapMarker(UnifiedEligibleRole role)
     {
         var hint = ActivationDurationChoices.CapHint(role);
