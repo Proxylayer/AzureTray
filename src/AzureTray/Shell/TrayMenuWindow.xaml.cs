@@ -94,13 +94,16 @@ public partial class TrayMenuWindow : Window
     //
     // The ListBox hides its scrollbar; instead two small ▲ / ▼ borders
     // appear at the top/bottom of the menu when there's more to scroll.
-    // Hovering an arrow starts a 50ms DispatcherTimer that scrolls 40 DIP
-    // per tick (a smooth auto-scroll); MouseLeave stops the timer.
+    // Hovering an arrow starts a DispatcherTimer that scrolls a little per
+    // tick (a smooth auto-scroll); MouseLeave stops the timer.
 
-    // ~1 row per tick at 300ms keeps auto-scroll readable — at 50ms it
-    // jumped to the end before the user could react.
-    private const double ScrollStepDip = 40;
-    private static readonly TimeSpan ScrollTickInterval = TimeSpan.FromMilliseconds(300);
+    // Small steps on a fast tick glide at ~60 DIP/s — roughly two rows a
+    // second, slow enough to stop on the row you want. Earlier tunings
+    // moved a row-and-a-half per visible lurch (40 DIP at 300ms) and were
+    // reported as far too fast; the per-tick step is also what the initial
+    // hover jumps, so it must stay small.
+    private const double ScrollStepDip = 3;
+    private static readonly TimeSpan ScrollTickInterval = TimeSpan.FromMilliseconds(50);
 
     private ScrollViewer? _itemsScroll;
     private DispatcherTimer? _scrollTimer;
