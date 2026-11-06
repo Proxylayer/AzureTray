@@ -34,6 +34,7 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
 
     private IPluginContext? _context;
     private LapsGraphClient? _graph;
+    private FavoritesStore? _favorites;
     private CancellationTokenSource? _lifetimeCts;
 
     // Test override for the configured delay; null = derive from the option.
@@ -245,17 +246,29 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
 
             if (tenantHeader is not null) rows.Add(new PluginMenuItem(tenantHeader, IsEnabled: false));
 
-            foreach (var device in filtered)
+            // Starred devices float to the top of their tenant's list (stable
+            // sort keeps the fetch order within each half) — and, ordered
+            // before the MaxResultsPerMenu cut below, a favorite is never the
+            // row that truncation drops.
+            var favorites = _favorites;
+            var ordered = favorites is null
+                ? filtered
+                : filtered.OrderBy(d => favorites.Contains(DeviceKey(state.Tenant.TenantId, d)) ? 0 : 1).ToList();
+
+            foreach (var device in ordered)
             {
                 if (matched >= MaxResultsPerMenu) { truncated = true; break; }
                 var captured = device;
                 var tenantId = state.Tenant.TenantId;
                 var capturedState = state;
+                var deviceKey = DeviceKey(tenantId, captured);
                 rows.Add(new PluginMenuItem(
                     Text: multiTenant
                         ? $"{captured.DisplayName} — {state.Tenant.DisplayName}"
                         : captured.DisplayName,
                     Invoke: () => _ = CopyPasswordAsync(tenantId, captured),
+                    IsFavorite: favorites?.Contains(deviceKey),
+                    OnToggleFavorite: favorites is null ? null : () => favorites.Toggle(deviceKey),
                     // Right-click secondary actions. Left-click still copies the
                     // password; these add the device name and an explicit refresh.
                     ContextItems: new[]
@@ -272,7 +285,7 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
                             KeepMenuOpen: true,
                             Invoke: () => _ = LoadDevicesAsync(capturedState)),
                     })
-                { Key = $"laps.device.{tenantId}.{captured.DirectoryRecordId}" });
+                { Key = deviceKey });
                 matched++;
             }
 
@@ -294,6 +307,12 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
         return rows;
     }
 
+    // Stable row identity (host re-anchoring and the favorites store):
+    // tenant + the device's directory record id, which outlives display-name
+    // changes.
+    private static string DeviceKey(string tenantId, LapsDevice device)
+        => $"laps.device.{tenantId}.{device.DirectoryRecordId}";
+
     private void AddRetry(List<PluginMenuItem> rows, TenantDevices state)
     {
         rows.Add(new PluginMenuItem(
@@ -308,6 +327,7 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
     {
         _context = context;
         _graph = new LapsGraphClient(context);
+        _favorites = new FavoritesStore(context);
         _lifetimeCts = new CancellationTokenSource();
 
         LogHostCompatibility(context);
@@ -602,6 +622,7 @@ public sealed class LapsPlugin : ITrayPlugin, IMenuChangeNotifier, IPluginConfig
         _lifetimeCts?.Cancel();
         _devicesByTenant.Clear();
         _graph = null;
+        _favorites = null;
         _context = null;
         _lifetimeCts?.Dispose();
         _lifetimeCts = null;

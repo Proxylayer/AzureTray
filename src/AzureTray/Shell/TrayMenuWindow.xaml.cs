@@ -199,8 +199,34 @@ public partial class TrayMenuWindow : Window
         if (_searchProvider is null) return;
         if (sender is not System.Windows.Controls.TextBox box) return;
 
+        var query = box.Text ?? string.Empty;
+
+        // The window is SizeToContent, so every keystroke's shrinking result
+        // set would snap the popup smaller (and backspace would grow it
+        // back) — the menu visibly jumps around while typing. Freeze the
+        // window at its pre-filter size for as long as a query is active,
+        // BEFORE swapping Items so the full-list size is what's captured.
+        // Clearing the box hands sizing back to SizeToContent, which matters
+        // beyond search: an in-place MenuChanged refresh (e.g. devices
+        // finishing their load) may legitimately need the idle menu to grow.
+        if (query.Length > 0)
+        {
+            if (SizeToContent != SizeToContent.Manual)
+            {
+                Width = ActualWidth;
+                Height = ActualHeight;
+                SizeToContent = SizeToContent.Manual;
+            }
+        }
+        else if (SizeToContent == SizeToContent.Manual)
+        {
+            SizeToContent = SizeToContent.WidthAndHeight;
+            Width = double.NaN;
+            Height = double.NaN;
+        }
+
         IReadOnlyList<PluginMenuItem> results;
-        try { results = _searchProvider(box.Text ?? string.Empty); }
+        try { results = _searchProvider(query); }
         catch { return; }
 
         Items.Clear();

@@ -59,6 +59,7 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _watcherLock = new();
     private IPluginContext? _context;
+    private FavoritesStore? _favorites;
     private CancellationTokenSource? _lifetimeCts;
 
     // Iteration helpers used by menu builders. Snapshots under the lock so the
@@ -294,19 +295,20 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
 
         target.Add(new PluginMenuItem(sourceLabel, IsEnabled: false));
 
-        foreach (var role in roles)
+        // Starred roles float to the top of their source group. OrderBy is a
+        // stable sort, so the alphabetical order from BuildOpenRequestRows is
+        // preserved inside both the starred and unstarred halves.
+        var favorites = _favorites;
+        var ordered = favorites is null
+            ? roles
+            : roles.OrderBy(r => favorites.Contains(RoleKey(watcher, r)) ? 0 : 1).ToList();
+
+        foreach (var role in ordered)
         {
             var r = role;
-
-            // Stable re-anchoring identity: tenant + source + role definition +
-            // the scope the eligibility applies at. Role names alone collide
-            // (same role at multiple scopes) and change form when the
-            // active/cap markers come and go. Exactly one of the three scope
-            // members is set per source — ArmScope for Azure RBAC,
-            // DirectoryScopeId for Entra ID, GroupId for a group row, whose
-            // role definition is only ever "member" or "owner" and so cannot
-            // carry the identity by itself.
-            var roleKey = $"pim.role.{watcher.TenantId}.{r.Source}.{r.RoleDefinitionId}.{r.ArmScope ?? r.DirectoryScopeId ?? r.GroupId ?? "/"}";
+            var roleKey = RoleKey(watcher, r);
+            bool? isFavorite = favorites?.Contains(roleKey);
+            Action? toggleFavorite = favorites is null ? null : () => favorites.Toggle(roleKey);
 
             // Right-click "Copy role name" is offered on every row. Active rows
             // are otherwise non-actionable (the left-click is disabled), so the
@@ -323,6 +325,8 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
                     Text: $"{r.RoleName} ({r.ScopeDisplay}) — {ActiveMarker(active)}",
                     IsEnabled: false,
                     Icon: "✓",
+                    IsFavorite: isFavorite,
+                    OnToggleFavorite: toggleFavorite,
                     ContextItems: new[]
                     {
                         copyName,
@@ -337,11 +341,23 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
                 target.Add(new PluginMenuItem(
                     Text: $"{r.RoleName} ({r.ScopeDisplay}){CapMarker(r)}",
                     Invoke: () => _ = watcher.HandleActivationAsync(r, CancellationToken.None),
+                    IsFavorite: isFavorite,
+                    OnToggleFavorite: toggleFavorite,
                     ContextItems: new[] { copyName })
                 { Key = roleKey });
             }
         }
     }
+
+    // Stable re-anchoring identity: tenant + source + role definition + the
+    // scope the eligibility applies at. Role names alone collide (same role at
+    // multiple scopes) and change form when the active/cap markers come and
+    // go. Exactly one of the three scope members is set per source — ArmScope
+    // for Azure RBAC, DirectoryScopeId for Entra ID, GroupId for a group row,
+    // whose role definition is only ever "member" or "owner" and so cannot
+    // carry the identity by itself. Doubles as the favorites-store key.
+    private static string RoleKey(EligibleRolesWatcher watcher, UnifiedEligibleRole r)
+        => $"pim.role.{watcher.TenantId}.{r.Source}.{r.RoleDefinitionId}.{r.ArmScope ?? r.DirectoryScopeId ?? r.GroupId ?? "/"}";
 
     // Right-hand info on a menu row is baked into the row's Text — the host's
     // row layout has no separate slot for it. Rows with a known end time get a
@@ -425,6 +441,7 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
     public Task InitializeAsync(IPluginContext context, CancellationToken cancellationToken)
     {
         _context = context;
+        _favorites = new FavoritesStore(context);
         _lifetimeCts = new CancellationTokenSource();
 
         LogHostCompatibility(context);
@@ -608,6 +625,7 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         }
 
         _context = null;
+        _favorites = null;
         _lifetimeCts?.Dispose();
         _lifetimeCts = null;
     }
