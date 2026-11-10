@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-11-10
+
+### Added
+
+- **Favorite stars on Open Request roles and LAPS devices** (`AzureTray.Plugin.PIM` 0.13.0 → 0.14.0, `AzureTray.Plugin.LAPS` 0.6.0 → 0.7.0, host). Hovering a role or device row reveals a star; starring it pins the row to the top of its source group (PIM) or tenant list (LAPS). Each plugin persists its stars as a flat key set (`favorites.json` in its data directory) keyed by the rows' stable menu keys, so a favorite survives display-text changes and restarts. In LAPS the favorites sort runs before the max-results cut, so a starred device is never the row truncation drops.
+
+### Fixed
+
+- **The tray menu opens in the right place after moving to monitors with a different scale** (host). `ShowAt` converted the anchor point and menu size with the DPI of the monitor the window was parked on — stale after a dock swap under per-monitor DPI awareness, so the first open on the new monitors landed the menu in the wrong spot. Positioning now re-reads the window's DPI after each pass and repeats until the scale stops changing, and clamping uses the monitor containing the anchor rather than the cursor's monitor (which also fixes keyboard activation with the cursor parked on another screen).
+
+- **Searchable menus no longer shrink on every keystroke** (host). `SizeToContent` re-fit the window to each filtered result set, snapping the popup smaller as a query narrowed. The window is now frozen at its pre-filter size while a query is active, and sizing is handed back to WPF when the box is cleared so an idle menu can still grow on an in-place refresh.
+
 ## [0.14.0] — 2026-10-30
 
 ### Added
