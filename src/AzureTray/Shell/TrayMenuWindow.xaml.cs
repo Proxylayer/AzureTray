@@ -345,10 +345,6 @@ public partial class TrayMenuWindow : Window
         // Layout must complete before we know the size to position above.
         Dispatcher.BeginInvoke(new Action(() =>
         {
-            var dpi = VisualTreeHelper.GetDpi(this);
-            var dipX = screenX / dpi.DpiScaleX;
-            var dipY = screenY / dpi.DpiScaleY;
-
             // CursorOverlap pushes the menu a few DIP toward the cursor so it
             // visibly overlaps the click point. Without this, the cursor lands
             // exactly on the 1 DIP border edge — sub-pixel rounding then judges
@@ -359,23 +355,45 @@ public partial class TrayMenuWindow : Window
             // cursor sits firmly inside the menu's bottom-right corner — the
             // 12 DIP terms below compensate for the shadow's outer margin.
             const double CursorOverlap = 3;
-            if (openAboveAnchor)
+
+            // Per-monitor DPI (PerMonitorV2): GetDpi reports the scale of the
+            // monitor the window currently SITS ON — and right now that is the
+            // off-screen parking spot, or whichever monitor the previous
+            // layout had there. After a dock/monitor change the anchor's
+            // monitor can carry a different scale, and a single positioning
+            // pass with the stale scale lands the menu in the wrong place
+            // (Windows then re-rescales it via WM_DPICHANGED). Setting
+            // Left/Top moves the window synchronously, which updates its DPI,
+            // so: position, re-read the DPI, and re-position until the scale
+            // stops changing (two passes in practice; capped defensively).
+            var dpi = VisualTreeHelper.GetDpi(this);
+            for (var pass = 0; pass < 3; pass++)
             {
-                Left = dipX - ActualWidth + 12 + CursorOverlap;       // right edge sits CursorOverlap DIP past the cursor (cursor is CursorOverlap inside from the right)
-                Top = dipY - ActualHeight + 12 + CursorOverlap;       // bottom edge sits CursorOverlap DIP past the cursor
+                var dipX = screenX / dpi.DpiScaleX;
+                var dipY = screenY / dpi.DpiScaleY;
+
+                if (openAboveAnchor)
+                {
+                    Left = dipX - ActualWidth + 12 + CursorOverlap;   // right edge sits CursorOverlap DIP past the cursor (cursor is CursorOverlap inside from the right)
+                    Top = dipY - ActualHeight + 12 + CursorOverlap;   // bottom edge sits CursorOverlap DIP past the cursor
+                }
+                else
+                {
+                    Left = dipX - 12;
+                    Top = dipY - 12 - CursorOverlap;                  // top edge sits CursorOverlap DIP above the cursor
+                }
+                // openAboveAnchor is the tray-icon click — the anchor (cursor) is
+                // inside the taskbar, BELOW WorkingArea.Bottom. Clamping to the
+                // work area would push the menu's bottom 12+ DIP above the cursor
+                // and the cursor would be considered outside the hit area.
+                // Allow the menu to extend down into the taskbar (still bounded
+                // by screen bounds) so the cursor lands inside the menu.
+                ClampToWorkArea(screenX, screenY, dpi, allowExtendIntoTaskbar: openAboveAnchor);
+
+                var fresh = VisualTreeHelper.GetDpi(this);
+                if (fresh.DpiScaleX == dpi.DpiScaleX && fresh.DpiScaleY == dpi.DpiScaleY) break;
+                dpi = fresh;
             }
-            else
-            {
-                Left = dipX - 12;
-                Top = dipY - 12 - CursorOverlap;                      // top edge sits CursorOverlap DIP above the cursor
-            }
-            // openAboveAnchor is the tray-icon click — the anchor (cursor) is
-            // inside the taskbar, BELOW WorkingArea.Bottom. Clamping to the
-            // work area would push the menu's bottom 12+ DIP above the cursor
-            // and the cursor would be considered outside the hit area.
-            // Allow the menu to extend down into the taskbar (still bounded
-            // by screen bounds) so the cursor lands inside the menu.
-            ClampToWorkArea(allowExtendIntoTaskbar: openAboveAnchor);
             Activate();
             // The list must hold keyboard focus for Up/Down/Enter to work the
             // moment the menu opens. Searchable flyouts are excluded: their
@@ -385,10 +403,13 @@ public partial class TrayMenuWindow : Window
         }), System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
-    private void ClampToWorkArea(bool allowExtendIntoTaskbar = false)
+    // Clamps against the monitor that CONTAINS THE ANCHOR, not the cursor:
+    // keyboard activation can leave the cursor on a different monitor, and
+    // the anchor's monitor is the one whose scale the caller's dpi matches.
+    private void ClampToWorkArea(int anchorX, int anchorY, DpiScale dpi, bool allowExtendIntoTaskbar = false)
     {
-        var screen = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position);
-        var dpi = VisualTreeHelper.GetDpi(this);
+        var screen = System.Windows.Forms.Screen.FromPoint(
+            new System.Drawing.Point(anchorX, anchorY));
         var workLeft = screen.WorkingArea.Left / dpi.DpiScaleX;
         var workTop = screen.WorkingArea.Top / dpi.DpiScaleY;
         var workRight = screen.WorkingArea.Right / dpi.DpiScaleX;
