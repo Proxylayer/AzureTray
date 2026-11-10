@@ -51,7 +51,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write       # for attest-build-provenance
+  id-token: write       # for attest-build-provenance AND NuGet Trusted Publishing (OIDC)
   attestations: write   # for attest-build-provenance
 
 concurrency:
@@ -217,22 +217,37 @@ jobs:
         with:
           subject-path: NuGet/*.nupkg
 
+      # NuGet Trusted Publishing: no long-lived API key. NuGet/login
+      # exchanges this run's GitHub OIDC token (hence id-token: write
+      # above) for a temporary API key, valid ~1 hour, minted against the
+      # Trusted Publishing policy configured on nuget.org (repo owner +
+      # repo + this workflow's file name). NUGET_USER is the nuget.org
+      # profile name the policy lives under — not a secret in the
+      # security sense, just repo-configurable; its absence disables the
+      # push (e.g. on forks) the same way the old key's absence did.
       - name: Check NuGet config
         id: nugetcfg
         if: steps.pick.outputs.any == 'true'
         shell: pwsh
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_USER: ${{ secrets.NUGET_USER }}
         run: |
-          $enabled = -not [string]::IsNullOrWhiteSpace($env:NUGET_API_KEY)
+          $enabled = -not [string]::IsNullOrWhiteSpace($env:NUGET_USER)
           "enabled=$($enabled.ToString().ToLower())" >> $env:GITHUB_OUTPUT
           Write-Host "Push to nuget.org enabled: $enabled"
+
+      - name: NuGet login (OIDC → temp API key)
+        id: nuget_login
+        if: steps.pick.outputs.any == 'true' && steps.nugetcfg.outputs.enabled == 'true'
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
 
       - name: Push to nuget.org
         if: steps.pick.outputs.any == 'true' && steps.nugetcfg.outputs.enabled == 'true'
         shell: pwsh
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
         run: |
           # --skip-duplicate keeps the push idempotent: a branch-push run
           # that didn't bump the csproj's <Version> is a no-op rather than

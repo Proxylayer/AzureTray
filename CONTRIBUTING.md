@@ -109,9 +109,23 @@ git tag -a pim-v0.3.1 -m "PIM 0.3.1"
 git push origin pim-v0.3.1
 ```
 
-The [`publish-plugins.yml`](.github/workflows/publish-plugins.yml) workflow fires on the tag, parses out which plugin (`contracts` / `pim` / `laps`) and which version, builds + packs the plugin's csproj with `/p:Version=<version>` (overriding whatever the csproj's `<Version>` says), attests build provenance, and pushes to nuget.org (when `NUGET_API_KEY` is set). The tag is the version of record.
+The [`publish-plugins.yml`](.github/workflows/publish-plugins.yml) workflow fires on the tag, parses out which plugin (`contracts` / `pim` / `laps`) and which version, builds + packs the plugin's csproj with `/p:Version=<version>` (overriding whatever the csproj's `<Version>` says), attests build provenance, and pushes to nuget.org. The tag is the version of record.
 
 Per-plugin tag prefixes mean the host can keep tagging its own `v0.2.x` releases independently — they don't collide.
+
+> **Heads-up:** push release tags one at a time (or at most three per `git push`). GitHub does not create push events when more than three tags arrive in a single push, so a four-tag push triggers *no* workflows at all — silently.
+
+### NuGet authentication: Trusted Publishing
+
+CI publishes via [NuGet Trusted Publishing](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing) — no long-lived API key is stored anywhere. The `NuGet/login` action exchanges the workflow run's GitHub OIDC token for a temporary API key (valid ~1 hour) that the push step uses. nuget.org validates the OIDC token against a Trusted Publishing policy that pins the GitHub repo owner, repo name, and workflow file name, so only this repository's `publish-plugins.yml` can mint a key.
+
+One-time setup (per nuget.org account that owns the packages):
+
+1. On nuget.org: **account → Trusted Publishing → Add** — Repository Owner `Proxylayer`, Repository `AzureTray`, Workflow File `publish-plugins.yml` (file name only, no `.github/workflows/` prefix), Environment blank.
+2. In the GitHub repo: add an Actions secret `NUGET_USER` holding the nuget.org **profile name** (not email) the policy was created under. It gates the push step the way `NUGET_API_KEY` used to — absent means pack-only, no push.
+3. Delete any remaining `NUGET_API_KEY` secret and revoke the key on nuget.org.
+
+A brand-new policy is only *provisionally* active for 7 days until its first successful publish, after which it is permanent. If the login step fails with `No matching trust policy owned by user '…'`, the policy fields don't match the repo/workflow — including after renaming the workflow file, which breaks the match until the policy is updated.
 
 ### Other ways to publish
 
@@ -130,7 +144,7 @@ Both work. Most plugin authors will pick one and stick with it:
 | Want CI to never touch the csproj and prefer a single decisive gesture | Tag-driven (`pim-vX.Y.Z`) |
 | Need a prerelease (`pim-v0.3.1-preview.1`) | Tag-driven — the workflow takes any `*-v*` tag including prerelease suffixes |
 
-For test-publishing prereleases from a developer machine, see [scripts/publish-plugins-prerelease.ps1](scripts/publish-plugins-prerelease.ps1) — it stamps a `-preview.YYYYMMDDHHMM` suffix on top of each csproj's declared `<Version>`.
+For test-publishing prereleases from a developer machine, see [scripts/publish-plugins-prerelease.ps1](scripts/publish-plugins-prerelease.ps1) — it stamps a `-preview.YYYYMMDDHHMM` suffix on top of each csproj's declared `<Version>`. Trusted Publishing only works from GitHub Actions, so this local path still needs an API key: create a short-lived, push-only key scoped to the three `AzureTray.Plugin.*` package ids when you need it, rather than keeping a standing one.
 
 ## Building a plugin for AzureTray
 
