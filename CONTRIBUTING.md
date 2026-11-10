@@ -122,7 +122,7 @@ CI publishes via [NuGet Trusted Publishing](https://learn.microsoft.com/nuget/nu
 One-time setup (per nuget.org account that owns the packages):
 
 1. On nuget.org: **account → Trusted Publishing → Add** — Repository Owner `Proxylayer`, Repository `AzureTray`, Workflow File `publish-plugins.yml` (file name only, no `.github/workflows/` prefix), Environment blank.
-2. In the GitHub repo: add an Actions secret `NUGET_USER` holding the nuget.org **profile name** (not email) the policy was created under. It gates the push step the way `NUGET_API_KEY` used to — absent means pack-only, no push.
+2. In the GitHub repo: add an Actions secret `NUGET_USER` holding the username of the nuget.org account that **created** the policy — the personal account you sign in as (`jbland`), **not** the `ProxyLayer` package-owner organisation and not an email. Passing the org name fails the token exchange with `No matching trust policy owned by user 'ProxyLayer'`. The secret gates the push step the way `NUGET_API_KEY` used to — absent means pack-only, no push.
 3. Delete any remaining `NUGET_API_KEY` secret and revoke the key on nuget.org.
 
 A brand-new policy is only *provisionally* active for 7 days until its first successful publish, after which it is permanent. If the login step fails with `No matching trust policy owned by user '…'`, the policy fields don't match the repo/workflow — including after renaming the workflow file, which breaks the match until the policy is updated.
