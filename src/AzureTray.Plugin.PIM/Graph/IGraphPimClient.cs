@@ -58,4 +58,9 @@ internal interface IGraphPimClient
 
     Task<string?> GetActivationStatusAsync(
         string requestId, CancellationToken cancellationToken);
+
+    // Cancels a schedule request that is still awaiting approval. The service
+    // refuses (400) once the request is already decided — that surfaces as the
+    // client's normal error exception type.
+    Task CancelActivationAsync(string requestId, CancellationToken cancellationToken);
 }

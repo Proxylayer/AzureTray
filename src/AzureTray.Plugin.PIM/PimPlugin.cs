@@ -82,7 +82,8 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
     private sealed record TenantWatchers(
         PendingApprovalWatcher Pending,
         EligibleRolesWatcher Eligible,
-        PendingActivationWatcher Activations);
+        PendingActivationWatcher Activations,
+        PendingActivationStore PendingActivations);
 
     public string Id => "net.proxylayer.AzureTray.Plugin.PIM";
 
@@ -336,6 +337,33 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
                     })
                 { Key = roleKey });
             }
+            else if (watcher.HasPendingActivationFor(r))
+            {
+                // The user already asked for this role and the request is with
+                // an approver: grey the row so it can't be requested twice.
+                // PendingActivationWatcher flips it back (active or clickable)
+                // when the request is decided.
+                //
+                // Ctrl+click and the "Cancel request and request again…"
+                // context item are the same action — withdraw the pending
+                // request and re-run the activation flow; the context item is
+                // the keyboard/discoverable route onto the greyed row.
+                var cancelAndResubmit = new PluginMenuItem(
+                    Text: "Cancel request and request again…",
+                    Invoke: () => _ = watcher.HandleCancelAndResubmitAsync(r, CancellationToken.None));
+
+                target.Add(new PluginMenuItem(
+                    Text: $"{r.RoleName} ({r.ScopeDisplay}) (pending)",
+                    IsEnabled: false,
+                    Icon: "⏳",
+                    IsFavorite: isFavorite,
+                    OnToggleFavorite: toggleFavorite,
+                    ContextItems: new[] { copyName, cancelAndResubmit })
+                {
+                    Key = roleKey,
+                    CtrlInvoke = () => _ = watcher.HandleCancelAndResubmitAsync(r, CancellationToken.None),
+                });
+            }
             else
             {
                 target.Add(new PluginMenuItem(
@@ -522,6 +550,10 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             // store is created first and shared by both.
             var pendingActivations = new PendingActivationStore(_context, tenant);
 
+            // A request entering or leaving the pending set changes how its
+            // role row renders, so an open menu must rebuild.
+            pendingActivations.Changed += OnPendingActivationsChanged;
+
             // Eligibility runs first so its subscription set is available to
             // the pending watcher's relevant-subs filter (captured by Func).
             var eligible = new EligibleRolesWatcher(
@@ -544,7 +576,7 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
             activations.ActivationProvisioned += OnActivationProvisioned;
             activations.Start(_lifetimeCts.Token);
 
-            _watchersByTenant[tenant.TenantId] = new TenantWatchers(pending, eligible, activations);
+            _watchersByTenant[tenant.TenantId] = new TenantWatchers(pending, eligible, activations, pendingActivations);
             _context.Logger.LogInformation(
                 "Started PIM watchers for tenant {TenantId} ({DisplayName}).",
                 tenant.TenantId, tenant.DisplayName);
@@ -569,7 +601,7 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
 
     // Detaches this plugin's event handlers and stops all three of a tenant's
     // watcher loops. Shared by the per-tenant removal path and shutdown, which
-    // did the same five unsubscribes and three stops verbatim.
+    // did the same unsubscribes and three stops verbatim.
     private async Task DetachAndStopAsync(TenantWatchers entry)
     {
         entry.Pending.PollStarted -= OnWatcherPollStarted;
@@ -577,6 +609,7 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         entry.Eligible.PollStarted -= OnWatcherPollStarted;
         entry.Eligible.PollCompleted -= OnWatcherPollCompleted;
         entry.Activations.ActivationProvisioned -= OnActivationProvisioned;
+        entry.PendingActivations.Changed -= OnPendingActivationsChanged;
 
         await entry.Pending.StopAsync().ConfigureAwait(false);
         await entry.Eligible.StopAsync().ConfigureAwait(false);
@@ -593,6 +626,8 @@ public sealed class PimPlugin : ITrayPlugin, IMenuChangeNotifier, IBadgeProvider
         MenuChanged?.Invoke();
         BadgeChanged?.Invoke();
     }
+
+    private void OnPendingActivationsChanged() => MenuChanged?.Invoke();
 
     private void OnWatcherPollStarted() => MenuChanged?.Invoke();
     private void OnWatcherPollCompleted()

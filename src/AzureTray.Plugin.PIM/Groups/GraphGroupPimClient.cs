@@ -414,6 +414,21 @@ internal sealed class GraphGroupPimClient : GraphHttpClientBase, IGraphGroupPimC
         return status?.Status;
     }
 
+    // Cancels a schedule request that is still awaiting approval (Graph answers
+    // 204). Once the request is already decided the service refuses with a 400,
+    // which surfaces as the usual HttpRequestException carrying Graph's body.
+    public async Task CancelActivationAsync(string requestId, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        await PostEmptyAsync(
+            $"{Root}/assignmentScheduleRequests/{requestId}/cancel",
+            cancellationToken).ConfigureAwait(false);
+
+        Logger.LogInformation(
+            "Cancelled group activation request {RequestId} on tenant {TenantId}.",
+            requestId, TenantId);
+    }
+
     // Fills in the display name on every row whose group was not expanded,
     // whichever resource the rows came from — an eligibility instance and an
     // activation request carry the same Group/GroupId pair and want the same

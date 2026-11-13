@@ -198,6 +198,127 @@ public sealed class EligibleRolesWatcherActivationTrackingTests : IDisposable
         Assert.Equal("req-1", Assert.Single(reloaded.Current).RequestId);
     }
 
+    // The tracked entry carries the identity of the row it was submitted from,
+    // so the menu can grey that row "(pending)".
+    [Fact]
+    public async Task HandleActivationAsync_Entra_PendingApproval_RecordsTheRoleIdentity()
+    {
+        var graph = NewGraph();
+        graph.ActivateRoleAsync(
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<TimeSpan>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(GraphRequest("req-1", "PendingApproval"));
+
+        var (watcher, store) = NewWatcher(graph, NewArm());
+        var role = EntraRole();
+
+        await watcher.HandleActivationAsync(role, CancellationToken.None);
+
+        var tracked = Assert.Single(store.Current);
+        Assert.Equal("role-owner", tracked.RoleDefinitionId);
+        Assert.Equal(role.DirectoryScopeId, tracked.DirectoryScopeId);
+        Assert.Null(tracked.GroupId);
+    }
+
+    [Fact]
+    public void HasPendingActivationFor_IsFalse_BeforeAnythingIsTracked()
+    {
+        var (watcher, _) = NewWatcher(NewGraph(), NewArm());
+
+        Assert.False(watcher.HasPendingActivationFor(EntraRole()));
+    }
+
+    [Fact]
+    public async Task HasPendingActivationFor_IsTrue_ForTheSubmittedRole_AfterPendingApproval()
+    {
+        var graph = NewGraph();
+        graph.ActivateRoleAsync(
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<TimeSpan>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(GraphRequest("req-1", "PendingApproval"));
+
+        var (watcher, _) = NewWatcher(graph, NewArm());
+
+        await watcher.HandleActivationAsync(EntraRole(), CancellationToken.None);
+
+        Assert.True(watcher.HasPendingActivationFor(EntraRole()));
+    }
+
+    [Fact]
+    public async Task HasPendingActivationFor_IsFalse_ForADifferentRole()
+    {
+        var graph = NewGraph();
+        graph.ActivateRoleAsync(
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<TimeSpan>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(GraphRequest("req-1", "PendingApproval"));
+
+        var (watcher, _) = NewWatcher(graph, NewArm());
+
+        await watcher.HandleActivationAsync(EntraRole(), CancellationToken.None);
+
+        Assert.False(watcher.HasPendingActivationFor(
+            EntraRole() with { RoleDefinitionId = "role-reader", RoleName = "Reader" }));
+    }
+
+    // FindPendingActivationFor is what HasPendingActivationFor wraps — and what
+    // cancel-and-resubmit uses to get at the tracked request id.
+    [Fact]
+    public async Task FindPendingActivationFor_ReturnsTheTrackedRequest_ForTheSubmittedRole()
+    {
+        var graph = NewGraph();
+        graph.ActivateRoleAsync(
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<TimeSpan>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(GraphRequest("req-1", "PendingApproval"));
+
+        var (watcher, _) = NewWatcher(graph, NewArm());
+
+        await watcher.HandleActivationAsync(EntraRole(), CancellationToken.None);
+
+        var found = watcher.FindPendingActivationFor(EntraRole());
+        Assert.NotNull(found);
+        Assert.Equal("req-1", found!.RequestId);
+    }
+
+    [Fact]
+    public async Task FindPendingActivationFor_ReturnsNull_ForADifferentRole()
+    {
+        var graph = NewGraph();
+        graph.ActivateRoleAsync(
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<TimeSpan>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(GraphRequest("req-1", "PendingApproval"));
+
+        var (watcher, _) = NewWatcher(graph, NewArm());
+
+        await watcher.HandleActivationAsync(EntraRole(), CancellationToken.None);
+
+        Assert.Null(watcher.FindPendingActivationFor(
+            EntraRole() with { RoleDefinitionId = "role-reader", RoleName = "Reader" }));
+    }
+
+    // When the approval is decided, PendingActivationWatcher stops tracking the
+    // request and the row must flip back.
+    [Fact]
+    public async Task HasPendingActivationFor_IsFalseAgain_AfterStopTracking()
+    {
+        var graph = NewGraph();
+        graph.ActivateRoleAsync(
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<TimeSpan>(),
+                Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(GraphRequest("req-1", "PendingApproval"));
+
+        var (watcher, store) = NewWatcher(graph, NewArm());
+
+        await watcher.HandleActivationAsync(EntraRole(), CancellationToken.None);
+        Assert.True(watcher.HasPendingActivationFor(EntraRole()));
+
+        store.StopTracking("req-1");
+
+        Assert.False(watcher.HasPendingActivationFor(EntraRole()));
+    }
+
     // ---- builders ---------------------------------------------------------
 
     private static UnifiedEligibleRole EntraRole()

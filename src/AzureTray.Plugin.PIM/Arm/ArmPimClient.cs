@@ -292,6 +292,27 @@ internal sealed class ArmPimClient : PimHttpClientBase, IArmPimClient
         return status?.Properties?.Status;
     }
 
+    // Cancels a schedule request that is still awaiting approval. Once the
+    // request is already decided ARM refuses with a 400, which surfaces as the
+    // usual HttpRequestException carrying ARM's error body.
+    public async Task CancelActivationAsync(
+        string scope, string requestId, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(scope);
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+
+        var prefix = NormalizeScope(scope);
+        var url =
+            $"{prefix}providers/Microsoft.Authorization/roleAssignmentScheduleRequests/{requestId}/cancel" +
+            $"?api-version={AuthorizationApi}";
+
+        await PostEmptyAsync(url, cancellationToken).ConfigureAwait(false);
+
+        Logger.LogInformation(
+            "Cancelled ARM activation request {RequestId} at {Scope} (tenant {TenantId}).",
+            requestId, scope, TenantId);
+    }
+
     // ---- helpers ----------------------------------------------------------
 
     // PUT to roleAssignmentScheduleRequests/{requestId}, where requestId is a

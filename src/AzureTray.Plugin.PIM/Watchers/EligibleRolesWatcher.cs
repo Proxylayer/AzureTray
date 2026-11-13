@@ -112,6 +112,23 @@ internal sealed class EligibleRolesWatcher : PollingWatcher
         return null;
     }
 
+    // True when the signed-in user already has an activation request for this
+    // row sitting with an approver. The menu greys such rows "(pending)" so a
+    // second request isn't submitted on top of the first.
+    public bool HasPendingActivationFor(UnifiedEligibleRole role)
+        => FindPendingActivationFor(role) is not null;
+
+    // The tracked request behind a "(pending)" row, or null when none of the
+    // user's pending activations was submitted from this row.
+    public PendingActivationRequest? FindPendingActivationFor(UnifiedEligibleRole role)
+    {
+        foreach (var request in _pendingActivations.Current)
+        {
+            if (request.MatchesRole(role)) return request;
+        }
+        return null;
+    }
+
     // Subscription IDs where the signed-in user has at least one ARM eligible
     // role. PendingApprovalWatcher reads this to skip subscriptions where the
     // user has no role to activate — cuts ARM fan-out from "every sub in the
@@ -552,7 +569,10 @@ internal sealed class EligibleRolesWatcher : PollingWatcher
             RoleName: role.RoleName,
             ScopeDisplay: role.ScopeDisplay,
             ArmScope: role.ArmScope,
-            SubmittedAt: DateTimeOffset.UtcNow));
+            SubmittedAt: DateTimeOffset.UtcNow,
+            RoleDefinitionId: role.RoleDefinitionId,
+            DirectoryScopeId: role.DirectoryScopeId,
+            GroupId: role.GroupId));
     }
 
     internal async Task HandleDeactivationAsync(UnifiedEligibleRole role, CancellationToken cancellationToken)
@@ -659,6 +679,89 @@ internal sealed class EligibleRolesWatcher : PollingWatcher
                 role.RoleName, Tenant.TenantId);
             await NotifyOperationErrorAsync("Deactivation", role, ExtractHeadline(ex), ex, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    // Ctrl+click (or the context item) on a "(pending)" row: withdraw the request
+    // sitting with the approver and start a fresh activation. The request is
+    // re-resolved at invoke time — the menu row may be stale — and the fresh
+    // activation only starts after the cancel succeeded, so a request the approver
+    // already decided is never doubled up.
+    internal async Task HandleCancelAndResubmitAsync(UnifiedEligibleRole role, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var request = FindPendingActivationFor(role);
+            if (request is null)
+            {
+                Context.Logger.LogDebug(
+                    "Cancel-and-resubmit on {RoleName} (tenant {TenantId}) found no pending request; the row was stale.",
+                    role.RoleName, Tenant.TenantId);
+                return;
+            }
+
+            var confirm = await Context.Notifier.ShowAsync(
+                new YesNoRequest(
+                    Title: $"Cancel request for {role.RoleName}?",
+                    Message: $"Withdraw the request awaiting approval on {role.ScopeDisplay} and submit a new one."),
+                cancellationToken).ConfigureAwait(false);
+
+            if (confirm is not YesNoResult { Accepted: true })
+            {
+                Context.Logger.LogDebug(
+                    "Cancel-and-resubmit declined at confirm prompt for {RoleName} on tenant {TenantId}.",
+                    role.RoleName, Tenant.TenantId);
+                return;
+            }
+
+            try
+            {
+                switch (request.Source)
+                {
+                    case PimSource.EntraId:
+                        await _graph.CancelActivationAsync(request.RequestId, cancellationToken).ConfigureAwait(false);
+                        break;
+
+                    case PimSource.AzureRbac:
+                        if (string.IsNullOrWhiteSpace(request.ArmScope))
+                        {
+                            Context.Logger.LogError(
+                                "Pending ARM request {RequestId} for {RoleName} on tenant {TenantId} has no scope; cannot cancel.",
+                                request.RequestId, role.RoleName, Tenant.TenantId);
+                            await NotifyOperationErrorAsync("Cancellation", role, "Could not cancel the pending request — it has no ARM scope to act on.", ex: null, cancellationToken).ConfigureAwait(false);
+                            return;
+                        }
+                        await _arm.CancelActivationAsync(request.ArmScope!, request.RequestId, cancellationToken).ConfigureAwait(false);
+                        break;
+
+                    case PimSource.EntraGroup:
+                        await _groups.CancelActivationAsync(request.RequestId, cancellationToken).ConfigureAwait(false);
+                        break;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Leave the request tracked: the status poll will reconcile —
+                // a request the approver decided in the meantime flips the row
+                // on its own, and an actually-still-pending one stays greyed
+                // rather than inviting a duplicate submission.
+                Context.Logger.LogError(
+                    ex,
+                    "Cancelling pending request {RequestId} for {RoleName} on tenant {TenantId} failed.",
+                    request.RequestId, role.RoleName, Tenant.TenantId);
+                await NotifyOperationErrorAsync("Cancellation", role, $"Could not cancel the pending request — {ExtractHeadline(ex)}", ex, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            // Untrack first so the re-rendered menu stops greying the row,
+            // then run the normal activation flow (duration + justification).
+            _pendingActivations.StopTracking(request.RequestId);
+            Context.Logger.LogInformation(
+                "Cancelled pending request {RequestId} for {RoleName} on tenant {TenantId}; starting a fresh activation.",
+                request.RequestId, role.RoleName, Tenant.TenantId);
+
+            await HandleActivationAsync(role, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { /* shutdown */ }
     }
 
     private Task NotifyActivationErrorAsync(
