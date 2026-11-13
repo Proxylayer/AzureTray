@@ -644,6 +644,16 @@ public partial class TrayMenuWindow : Window
         if (row?.DataContext is not PluginMenuItem item) return;
         if (item.IsSeparator) return;
 
+        // Ctrl+click is the CtrlInvoke route: like ContextItems it works even
+        // on a disabled (greyed) row, so it must be decided before the
+        // IsEnabled gate below. Exactly Control — Ctrl+Shift etc. fall through
+        // to the normal handling.
+        if (Keyboard.Modifiers == ModifierKeys.Control && item.CtrlInvoke is not null)
+        {
+            InvokeAndDismiss(item, item.CtrlInvoke);
+            return;
+        }
+
         if (!item.IsEnabled) return;
 
         if (item.HasChildren)
@@ -766,8 +776,14 @@ public partial class TrayMenuWindow : Window
     }
 
     private void InvokeAndDismiss(PluginMenuItem item)
+        => InvokeAndDismiss(item, item.Invoke);
+
+    // Shared by the plain Invoke path and the Ctrl+click/Ctrl+Enter CtrlInvoke
+    // path: same try/catch logging and same KeepMenuOpen handling, whichever
+    // action the row fired.
+    private void InvokeAndDismiss(PluginMenuItem item, Action? action)
     {
-        try { item.Invoke?.Invoke(); }
+        try { action?.Invoke(); }
         catch (Exception ex)
         {
             // Plugin owns its own error handling; never let one tear down
@@ -856,6 +872,19 @@ public partial class TrayMenuWindow : Window
                 e.Handled = true;
                 return;
 
+            case Key.Return when Keyboard.Modifiers == ModifierKeys.Control:
+                // Keyboard twin of Ctrl+click: fires the row's CtrlInvoke,
+                // which — like Shift+F10's context popup — also works on a
+                // disabled row. Rows without a CtrlInvoke fall through
+                // unconsumed, keeping plain-Return semantics untouched.
+                if (onFavoriteToggle) return;
+                NotifyKeyboardActivation();
+                if (CtrlActivateRowAt(inSearchBox ? SelectedOrFirstIndex() : ItemsList.SelectedIndex))
+                {
+                    e.Handled = true;
+                }
+                return;
+
             case Key.Return:
                 if (onFavoriteToggle) return;
                 NotifyKeyboardActivation();
@@ -938,6 +967,20 @@ public partial class TrayMenuWindow : Window
 
         if (item.Invoke is null) return false;
         InvokeAndDismiss(item);
+        return true;
+    }
+
+    // Ctrl+Enter: fire the selected row's CtrlInvoke through the same
+    // dismissal path a Ctrl+click takes. Unlike ActivateRowAt this ignores
+    // IsEnabled — CtrlInvoke is a secondary route onto greyed rows — but a row
+    // without one is left unconsumed.
+    private bool CtrlActivateRowAt(int index)
+    {
+        if (!MenuKeyboardNavigation.IsSelectable(Items, index)) return false;
+        var item = Items[index];
+        if (item.CtrlInvoke is null) return false;
+
+        InvokeAndDismiss(item, item.CtrlInvoke);
         return true;
     }
 

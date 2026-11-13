@@ -153,6 +153,86 @@ public sealed class PendingActivationStoreTests : IDisposable
         Assert.Single(store.Current);
     }
 
+    // Changed is what tells the plugin to re-render the menu — it must fire
+    // exactly when the tracked set actually changed, and never on a no-op.
+
+    [Fact]
+    public void Changed_Fires_WhenTrackAddsAnEntry()
+    {
+        var store = new PendingActivationStore(NewContext(), Tenant);
+        var raised = 0;
+        store.Changed += () => raised++;
+
+        store.Track(Request("req-1", PimSource.EntraId, null, DateTimeOffset.UtcNow));
+
+        Assert.Equal(1, raised);
+    }
+
+    [Fact]
+    public void Changed_DoesNotFire_OnDuplicateTrack()
+    {
+        var store = new PendingActivationStore(NewContext(), Tenant);
+        store.Track(Request("req-1", PimSource.EntraId, null, DateTimeOffset.UtcNow));
+        var raised = 0;
+        store.Changed += () => raised++;
+
+        store.Track(Request("req-1", PimSource.EntraId, null, DateTimeOffset.UtcNow));
+
+        Assert.Equal(0, raised);
+    }
+
+    [Fact]
+    public void Changed_Fires_WhenStopTrackingRemovesAnEntry()
+    {
+        var store = new PendingActivationStore(NewContext(), Tenant);
+        store.Track(Request("req-1", PimSource.EntraId, null, DateTimeOffset.UtcNow));
+        var raised = 0;
+        store.Changed += () => raised++;
+
+        store.StopTracking("req-1");
+
+        Assert.Equal(1, raised);
+    }
+
+    [Fact]
+    public void Changed_DoesNotFire_WhenStopTrackingMissesTheId()
+    {
+        var store = new PendingActivationStore(NewContext(), Tenant);
+        store.Track(Request("req-1", PimSource.EntraId, null, DateTimeOffset.UtcNow));
+        var raised = 0;
+        store.Changed += () => raised++;
+
+        store.StopTracking("req-nope");
+
+        Assert.Equal(0, raised);
+    }
+
+    [Fact]
+    public void Changed_Fires_WhenDropOlderThanDropsSomething()
+    {
+        var store = new PendingActivationStore(NewContext(), Tenant);
+        store.Track(Request("req-old", PimSource.EntraId, null, DateTimeOffset.UtcNow.AddHours(-25)));
+        var raised = 0;
+        store.Changed += () => raised++;
+
+        store.DropOlderThan(TimeSpan.FromHours(24));
+
+        Assert.Equal(1, raised);
+    }
+
+    [Fact]
+    public void Changed_DoesNotFire_WhenDropOlderThanDropsNothing()
+    {
+        var store = new PendingActivationStore(NewContext(), Tenant);
+        store.Track(Request("req-new", PimSource.EntraId, null, DateTimeOffset.UtcNow));
+        var raised = 0;
+        store.Changed += () => raised++;
+
+        store.DropOlderThan(TimeSpan.FromHours(24));
+
+        Assert.Equal(0, raised);
+    }
+
     // ---- helpers ----------------------------------------------------------
 
     private string StorePath => Path.Combine(_dataDir, $"pending-activations-{Tenant.TenantId}.json");

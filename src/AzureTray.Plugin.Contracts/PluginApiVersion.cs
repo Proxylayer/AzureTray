@@ -32,7 +32,7 @@ public static class PluginApiVersion
     /// The newest contract version. New plugins should declare this in
     /// <see cref="ITrayPlugin.ApiVersion"/>.
     /// </summary>
-    public const int Current = 5;
+    public const int Current = 6;
 
     /// <summary>
     /// The oldest contract version the host still loads. Raise this only when

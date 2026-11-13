@@ -28,6 +28,10 @@ internal sealed class PendingActivationStore
         Load();
     }
 
+    // Raised after the tracked set changes so the host can re-render an open
+    // menu — a row flips to/from "(pending)".
+    public event Action? Changed;
+
     public IReadOnlyList<PendingActivationRequest> Current
     {
         get { lock (_gate) return _byRequestId.Values.ToArray(); }
@@ -46,6 +50,7 @@ internal sealed class PendingActivationStore
             "Tracking pending PIM activation {RequestId} ({RoleName} on {Scope}) for tenant {TenantId}.",
             request.RequestId, request.RoleName, request.ScopeDisplay, _tenant.TenantId);
         Save();
+        Changed?.Invoke();
     }
 
     public void StopTracking(string requestId)
@@ -55,6 +60,7 @@ internal sealed class PendingActivationStore
             if (!_byRequestId.Remove(requestId)) return;
         }
         Save();
+        Changed?.Invoke();
     }
 
     // Drops entries older than maxAge so an approval that is never actioned
@@ -78,6 +84,7 @@ internal sealed class PendingActivationStore
                 entry.RequestId, entry.RoleName, _tenant.TenantId, maxAge.TotalHours);
         }
         Save();
+        Changed?.Invoke();
         return stale.Count;
     }
 

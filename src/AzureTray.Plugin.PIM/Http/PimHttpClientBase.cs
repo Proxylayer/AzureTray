@@ -84,6 +84,16 @@ internal abstract class PimHttpClientBase
         return await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken);
     }
 
+    // POST with no body, for action endpoints (e.g. ".../cancel") whose only
+    // meaningful reply is the status code. Success is any 2xx; failures carry
+    // the service's error body like every other helper here.
+    protected async Task PostEmptyAsync(string url, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+        using var response = await SendAsync(request, cancellationToken);
+        await EnsureSuccessOrThrowWithBodyAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
     protected async Task PatchJsonAsync(string url, object body, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Patch, url)

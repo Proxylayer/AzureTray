@@ -57,6 +57,11 @@ namespace AzureTray.Plugin.Contracts;
 /// the popup, with a UIA hint announcing the route) while Enter/Space stay
 /// no-ops, so plugins may safely put a disabled row's only actions here.
 /// </para>
+/// <para>
+/// <see cref="CtrlInvoke"/> fires on Ctrl+left-click (or Ctrl+Enter) and, like
+/// <see cref="ContextItems"/>, works even when <see cref="IsEnabled"/> is
+/// <c>false</c> — a secondary route onto an otherwise inert row.
+/// </para>
 /// </remarks>
 public sealed record PluginMenuItem(
     string Text,
@@ -84,6 +89,16 @@ public sealed record PluginMenuItem(
     /// "(n)" count suffix. Values only need to be unique among siblings.
     /// </summary>
     public string? Key { get; init; }
+
+    /// <summary>
+    /// Optional action fired when the row is left-clicked with Ctrl held (or
+    /// activated with Ctrl+Enter). Unlike <see cref="Invoke"/> it also works when
+    /// <see cref="IsEnabled"/> is <c>false</c> — like <see cref="ContextItems"/>,
+    /// it is a secondary route onto an otherwise inert row (e.g. "cancel the
+    /// pending request behind this greyed row"). Plain clicks on a disabled row
+    /// remain no-ops.
+    /// </summary>
+    public Action? CtrlInvoke { get; init; }
 
     /// <summary>A pre-built horizontal divider. Use instead of constructing manually.</summary>
     public static PluginMenuItem Separator { get; } = new(string.Empty, IsSeparator: true);
